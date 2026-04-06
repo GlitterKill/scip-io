@@ -63,25 +63,35 @@ SCIP-IO will also pick up any of these binaries already on your system `PATH` be
 ### High-level pipeline
 
 ```mermaid
-flowchart LR
-    A[Project Root] --> B[Detect Languages]
-    B --> C[Resolve Indexers<br/>from Registry]
-    C --> D[Ensure Indexers<br/>Installed]
-    D --> E[Run Indexers<br/>in parallel]
-    E --> F[Per-language<br/>.scip files]
-    F --> G[Merge]
-    G --> H[(index.scip)]
-    H --> I[Validate]
+flowchart TB
+    subgraph Row1[" "]
+        direction LR
+        A[Project Root] --> B[Detect<br/>Languages]
+        B --> C[Resolve Indexers<br/>from Registry]
+        C --> D[Ensure Indexers<br/>Installed]
+        D --> E[Run Indexers<br/>in parallel]
+    end
 
-    style A fill:#1e2336,stroke:#00ffcc,color:#fff
-    style B fill:#1e2336,stroke:#00ffcc,color:#fff
-    style C fill:#1e2336,stroke:#00ffcc,color:#fff
-    style D fill:#1e2336,stroke:#00ffcc,color:#fff
-    style E fill:#1e2336,stroke:#00ffcc,color:#fff
-    style F fill:#1e2336,stroke:#8b5cf6,color:#fff
-    style G fill:#1e2336,stroke:#ff00aa,color:#fff
-    style H fill:#0a0e1b,stroke:#ff00aa,color:#ff00aa
-    style I fill:#1e2336,stroke:#00ffcc,color:#fff
+    subgraph Row2[" "]
+        direction LR
+        F[Per-language<br/>.scip files] --> G[Merge]
+        G --> H[(index.scip)]
+        H --> I[Validate]
+    end
+
+    E --> F
+
+    style Row1 fill:transparent,stroke:transparent
+    style Row2 fill:transparent,stroke:transparent
+    style A fill:#1e2336,stroke:#00ffcc,stroke-width:2px,color:#fff
+    style B fill:#1e2336,stroke:#00ffcc,stroke-width:2px,color:#fff
+    style C fill:#1e2336,stroke:#00ffcc,stroke-width:2px,color:#fff
+    style D fill:#1e2336,stroke:#00ffcc,stroke-width:2px,color:#fff
+    style E fill:#1e2336,stroke:#00ffcc,stroke-width:2px,color:#fff
+    style F fill:#1e2336,stroke:#8b5cf6,stroke-width:2px,color:#fff
+    style G fill:#1e2336,stroke:#ff00aa,stroke-width:2px,color:#fff
+    style H fill:#0a0e1b,stroke:#ff00aa,stroke-width:3px,color:#ff00aa
+    style I fill:#1e2336,stroke:#00ffcc,stroke-width:2px,color:#fff
 ```
 
 ### Language detection
@@ -157,15 +167,45 @@ flowchart LR
 
 ---
 
-## Getting Started
+## Installation
 
-### Prerequisites
+### Quick install (CLI)
 
-- **Rust** (stable, 1.80+) — [rustup.rs](https://rustup.rs)
-- **Language toolchains** for whatever you plan to index (e.g. `node` for TypeScript/JavaScript/Python indexers, `dotnet` for C#, a JVM for Java/Scala). SCIP-IO will tell you exactly what's missing.
-- **(GUI only)** [Tauri 2 prerequisites](https://v2.tauri.app/start/prerequisites/) — primarily WebView2 on Windows.
+**Linux / macOS:**
 
-### Install from source
+```sh
+curl -LsSf https://github.com/GlitterKill/scip-io/releases/latest/download/install.sh | sh
+```
+
+**Windows (PowerShell):**
+
+```powershell
+irm https://github.com/GlitterKill/scip-io/releases/latest/download/install.ps1 | iex
+```
+
+Both scripts download the right binary for your OS/architecture, extract it to a user-writable location (`~/.local/bin` or `%LOCALAPPDATA%\scip-io\bin`), and update your `PATH`.
+
+### Manual download
+
+Grab the right file for your platform from the [latest release](https://github.com/GlitterKill/scip-io/releases/latest):
+
+| Platform                       | File                                                       |
+|--------------------------------|------------------------------------------------------------|
+| **CLI — Windows x64**          | `scip-io-vX.Y.Z-x86_64-pc-windows-msvc.zip`                |
+| **CLI — macOS x64 (Intel)**    | `scip-io-vX.Y.Z-x86_64-apple-darwin.tar.gz`                |
+| **CLI — macOS ARM (Silicon)**  | `scip-io-vX.Y.Z-aarch64-apple-darwin.tar.gz`               |
+| **CLI — Linux x64**            | `scip-io-vX.Y.Z-x86_64-unknown-linux-gnu.tar.gz`           |
+| **GUI — Windows installer**    | `SCIP-IO_X.Y.Z_x64-setup.exe` or `SCIP-IO_X.Y.Z_x64_en-US.msi` |
+| **GUI — macOS disk image**     | `SCIP-IO_X.Y.Z_x64.dmg` / `SCIP-IO_X.Y.Z_aarch64.dmg`      |
+| **GUI — Linux package**        | `scip-io_X.Y.Z_amd64.deb` or `scip-io_X.Y.Z_amd64.AppImage` |
+
+Verify your download with `SHA256SUMS.txt` attached to the release.
+
+> **Heads up — unsigned binaries:** Until SCIP-IO is code-signed, Windows SmartScreen will warn "unrecognized app" (click **More info → Run anyway**) and macOS Gatekeeper will block first launch (right-click the app → **Open**, then confirm).
+
+### Build from source
+
+Requires **Rust stable 1.80+** ([rustup.rs](https://rustup.rs)). For the GUI you also need the [Tauri 2 prerequisites](https://v2.tauri.app/start/prerequisites/) (WebView2 on Windows, `webkit2gtk` on Linux).
 
 ```sh
 git clone https://github.com/GlitterKill/scip-io.git
@@ -181,6 +221,18 @@ cargo tauri build
 ```
 
 The CLI binary is `scip-io`; the GUI bundles as `SCIP-IO` via Tauri.
+
+### Language toolchains
+
+SCIP-IO downloads and manages indexer binaries, but some indexers need a language runtime installed on your system:
+
+- **Node.js** — for `scip-typescript` and `scip-python` (both npm packages)
+- **JVM** — for `scip-java` (Scala and Java indexing)
+- **.NET SDK** — for `scip-dotnet` (C# indexing)
+
+Other indexers (`rust-analyzer`, `scip-go`, `scip-ruby`, `scip-clang`) ship as standalone binaries and don't need extra toolchains. Run `scip-io status` to see which indexers are ready.
+
+## Getting Started
 
 ### Your first index
 
@@ -386,8 +438,6 @@ scip-io/
 └── Cargo.toml             ← workspace root
 ```
 
-See [`AGENTS.md`](AGENTS.md) for internal architecture notes.
-
 ---
 
 ## Contributing
@@ -399,6 +449,14 @@ cargo fmt --all
 cargo clippy --all-targets -- -D warnings
 cargo test
 ```
+
+The `CI` GitHub Actions workflow runs these same checks on Linux, macOS, and Windows for every PR.
+
+## Releases
+
+Releases are fully automated: pushing a `vX.Y.Z` git tag triggers `.github/workflows/release.yml`, which cross-compiles the CLI for Windows, macOS (Intel + Apple Silicon), and Linux, builds the Tauri GUI installers for all three OSes, and publishes everything to a GitHub Release with SHA-256 checksums and install scripts.
+
+See [`RELEASING.md`](RELEASING.md) for the full release checklist and [`CHANGELOG.md`](CHANGELOG.md) for the version history.
 
 ---
 
