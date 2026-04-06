@@ -104,21 +104,21 @@ jobs:
   build-cli:
     name: Build CLI (${{ matrix.target }})
     needs: create-release
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: windows-latest
+          - runner: windows-latest
             target: x86_64-pc-windows-msvc
             archive: zip
-          - os: macos-13
+          - runner: macos-14
             target: x86_64-apple-darwin
             archive: tar.gz
-          - os: macos-14
+          - runner: macos-14
             target: aarch64-apple-darwin
             archive: tar.gz
-          - os: ubuntu-latest
+          - runner: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             archive: tar.gz
     steps:
@@ -172,26 +172,34 @@ jobs:
   # 3. Build the Tauri GUI for every supported target and upload.
   # ------------------------------------------------------------------
   build-gui:
-    name: Build GUI (${{ matrix.platform }})
+    name: Build GUI (${{ matrix.name }})
     needs: create-release
-    runs-on: ${{ matrix.platform }}
+    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - platform: windows-latest
+          - name: windows-x64
+            runner: windows-latest
             args: ""
-          - platform: macos-13
+            rust_target: ""
+          - name: macos-x64
+            runner: macos-14
             args: "--target x86_64-apple-darwin"
-          - platform: macos-14
+            rust_target: "x86_64-apple-darwin"
+          - name: macos-arm64
+            runner: macos-14
             args: "--target aarch64-apple-darwin"
-          - platform: ubuntu-22.04
+            rust_target: "aarch64-apple-darwin"
+          - name: linux-x64
+            runner: ubuntu-22.04
             args: ""
+            rust_target: ""
     steps:
       - uses: actions/checkout@v4
 
       - name: Install Linux GUI deps
-        if: matrix.platform == 'ubuntu-22.04'
+        if: matrix.runner == 'ubuntu-22.04'
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -204,16 +212,19 @@ jobs:
             libjavascriptcoregtk-4.1-dev \
             patchelf
 
-      - name: Install macOS target
-        if: startsWith(matrix.platform, 'macos')
-        run: rustup target add ${{ contains(matrix.args, 'aarch64') && 'aarch64-apple-darwin' || 'x86_64-apple-darwin' }}
-
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_target }}
 
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: "./src-tauri -> target"
-          key: gui-${{ matrix.platform }}
+          key: gui-${{ matrix.name }}
+
+      - name: Install Tauri CLI
+        uses: taiki-e/install-action@v2
+        with:
+          tool: tauri-cli@^2
 
       - uses: actions/setup-node@v4
         with:
