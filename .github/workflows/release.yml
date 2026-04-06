@@ -1,0 +1,285 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to release (e.g. v0.1.0)"
+        required: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: write
+
+jobs:
+  # ------------------------------------------------------------------
+  # 1. Create a draft GitHub Release that every build job uploads to.
+  # ------------------------------------------------------------------
+  create-release:
+    name: Create draft release
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.resolve.outputs.tag }}
+      upload_url: ${{ steps.release.outputs.upload_url }}
+      release_id: ${{ steps.release.outputs.id }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve tag
+        id: resolve
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "tag=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create draft release
+        id: release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.resolve.outputs.tag }}
+          name: ${{ steps.resolve.outputs.tag }}
+          draft: true
+          prerelease: false
+          generate_release_notes: true
+          body: |
+            ## SCIP-IO ${{ steps.resolve.outputs.tag }}
+
+            Cross-platform SCIP index orchestrator. Detect languages, install
+            indexers, run them, and merge the output into a single
+            `index.scip` file.
+
+            ### Downloads
+
+            **CLI (`scip-io`)**
+
+            | Platform | File |
+            |----------|------|
+            | Windows x64 | `scip-io-${{ steps.resolve.outputs.tag }}-x86_64-pc-windows-msvc.zip` |
+            | macOS x64 (Intel) | `scip-io-${{ steps.resolve.outputs.tag }}-x86_64-apple-darwin.tar.gz` |
+            | macOS ARM64 (Apple Silicon) | `scip-io-${{ steps.resolve.outputs.tag }}-aarch64-apple-darwin.tar.gz` |
+            | Linux x64 | `scip-io-${{ steps.resolve.outputs.tag }}-x86_64-unknown-linux-gnu.tar.gz` |
+
+            **GUI (`SCIP-IO`)**
+
+            | Platform | File |
+            |----------|------|
+            | Windows x64 (installer) | `SCIP-IO_*_x64-setup.exe` |
+            | Windows x64 (MSI) | `SCIP-IO_*_x64_en-US.msi` |
+            | macOS x64 | `SCIP-IO_*_x64.dmg` |
+            | macOS ARM64 | `SCIP-IO_*_aarch64.dmg` |
+            | Linux Debian/Ubuntu | `scip-io_*_amd64.deb` |
+            | Linux AppImage (portable) | `scip-io_*_amd64.AppImage` |
+
+            ### Quick install (CLI)
+
+            **Linux / macOS:**
+            ```sh
+            curl -LsSf https://github.com/GlitterKill/scip-io/releases/download/${{ steps.resolve.outputs.tag }}/install.sh | sh
+            ```
+
+            **Windows (PowerShell):**
+            ```powershell
+            irm https://github.com/GlitterKill/scip-io/releases/download/${{ steps.resolve.outputs.tag }}/install.ps1 | iex
+            ```
+
+            ### SHA256 checksums
+
+            See `SHA256SUMS.txt`.
+
+            ---
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ------------------------------------------------------------------
+  # 2. Build the CLI for every supported target and upload the archive.
+  # ------------------------------------------------------------------
+  build-cli:
+    name: Build CLI (${{ matrix.target }})
+    needs: create-release
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            archive: zip
+          - os: macos-13
+            target: x86_64-apple-darwin
+            archive: tar.gz
+          - os: macos-14
+            target: aarch64-apple-darwin
+            archive: tar.gz
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            archive: tar.gz
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build scip-io CLI
+        run: cargo build --release --locked -p scip-io-cli --target ${{ matrix.target }}
+
+      - name: Package archive
+        id: package
+        shell: bash
+        run: |
+          TAG="${{ needs.create-release.outputs.tag }}"
+          NAME="scip-io-${TAG}-${{ matrix.target }}"
+          mkdir -p "dist/${NAME}"
+
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            cp "target/${{ matrix.target }}/release/scip-io.exe" "dist/${NAME}/"
+          else
+            cp "target/${{ matrix.target }}/release/scip-io" "dist/${NAME}/"
+          fi
+
+          cp README.md LICENSE "dist/${NAME}/"
+
+          cd dist
+          if [ "${{ matrix.archive }}" = "zip" ]; then
+            7z a "${NAME}.zip" "${NAME}"
+            echo "asset=dist/${NAME}.zip" >> "$GITHUB_OUTPUT"
+          else
+            tar -czf "${NAME}.tar.gz" "${NAME}"
+            echo "asset=dist/${NAME}.tar.gz" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Upload artifact to release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.create-release.outputs.tag }}
+          files: ${{ steps.package.outputs.asset }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ------------------------------------------------------------------
+  # 3. Build the Tauri GUI for every supported target and upload.
+  # ------------------------------------------------------------------
+  build-gui:
+    name: Build GUI (${{ matrix.platform }})
+    needs: create-release
+    runs-on: ${{ matrix.platform }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows-latest
+            args: ""
+          - platform: macos-13
+            args: "--target x86_64-apple-darwin"
+          - platform: macos-14
+            args: "--target aarch64-apple-darwin"
+          - platform: ubuntu-22.04
+            args: ""
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux GUI deps
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            libssl-dev \
+            libgtk-3-dev \
+            libsoup-3.0-dev \
+            libjavascriptcoregtk-4.1-dev \
+            patchelf
+
+      - name: Install macOS target
+        if: startsWith(matrix.platform, 'macos')
+        run: rustup target add ${{ contains(matrix.args, 'aarch64') && 'aarch64-apple-darwin' || 'x86_64-apple-darwin' }}
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "./src-tauri -> target"
+          key: gui-${{ matrix.platform }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: gui/package-lock.json
+
+      - name: Install frontend dependencies
+        run: npm ci
+        working-directory: gui
+
+      - name: Build and upload Tauri app
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ needs.create-release.outputs.tag }}
+          releaseName: ${{ needs.create-release.outputs.tag }}
+          releaseDraft: true
+          prerelease: false
+          args: ${{ matrix.args }}
+          projectPath: .
+          tauriScript: cargo tauri
+
+  # ------------------------------------------------------------------
+  # 4. Generate SHA256 checksums and publish install scripts.
+  # ------------------------------------------------------------------
+  finalize:
+    name: Finalize release
+    needs: [create-release, build-cli, build-gui]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all release assets
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.create-release.outputs.tag }}
+        run: |
+          mkdir -p assets
+          gh release download "$TAG" -D assets --clobber
+
+      - name: Generate SHA256SUMS.txt
+        run: |
+          cd assets
+          sha256sum * > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Copy install scripts
+        run: |
+          cp scripts/install.sh assets/install.sh
+          cp scripts/install.ps1 assets/install.ps1
+
+      - name: Upload checksums and install scripts
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.create-release.outputs.tag }}
+          files: |
+            assets/SHA256SUMS.txt
+            assets/install.sh
+            assets/install.ps1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish release (remove draft)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.create-release.outputs.tag }}
+        run: gh release edit "$TAG" --draft=false
