@@ -14,8 +14,24 @@ src_old/
 .vscode/
 .idea/
 
-# Claude Code local (per-machine) settings
-.claude/settings.local.json
+# AI agent folders
+.claude/
+.codex/
+.cursor/
+.aider*/
+.windsurf/
+.continue/
+.github/copilot/
+
+# AI agent instruction files
+AGENTS.md
+CLAUDE.md
+COPILOT.md
+CURSOR.md
+GEMINI.md
+.cursorrules
+.aider.conf.yml
+claude-code-mcp-config.json
 
 # Tauri generated
 src-tauri/gen/schemas/
