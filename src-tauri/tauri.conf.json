@@ -1,7 +1,7 @@
 {
   "$schema": "https://raw.githubusercontent.com/nicegui/tauri/main/crates/tauri-config-schema/schema.json",
   "productName": "SCIP-IO",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "identifier": "io.scip.app",
   "build": {
     "frontendDist": "../gui/dist",

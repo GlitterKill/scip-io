@@ -9,6 +9,7 @@ gui/dist/
 
 # Backups / scratch
 src_old/
+tmp-release-test/
 
 # Editor / IDE
 .vscode/

@@ -3385,7 +3385,7 @@ dependencies = [
 
 [[package]]
 name = "scip-io-cli"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -3403,7 +3403,7 @@ dependencies = [
 
 [[package]]
 name = "scip-io-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "dirs",
@@ -3429,7 +3429,7 @@ dependencies = [
 
 [[package]]
 name = "scip-io-gui"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "reqwest 0.12.28",

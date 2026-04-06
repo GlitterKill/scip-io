@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-04-06
+
+### Fixed
+
+- **CLI UX on Windows**: When `scip-io.exe` was launched by double-clicking
+  from Explorer with no arguments, it printed a terse "GUI not yet
+  implemented" message and exited immediately, causing the console window
+  to flash and close so fast it looked like a crash. The CLI now prints a
+  help banner with a link to the graphical installer download, shows full
+  clap help, and — when it detects it was launched from Explorer (via
+  `GetConsoleProcessList` returning 1) — waits for the user to press Enter
+  before exiting so the output is actually readable. The `gui` subcommand
+  similarly prints the GUI download information instead of a placeholder.
+
 ## [0.1.0] - 2026-04-06
 
 Initial release.
