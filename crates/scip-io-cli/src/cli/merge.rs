@@ -22,10 +22,7 @@ pub async fn run(args: MergeArgs) -> Result<()> {
     );
 
     if args.validate {
-        println!(
-            "\n{} Validating merged output...",
-            style(">").cyan().bold(),
-        );
+        println!("\n{} Validating merged output...", style(">").cyan().bold(),);
         let result = validate_scip_file(&args.output)?;
         if result.valid {
             println!(

@@ -116,10 +116,7 @@ mod tests {
         fs::write(dir.path().join(".scip-io.toml"), config_content).unwrap();
         let config = ProjectConfig::load(dir.path()).unwrap();
         assert_eq!(config.languages, vec!["typescript", "python"]);
-        assert_eq!(
-            config.output.unwrap(),
-            PathBuf::from("build/index.scip")
-        );
+        assert_eq!(config.output.unwrap(), PathBuf::from("build/index.scip"));
     }
 
     #[test]
@@ -263,9 +260,11 @@ mod tests {
 
     #[test]
     fn test_config_roundtrip_serialization() {
-        let mut config = ProjectConfig::default();
-        config.languages = vec!["rust".into(), "go".into()];
-        config.output = Some(PathBuf::from("out.scip"));
+        let config = ProjectConfig {
+            languages: vec!["rust".into(), "go".into()],
+            output: Some(PathBuf::from("out.scip")),
+            ..Default::default()
+        };
 
         let toml_str = toml::to_string(&config).unwrap();
         let deserialized: ProjectConfig = toml::from_str(&toml_str).unwrap();

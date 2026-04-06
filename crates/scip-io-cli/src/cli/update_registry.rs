@@ -10,9 +10,7 @@ const DEFAULT_REGISTRY_URL: &str =
     "https://raw.githubusercontent.com/user/scip-io/main/registry.json";
 
 pub async fn run(args: UpdateRegistryArgs) -> Result<()> {
-    let url = args
-        .url
-        .unwrap_or_else(|| DEFAULT_REGISTRY_URL.to_string());
+    let url = args.url.unwrap_or_else(|| DEFAULT_REGISTRY_URL.to_string());
 
     println!(
         "{} Fetching registry from {}...",
@@ -37,14 +35,11 @@ pub async fn run(args: UpdateRegistryArgs) -> Result<()> {
         );
     }
 
-    let body = resp
-        .text()
-        .await
-        .context("Failed to read response body")?;
+    let body = resp.text().await.context("Failed to read response body")?;
 
     // Validate that the response is valid JSON
-    let parsed: serde_json::Value = serde_json::from_str(&body)
-        .context("Remote registry is not valid JSON")?;
+    let parsed: serde_json::Value =
+        serde_json::from_str(&body).context("Remote registry is not valid JSON")?;
 
     // Basic structural validation: expect an array of indexer entries
     if !parsed.is_array() {

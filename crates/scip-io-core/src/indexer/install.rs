@@ -145,8 +145,8 @@ fn extract_gz(gz_path: &Path, dest: &Path) -> Result<()> {
     let file = std::fs::File::open(gz_path)
         .with_context(|| format!("Cannot open {}", gz_path.display()))?;
     let mut decoder = flate2::read::GzDecoder::new(file);
-    let mut out = std::fs::File::create(dest)
-        .with_context(|| format!("Cannot create {}", dest.display()))?;
+    let mut out =
+        std::fs::File::create(dest).with_context(|| format!("Cannot create {}", dest.display()))?;
     io::copy(&mut decoder, &mut out)?;
     Ok(())
 }
@@ -170,8 +170,7 @@ fn extract_tar_gz(
         let path_str = path.to_string_lossy();
 
         // Match either the exact path or just the filename component
-        let matches = path_str == target
-            || path.file_name().is_some_and(|f| f == binary_name);
+        let matches = path_str == target || path.file_name().is_some_and(|f| f == binary_name);
 
         if matches {
             let dest = dest_dir.join(binary_name);
@@ -451,11 +450,7 @@ async fn install_dotnet_tool(
     tracing::info!(package, version = %entry.version, "installing via dotnet tool");
 
     let status = tokio::process::Command::new(&dotnet)
-        .args([
-            "tool",
-            "install",
-            "--tool-path",
-        ])
+        .args(["tool", "install", "--tool-path"])
         .arg(&tool_dir)
         .arg(package)
         .args(["--version", &entry.version])
@@ -527,12 +522,8 @@ pub async fn install_indexer(
         InstallMethod::GitHubLauncher {
             unix_asset,
             windows_asset,
-        } => {
-            install_github_launcher(entry, unix_asset, windows_asset, progress).await
-        }
-        InstallMethod::Npm { package } => {
-            install_npm(entry, package, progress).await
-        }
+        } => install_github_launcher(entry, unix_asset, windows_asset, progress).await,
+        InstallMethod::Npm { package } => install_npm(entry, package, progress).await,
         InstallMethod::DotnetTool { package } => {
             install_dotnet_tool(entry, package, progress).await
         }
@@ -619,8 +610,8 @@ mod tests {
 
     #[test]
     fn test_extract_gz_roundtrip() {
-        use flate2::write::GzEncoder;
         use flate2::Compression;
+        use flate2::write::GzEncoder;
 
         let dir = tempfile::tempdir().unwrap();
         let gz_path = dir.path().join("test.gz");
@@ -641,8 +632,8 @@ mod tests {
 
     #[test]
     fn test_extract_tar_gz_roundtrip() {
-        use flate2::write::GzEncoder;
         use flate2::Compression;
+        use flate2::write::GzEncoder;
 
         let dir = tempfile::tempdir().unwrap();
         let archive_path = dir.path().join("test.tar.gz");
@@ -673,8 +664,8 @@ mod tests {
 
     #[test]
     fn test_extract_tar_gz_nested_path() {
-        use flate2::write::GzEncoder;
         use flate2::Compression;
+        use flate2::write::GzEncoder;
 
         let dir = tempfile::tempdir().unwrap();
         let archive_path = dir.path().join("test.tar.gz");
@@ -726,8 +717,8 @@ mod tests {
 
     #[test]
     fn test_extract_tar_gz_missing_binary_errors() {
-        use flate2::write::GzEncoder;
         use flate2::Compression;
+        use flate2::write::GzEncoder;
 
         let dir = tempfile::tempdir().unwrap();
         let archive_path = dir.path().join("test.tar.gz");
@@ -743,8 +734,6 @@ mod tests {
 
         let result = extract_tar_gz(&archive_path, &dest_dir, "missing", None);
         assert!(result.is_err());
-        assert!(
-            result.unwrap_err().to_string().contains("not found"),
-        );
+        assert!(result.unwrap_err().to_string().contains("not found"),);
     }
 }

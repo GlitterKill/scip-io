@@ -73,11 +73,7 @@ impl LanguageKind {
             Self::Python => {
                 matches!(
                     filename,
-                    "pyproject.toml"
-                        | "setup.py"
-                        | "setup.cfg"
-                        | "requirements.txt"
-                        | "Pipfile"
+                    "pyproject.toml" | "setup.py" | "setup.cfg" | "requirements.txt" | "Pipfile"
                 )
             }
             Self::Rust => filename == "Cargo.toml",
@@ -85,9 +81,7 @@ impl LanguageKind {
             Self::Java => filename == "pom.xml" || filename == "build.gradle",
             Self::CSharp => filename.ends_with(".csproj") || filename.ends_with(".sln"),
             Self::Ruby => filename == "Gemfile",
-            Self::Kotlin => {
-                filename == "build.gradle.kts" || filename == "settings.gradle.kts"
-            }
+            Self::Kotlin => filename == "build.gradle.kts" || filename == "settings.gradle.kts",
             Self::Cpp => filename == "CMakeLists.txt" || filename == "compile_commands.json",
             Self::Scala => filename == "build.sbt",
         }
@@ -199,7 +193,6 @@ mod tests {
         assert!(LanguageKind::Cpp.matches_manifest("compile_commands.json"));
         assert!(!LanguageKind::Cpp.matches_manifest("Cargo.toml"));
     }
-
 
     #[test]
     fn test_manifest_detection_scala() {

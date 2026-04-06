@@ -4,17 +4,49 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ProgressEvent {
-    DetectStart { path: PathBuf },
-    DetectResult { languages: Vec<String> },
-    DownloadStart { indexer: String, version: String },
-    DownloadProgress { indexer: String, bytes: u64, total: Option<u64> },
-    DownloadComplete { indexer: String, path: PathBuf },
-    IndexerStart { language: String, command: String },
-    IndexerOutput { language: String, line: String },
-    IndexerComplete { language: String, duration_secs: f64, output: PathBuf },
-    IndexerFailed { language: String, error: String },
-    MergeStart { inputs: Vec<PathBuf> },
-    MergeComplete { output: PathBuf, stats: MergeStats },
+    DetectStart {
+        path: PathBuf,
+    },
+    DetectResult {
+        languages: Vec<String>,
+    },
+    DownloadStart {
+        indexer: String,
+        version: String,
+    },
+    DownloadProgress {
+        indexer: String,
+        bytes: u64,
+        total: Option<u64>,
+    },
+    DownloadComplete {
+        indexer: String,
+        path: PathBuf,
+    },
+    IndexerStart {
+        language: String,
+        command: String,
+    },
+    IndexerOutput {
+        language: String,
+        line: String,
+    },
+    IndexerComplete {
+        language: String,
+        duration_secs: f64,
+        output: PathBuf,
+    },
+    IndexerFailed {
+        language: String,
+        error: String,
+    },
+    MergeStart {
+        inputs: Vec<PathBuf>,
+    },
+    MergeComplete {
+        output: PathBuf,
+        stats: MergeStats,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -99,7 +131,10 @@ mod tests {
         assert_eq!(captured.len(), 3);
         // Verify first event is DownloadStart
         assert!(matches!(&captured[0], ProgressEvent::DownloadStart { .. }));
-        assert!(matches!(&captured[2], ProgressEvent::DownloadComplete { .. }));
+        assert!(matches!(
+            &captured[2],
+            ProgressEvent::DownloadComplete { .. }
+        ));
     }
 
     #[test]
@@ -165,23 +200,50 @@ mod tests {
     fn test_all_event_variants_serialize() {
         // Ensure every variant can round-trip through JSON
         let events: Vec<ProgressEvent> = vec![
-            ProgressEvent::DetectStart { path: PathBuf::from(".") },
-            ProgressEvent::DetectResult { languages: vec!["rust".into()] },
-            ProgressEvent::DownloadStart { indexer: "x".into(), version: "1".into() },
-            ProgressEvent::DownloadProgress { indexer: "x".into(), bytes: 0, total: None },
-            ProgressEvent::DownloadComplete { indexer: "x".into(), path: PathBuf::from(".") },
-            ProgressEvent::IndexerStart { language: "rust".into(), command: "cmd".into() },
-            ProgressEvent::IndexerOutput { language: "rust".into(), line: "ok".into() },
+            ProgressEvent::DetectStart {
+                path: PathBuf::from("."),
+            },
+            ProgressEvent::DetectResult {
+                languages: vec!["rust".into()],
+            },
+            ProgressEvent::DownloadStart {
+                indexer: "x".into(),
+                version: "1".into(),
+            },
+            ProgressEvent::DownloadProgress {
+                indexer: "x".into(),
+                bytes: 0,
+                total: None,
+            },
+            ProgressEvent::DownloadComplete {
+                indexer: "x".into(),
+                path: PathBuf::from("."),
+            },
+            ProgressEvent::IndexerStart {
+                language: "rust".into(),
+                command: "cmd".into(),
+            },
+            ProgressEvent::IndexerOutput {
+                language: "rust".into(),
+                line: "ok".into(),
+            },
             ProgressEvent::IndexerComplete {
                 language: "rust".into(),
                 duration_secs: 1.5,
                 output: PathBuf::from("index.scip"),
             },
-            ProgressEvent::IndexerFailed { language: "rust".into(), error: "err".into() },
+            ProgressEvent::IndexerFailed {
+                language: "rust".into(),
+                error: "err".into(),
+            },
             ProgressEvent::MergeStart { inputs: vec![] },
             ProgressEvent::MergeComplete {
                 output: PathBuf::from("out.scip"),
-                stats: MergeStats { documents: 0, symbols: 0, size_bytes: 0 },
+                stats: MergeStats {
+                    documents: 0,
+                    symbols: 0,
+                    size_bytes: 0,
+                },
             },
         ];
         for event in &events {

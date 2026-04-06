@@ -34,9 +34,8 @@ pub async fn run(args: StatusArgs) -> Result<()> {
                         Ok(ver) => {
                             json_entries[i]["latest_version"] =
                                 serde_json::Value::String(ver.clone());
-                            json_entries[i]["update_available"] = serde_json::Value::Bool(
-                                ver != entry.version,
-                            );
+                            json_entries[i]["update_available"] =
+                                serde_json::Value::Bool(ver != entry.version);
                         }
                         Err(e) => {
                             json_entries[i]["update_check_error"] =
@@ -51,10 +50,7 @@ pub async fn run(args: StatusArgs) -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&json_entries)?);
         }
         _ => {
-            println!(
-                "{} Registered indexers:\n",
-                style("SCIP-IO").cyan().bold()
-            );
+            println!("{} Registered indexers:\n", style("SCIP-IO").cyan().bold());
 
             for entry in entries {
                 let installed = entry.is_installed();
@@ -88,10 +84,7 @@ pub async fn run(args: StatusArgs) -> Result<()> {
             }
 
             if args.check_updates {
-                println!(
-                    "\n{} Checking for updates...\n",
-                    style(">").cyan().bold()
-                );
+                println!("\n{} Checking for updates...\n", style(">").cyan().bold());
 
                 for entry in entries {
                     let latest = check_latest_version(&entry.github_repo).await;
@@ -150,7 +143,11 @@ fn print_update_status(entry: &IndexerEntry, latest_result: Result<String>) {
         style("-").dim().to_string()
     };
 
-    let install_label = if installed { "Installed" } else { "Not installed" };
+    let install_label = if installed {
+        "Installed"
+    } else {
+        "Not installed"
+    };
 
     match latest_result {
         Ok(latest_ver) => {
@@ -165,11 +162,7 @@ fn print_update_status(entry: &IndexerEntry, latest_result: Result<String>) {
             };
             println!(
                 "  {} {:<20} v{:<10} {} {}",
-                status_marker,
-                entry.indexer_name,
-                entry.version,
-                install_label,
-                update_info,
+                status_marker, entry.indexer_name, entry.version, install_label, update_info,
             );
         }
         Err(e) => {

@@ -141,10 +141,7 @@ impl IndexerEntry {
     }
 
     /// Ensure the indexer binary is installed, downloading if necessary.
-    pub async fn ensure_installed(
-        &self,
-        progress: &dyn ProgressHandler,
-    ) -> Result<PathBuf> {
+    pub async fn ensure_installed(&self, progress: &dyn ProgressHandler) -> Result<PathBuf> {
         if let Some(path) = self.installed_path() {
             tracing::debug!(indexer = %self.indexer_name, ?path, "already installed");
             return Ok(path);

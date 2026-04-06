@@ -29,7 +29,10 @@ struct IndexerResult {
 }
 
 pub async fn run(args: IndexArgs) -> Result<()> {
-    let path = args.path.clone().unwrap_or_else(|| std::env::current_dir().unwrap());
+    let path = args
+        .path
+        .clone()
+        .unwrap_or_else(|| std::env::current_dir().unwrap());
     let path = path.canonicalize()?;
 
     // Detect or filter languages
@@ -219,10 +222,7 @@ pub async fn run(args: IndexArgs) -> Result<()> {
     if !failures.is_empty() {
         if scip_outputs.is_empty() {
             // Total failure
-            bail!(
-                "All {} indexer(s) failed",
-                failures.len()
-            );
+            bail!("All {} indexer(s) failed", failures.len());
         } else {
             // Partial failure — report but don't bail so merge output is kept
             eprintln!(
@@ -232,8 +232,11 @@ pub async fn run(args: IndexArgs) -> Result<()> {
                 failures.len() + scip_outputs.len(),
             );
             // Return a partial-failure error so main.rs can set exit code 1
-            bail!("partial-failure: {} indexer(s) succeeded, {} failed",
-                scip_outputs.len(), failures.len());
+            bail!(
+                "partial-failure: {} indexer(s) succeeded, {} failed",
+                scip_outputs.len(),
+                failures.len()
+            );
         }
     }
 

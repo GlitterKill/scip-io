@@ -1,9 +1,9 @@
 use scip_io_core::config::ProjectConfig;
 use scip_io_core::detect::scan_languages;
-use scip_io_core::indexer::registry::REGISTRY;
 use scip_io_core::indexer::install_dir;
-use scip_io_core::validate::validate_scip_file;
+use scip_io_core::indexer::registry::REGISTRY;
 use scip_io_core::progress::{ProgressEvent, ProgressHandler};
+use scip_io_core::validate::validate_scip_file;
 use serde::Serialize;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -89,8 +89,20 @@ impl ProgressHandler for TauriProgressHandler {
                     "message": format!("Downloading {} v{}", indexer, version),
                 }));
             }
-            ProgressEvent::DownloadProgress { indexer, bytes, total } => {
-                let pct = total.map(|t| if t > 0 { (*bytes as f64 / t as f64 * 100.0) as u32 } else { 0 }).unwrap_or(0);
+            ProgressEvent::DownloadProgress {
+                indexer,
+                bytes,
+                total,
+            } => {
+                let pct = total
+                    .map(|t| {
+                        if t > 0 {
+                            (*bytes as f64 / t as f64 * 100.0) as u32
+                        } else {
+                            0
+                        }
+                    })
+                    .unwrap_or(0);
                 self.emit_frontend(serde_json::json!({
                     "kind": "language_progress",
                     "language": indexer,
@@ -139,7 +151,11 @@ impl ProgressHandler for TauriProgressHandler {
                     "message": format!("[{}] {}", language, line),
                 }));
             }
-            ProgressEvent::IndexerComplete { language, duration_secs, output } => {
+            ProgressEvent::IndexerComplete {
+                language,
+                duration_secs,
+                output,
+            } => {
                 self.emit_frontend(serde_json::json!({
                     "kind": "language_progress",
                     "language": language,
@@ -411,11 +427,11 @@ pub async fn clean_cache(language: Option<String>) -> Result<String, String> {
     if let Some(lang) = language {
         let entries = REGISTRY.all();
         for entry in entries {
-            if entry.language.eq_ignore_ascii_case(&lang) {
-                if let Some(path) = entry.installed_path() {
-                    std::fs::remove_file(&path).map_err(|e| e.to_string())?;
-                    return Ok(format!("Removed: {}", path.display()));
-                }
+            if entry.language.eq_ignore_ascii_case(&lang)
+                && let Some(path) = entry.installed_path()
+            {
+                std::fs::remove_file(&path).map_err(|e| e.to_string())?;
+                return Ok(format!("Removed: {}", path.display()));
             }
         }
         Ok("No matching indexer found".to_string())
@@ -428,7 +444,9 @@ pub async fn clean_cache(language: Option<String>) -> Result<String, String> {
 }
 
 #[tauri::command]
-pub async fn validate_index(path: String) -> Result<scip_io_core::validate::ValidationResult, String> {
+pub async fn validate_index(
+    path: String,
+) -> Result<scip_io_core::validate::ValidationResult, String> {
     let file_path = PathBuf::from(&path);
     validate_scip_file(&file_path).map_err(|e| e.to_string())
 }

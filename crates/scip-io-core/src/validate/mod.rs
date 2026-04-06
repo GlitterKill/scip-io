@@ -28,8 +28,8 @@ pub struct IndexStats {
 }
 
 pub fn validate_scip_file(path: &Path) -> Result<ValidationResult> {
-    let bytes = std::fs::read(path)
-        .with_context(|| format!("Failed to read {}", path.display()))?;
+    let bytes =
+        std::fs::read(path).with_context(|| format!("Failed to read {}", path.display()))?;
 
     let mut errors = Vec::new();
     let mut warnings = Vec::new();
@@ -77,13 +77,11 @@ pub fn validate_scip_file(path: &Path) -> Result<ValidationResult> {
     }
 
     // Collect stats
-    let total_symbols: usize = index.documents.iter()
-        .map(|d| d.symbols.len())
-        .sum();
-    let total_occurrences: usize = index.documents.iter()
-        .map(|d| d.occurrences.len())
-        .sum();
-    let languages: Vec<String> = index.documents.iter()
+    let total_symbols: usize = index.documents.iter().map(|d| d.symbols.len()).sum();
+    let total_occurrences: usize = index.documents.iter().map(|d| d.occurrences.len()).sum();
+    let languages: Vec<String> = index
+        .documents
+        .iter()
         .map(|d| d.language.clone())
         .filter(|l| !l.is_empty())
         .collect::<HashSet<_>>()

@@ -12,11 +12,7 @@ pub async fn run(args: CleanArgs) -> Result<()> {
 
     if args.all {
         if args.dry_run {
-            println!(
-                "{} Would remove: {}",
-                style("*").yellow(),
-                dir.display()
-            );
+            println!("{} Would remove: {}", style("*").yellow(), dir.display());
         } else if dir.exists() {
             fs::remove_dir_all(&dir)?;
             println!(
@@ -39,10 +35,10 @@ pub async fn run(args: CleanArgs) -> Result<()> {
 
     for entry in entries {
         // Filter by --lang if specified
-        if let Some(ref lang) = args.lang {
-            if !entry.language_name().eq_ignore_ascii_case(lang) {
-                continue;
-            }
+        if let Some(ref lang) = args.lang
+            && !entry.language_name().eq_ignore_ascii_case(lang)
+        {
+            continue;
         }
 
         if let Some(path) = entry.installed_path() {
@@ -74,10 +70,7 @@ pub async fn run(args: CleanArgs) -> Result<()> {
                 lang,
             );
         } else {
-            println!(
-                "{} No installed indexers found",
-                style("*").yellow(),
-            );
+            println!("{} No installed indexers found", style("*").yellow(),);
         }
     }
 

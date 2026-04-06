@@ -162,9 +162,7 @@ impl Registry {
 
     /// Get the indexer entry for a detected language.
     pub fn get(&self, lang: &Language) -> Option<&IndexerEntry> {
-        self.entries
-            .iter()
-            .find(|e| e.language == lang.name())
+        self.entries.iter().find(|e| e.language == lang.name())
     }
 
     /// Return all registered indexers.
@@ -269,9 +267,11 @@ mod tests {
         let lang = LanguageKind::Cpp.with_evidence(String::new());
         let entry = registry.get(&lang).unwrap();
         assert_eq!(entry.indexer_name, "scip-clang");
-        assert!(matches!(entry.install_method, InstallMethod::GitHubBinary { .. }));
+        assert!(matches!(
+            entry.install_method,
+            InstallMethod::GitHubBinary { .. }
+        ));
     }
-
 
     #[test]
     fn test_registry_scala_entry() {
@@ -279,14 +279,20 @@ mod tests {
         let lang = LanguageKind::Scala.with_evidence(String::new());
         let entry = registry.get(&lang).unwrap();
         assert_eq!(entry.indexer_name, "scip-java");
-        assert!(matches!(entry.install_method, InstallMethod::GitHubLauncher { .. }));
+        assert!(matches!(
+            entry.install_method,
+            InstallMethod::GitHubLauncher { .. }
+        ));
     }
     #[test]
     fn test_registry_kotlin_is_unsupported() {
         let registry = &*REGISTRY;
         let lang = LanguageKind::Kotlin.with_evidence(String::new());
         let entry = registry.get(&lang).unwrap();
-        assert!(matches!(entry.install_method, InstallMethod::Unsupported { .. }));
+        assert!(matches!(
+            entry.install_method,
+            InstallMethod::Unsupported { .. }
+        ));
     }
 
     #[test]
@@ -295,39 +301,65 @@ mod tests {
         for entry in registry.all() {
             match &entry.install_method {
                 InstallMethod::Npm { package } => {
-                    assert!(!package.is_empty(), "Empty npm package for {}", entry.indexer_name);
+                    assert!(
+                        !package.is_empty(),
+                        "Empty npm package for {}",
+                        entry.indexer_name
+                    );
                 }
                 InstallMethod::DotnetTool { package } => {
-                    assert!(!package.is_empty(), "Empty dotnet package for {}", entry.indexer_name);
+                    assert!(
+                        !package.is_empty(),
+                        "Empty dotnet package for {}",
+                        entry.indexer_name
+                    );
                 }
                 InstallMethod::GitHubBinary { asset_pattern }
-                | InstallMethod::GitHubGz { asset_pattern }=> {
+                | InstallMethod::GitHubGz { asset_pattern } => {
                     assert!(
                         asset_pattern.contains('{'),
                         "Asset pattern for {} has no placeholders: {}",
-                        entry.indexer_name, asset_pattern
+                        entry.indexer_name,
+                        asset_pattern
                     );
                 }
                 InstallMethod::GitHubTarGz { asset_pattern, .. } => {
                     assert!(
                         asset_pattern.contains('{'),
                         "Asset pattern for {} has no placeholders: {}",
-                        entry.indexer_name, asset_pattern
+                        entry.indexer_name,
+                        asset_pattern
                     );
                 }
                 InstallMethod::GitHubZip { asset_pattern, .. } => {
                     assert!(
                         asset_pattern.contains('{'),
                         "Asset pattern for {} has no placeholders: {}",
-                        entry.indexer_name, asset_pattern
+                        entry.indexer_name,
+                        asset_pattern
                     );
                 }
-                InstallMethod::GitHubLauncher { unix_asset, windows_asset } => {
-                    assert!(!unix_asset.is_empty(), "Empty unix_asset for {}", entry.indexer_name);
-                    assert!(!windows_asset.is_empty(), "Empty windows_asset for {}", entry.indexer_name);
+                InstallMethod::GitHubLauncher {
+                    unix_asset,
+                    windows_asset,
+                } => {
+                    assert!(
+                        !unix_asset.is_empty(),
+                        "Empty unix_asset for {}",
+                        entry.indexer_name
+                    );
+                    assert!(
+                        !windows_asset.is_empty(),
+                        "Empty windows_asset for {}",
+                        entry.indexer_name
+                    );
                 }
                 InstallMethod::Unsupported { reason } => {
-                    assert!(!reason.is_empty(), "Empty reason for {}", entry.indexer_name);
+                    assert!(
+                        !reason.is_empty(),
+                        "Empty reason for {}",
+                        entry.indexer_name
+                    );
                 }
             }
         }

@@ -44,10 +44,7 @@ impl ProgressHandler for CliProgressHandler {
     fn on_event(&self, event: ProgressEvent) {
         match event {
             ProgressEvent::DownloadStart { indexer, version } => {
-                self.get_or_create_spinner(format!(
-                    "Downloading {} v{}...",
-                    indexer, version
-                ));
+                self.get_or_create_spinner(format!("Downloading {} v{}...", indexer, version));
             }
             ProgressEvent::DownloadProgress {
                 indexer,
@@ -56,10 +53,7 @@ impl ProgressHandler for CliProgressHandler {
             } => {
                 if let Some(total) = total {
                     let pct = (bytes as f64 / total as f64 * 100.0) as u64;
-                    self.get_or_create_spinner(format!(
-                        "Downloading {}... {}%",
-                        indexer, pct
-                    ));
+                    self.get_or_create_spinner(format!("Downloading {}... {}%", indexer, pct));
                 } else {
                     self.get_or_create_spinner(format!(
                         "Downloading {}... {} bytes",

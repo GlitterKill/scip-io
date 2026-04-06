@@ -48,7 +48,9 @@ pub fn merge_scip_files(inputs: &[impl AsRef<Path>], output: &Path) -> Result<()
     merged.documents = documents;
 
     // Write output
-    let bytes = merged.write_to_bytes().context("Failed to serialize merged SCIP index")?;
+    let bytes = merged
+        .write_to_bytes()
+        .context("Failed to serialize merged SCIP index")?;
     if let Some(parent) = output.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -70,11 +72,8 @@ fn merge_document(target: &mut Document, source: Document) {
     target.occurrences.extend(source.occurrences);
 
     // Merge symbol information, avoiding duplicates by symbol name
-    let existing_symbols: std::collections::HashSet<String> = target
-        .symbols
-        .iter()
-        .map(|s| s.symbol.clone())
-        .collect();
+    let existing_symbols: std::collections::HashSet<String> =
+        target.symbols.iter().map(|s| s.symbol.clone()).collect();
 
     for sym in source.symbols {
         if !existing_symbols.contains(&sym.symbol) {

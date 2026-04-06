@@ -164,7 +164,10 @@ mod tests {
         // Two manifest files for same language should produce one entry
         let (_dir, project) = create_fixture_project(&["pyproject.toml", "requirements.txt"]);
         let langs = scan_languages(&project).unwrap();
-        let python_count = langs.iter().filter(|l| l.kind == LanguageKind::Python).count();
+        let python_count = langs
+            .iter()
+            .filter(|l| l.kind == LanguageKind::Python)
+            .count();
         assert_eq!(python_count, 1);
     }
 

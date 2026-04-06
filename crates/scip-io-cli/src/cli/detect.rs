@@ -6,7 +6,9 @@ use scip_io_core::detect::scan_languages;
 use super::DetectArgs;
 
 pub async fn run(args: DetectArgs) -> Result<()> {
-    let path = args.path.unwrap_or_else(|| std::env::current_dir().unwrap());
+    let path = args
+        .path
+        .unwrap_or_else(|| std::env::current_dir().unwrap());
     let path = path.canonicalize()?;
 
     tracing::info!(?path, "scanning for languages");
