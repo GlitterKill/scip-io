@@ -224,7 +224,7 @@ jobs:
       - name: Install Tauri CLI
         uses: taiki-e/install-action@v2
         with:
-          tool: tauri-cli@^2
+          tool: tauri-cli@2
 
       - uses: actions/setup-node@v4
         with:
