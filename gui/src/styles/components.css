@@ -1,0 +1,1169 @@
+/* ============================================================
+   SCIP-IO Component Styles
+   All reusable UI component classes for the cyberpunk-corporate
+   dark theme.
+   ============================================================ */
+
+/* ============================================================
+   1. CUSTOM TITLEBAR
+   Tauri frameless window titlebar with drag region and
+   window controls (minimize, maximize, close).
+   ============================================================ */
+
+/* Neon accent line at the very top of the window */
+.titlebar-accent {
+  height: 2px;
+  width: 100%;
+  background: linear-gradient(
+    90deg,
+    var(--accent-cyan),
+    var(--accent-magenta),
+    var(--accent-purple),
+    var(--accent-cyan)
+  );
+  background-size: 300% 100%;
+  flex-shrink: 0;
+}
+
+/* Main titlebar container: accent line + 36px bar, draggable */
+.titlebar {
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border-default);
+  /* Tauri drag region */
+  -webkit-app-region: drag;
+  app-region: drag;
+}
+
+.titlebar-content {
+  height: 36px;
+  min-height: 36px;
+}
+
+/* Titlebar title text */
+.titlebar__title {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-sm);
+  font-weight: 500;
+  color: var(--text-secondary);
+  letter-spacing: 0.5px;
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+}
+
+/* Accent brand mark next to title */
+.titlebar__brand {
+  color: var(--accent-cyan);
+  font-weight: 700;
+}
+
+/* Window control buttons group */
+.titlebar__controls {
+  display: flex;
+  align-items: center;
+  gap: 0;
+  /* Prevent drag on buttons */
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
+}
+
+/* Individual window control button */
+.titlebar__btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: var(--font-size-base);
+  cursor: pointer;
+  transition: background var(--transition-fast),
+              color var(--transition-fast);
+  border-radius: 0;
+}
+
+.titlebar__btn:hover {
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+}
+
+.titlebar__btn:active {
+  background: var(--bg-surface);
+}
+
+/* Close button has distinct red hover */
+.titlebar__btn--close:hover {
+  background: var(--color-error);
+  color: #ffffff;
+}
+
+.titlebar__btn--close:active {
+  background: #cc2952;
+}
+
+/* ============================================================
+   2. PANELS / CARDS
+   Glassmorphism containers for content grouping.
+   ============================================================ */
+
+/* Standard panel */
+.panel {
+  background: rgba(20, 24, 36, 0.85);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-lg);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  box-shadow: var(--shadow-md);
+  padding: var(--space-xl);
+  transition: border-color var(--transition-base),
+              box-shadow var(--transition-base);
+}
+
+/* Panel with hover interactivity */
+.panel--interactive:hover {
+  border-color: var(--border-hover);
+  box-shadow: var(--shadow-lg);
+}
+
+/* Panel with active/selected state */
+.panel--active {
+  border-color: var(--accent-cyan);
+  box-shadow: var(--shadow-md), var(--shadow-glow-cyan);
+}
+
+/* Compact panel variant (less padding) */
+.panel--compact {
+  padding: var(--space-lg);
+}
+
+/* Flush panel (no padding) */
+.panel--flush {
+  padding: 0;
+}
+
+/* Panel header row */
+.panel__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: var(--space-lg);
+}
+
+/* Panel title */
+.panel__title {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-lg);
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+/* Panel subtitle / description */
+.panel__subtitle {
+  font-size: var(--font-size-sm);
+  color: var(--text-secondary);
+  margin-top: var(--space-xs);
+}
+
+/* Panel body content */
+.panel__body {
+  color: var(--text-secondary);
+}
+
+/* Panel footer */
+.panel__footer {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--space-sm);
+  margin-top: var(--space-lg);
+  padding-top: var(--space-lg);
+  border-top: 1px solid var(--border-default);
+}
+
+/* Inset panel — nested inside another panel */
+.panel--inset {
+  background: var(--bg-primary);
+  border-color: var(--border-default);
+  backdrop-filter: none;
+  box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.2);
+}
+
+/* ============================================================
+   3. BUTTONS
+   Primary, secondary, danger, and ghost variants.
+   All use monospace text, uppercase, with letter-spacing.
+   ============================================================ */
+
+/* Base button reset and shared styles */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-sm);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-sm);
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  padding: var(--space-sm) var(--space-lg);
+  border-radius: var(--radius-md);
+  border: 1px solid transparent;
+  cursor: pointer;
+  white-space: nowrap;
+  user-select: none;
+  transition: background var(--transition-base),
+              color var(--transition-base),
+              border-color var(--transition-base),
+              box-shadow var(--transition-base),
+              transform var(--transition-fast);
+  outline: none;
+  line-height: 1.5;
+}
+
+/* Focus-visible ring for keyboard navigation */
+.btn:focus-visible {
+  outline: 2px solid var(--accent-cyan);
+  outline-offset: 2px;
+}
+
+/* Disabled state for all buttons */
+.btn:disabled,
+.btn[disabled] {
+  opacity: 0.4;
+  cursor: not-allowed;
+  pointer-events: none;
+  box-shadow: none;
+}
+
+/* --- Primary: cyan border with glow --- */
+.btn--primary {
+  background: transparent;
+  color: var(--accent-cyan);
+  border-color: var(--accent-cyan);
+}
+
+.btn--primary:hover {
+  background: var(--accent-cyan-dim);
+  box-shadow: var(--shadow-glow-cyan);
+}
+
+.btn--primary:active {
+  background: rgba(0, 255, 204, 0.2);
+  box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.3),
+              var(--shadow-glow-cyan);
+  transform: translateY(1px);
+}
+
+/* Primary filled variant */
+.btn--primary-filled {
+  background: var(--accent-cyan);
+  color: var(--text-inverse);
+  border-color: var(--accent-cyan);
+}
+
+.btn--primary-filled:hover {
+  background: #00e6b8;
+  box-shadow: var(--shadow-glow-cyan);
+}
+
+.btn--primary-filled:active {
+  background: #00ccaa;
+  box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.3);
+  transform: translateY(1px);
+}
+
+/* --- Secondary: grey border --- */
+.btn--secondary {
+  background: transparent;
+  color: var(--text-secondary);
+  border-color: var(--border-default);
+}
+
+.btn--secondary:hover {
+  color: var(--text-primary);
+  background: var(--bg-tertiary);
+  border-color: var(--border-hover);
+}
+
+.btn--secondary:active {
+  background: var(--bg-surface);
+  transform: translateY(1px);
+}
+
+/* --- Danger: red border/glow --- */
+.btn--danger {
+  background: transparent;
+  color: var(--color-error);
+  border-color: var(--color-error);
+}
+
+.btn--danger:hover {
+  background: var(--color-error-dim);
+  box-shadow: 0 0 15px rgba(255, 51, 102, 0.3);
+}
+
+.btn--danger:active {
+  background: rgba(255, 51, 102, 0.2);
+  box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.3);
+  transform: translateY(1px);
+}
+
+/* --- Ghost: minimal, no border --- */
+.btn--ghost {
+  background: transparent;
+  color: var(--text-secondary);
+  border-color: transparent;
+}
+
+.btn--ghost:hover {
+  color: var(--text-primary);
+  background: var(--bg-tertiary);
+}
+
+.btn--ghost:active {
+  background: var(--bg-surface);
+  transform: translateY(1px);
+}
+
+/* --- Icon-only button variant --- */
+.btn--icon {
+  padding: var(--space-sm);
+  min-width: 32px;
+  min-height: 32px;
+}
+
+/* --- Small button --- */
+.btn--sm {
+  font-size: var(--font-size-xs);
+  padding: var(--space-xs) var(--space-sm);
+}
+
+/* --- Large button --- */
+.btn--lg {
+  font-size: var(--font-size-base);
+  padding: var(--space-md) var(--space-xl);
+}
+
+/* ============================================================
+   4. INPUT FIELDS
+   Text inputs, textareas, selects.
+   Dark surface background; cyan border + glow on focus.
+   ============================================================ */
+
+/* Shared input styles */
+.input,
+.select,
+.textarea {
+  width: 100%;
+  font-family: var(--font-mono);
+  font-size: var(--font-size-sm);
+  color: var(--text-primary);
+  background: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  padding: var(--space-sm) var(--space-md);
+  outline: none;
+  transition: border-color var(--transition-base),
+              box-shadow var(--transition-base),
+              background var(--transition-base);
+  line-height: 1.5;
+}
+
+.input::placeholder,
+.textarea::placeholder {
+  color: var(--text-muted);
+}
+
+/* Hover */
+.input:hover,
+.select:hover,
+.textarea:hover {
+  border-color: var(--border-hover);
+}
+
+/* Focus: cyan border with glow */
+.input:focus,
+.select:focus,
+.textarea:focus {
+  border-color: var(--accent-cyan);
+  box-shadow: 0 0 0 3px var(--accent-cyan-dim),
+              var(--shadow-glow-cyan);
+  background: var(--bg-tertiary);
+}
+
+/* Disabled */
+.input:disabled,
+.select:disabled,
+.textarea:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* Error state */
+.input--error,
+.input--error:focus {
+  border-color: var(--color-error);
+  box-shadow: 0 0 0 3px var(--color-error-dim);
+}
+
+/* Textarea specific */
+.textarea {
+  min-height: 80px;
+  resize: vertical;
+}
+
+/* Select dropdown arrow */
+.select {
+  appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' fill='none'%3E%3Cpath d='M1 1.5l5 5 5-5' stroke='%238892a8' stroke-width='1.5' stroke-linecap='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 12px center;
+  padding-right: 36px;
+}
+
+/* Form field wrapper with label */
+.form-field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+}
+
+/* Form label */
+.form-label {
+  font-family: var(--font-sans);
+  font-size: var(--font-size-sm);
+  font-weight: 500;
+  color: var(--text-secondary);
+}
+
+/* Form hint text */
+.form-hint {
+  font-size: var(--font-size-xs);
+  color: var(--text-muted);
+}
+
+/* Form error text */
+.form-error {
+  font-size: var(--font-size-xs);
+  color: var(--color-error);
+}
+
+/* ============================================================
+   5. STATUS BADGES
+   Dot indicator + label for indexer installation status.
+   ============================================================ */
+
+/* Badge container */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-xs);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  font-weight: 500;
+  padding: 2px var(--space-sm);
+  border-radius: 9999px;
+  white-space: nowrap;
+  user-select: none;
+}
+
+/* Status dot */
+.badge__dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+/* --- Installed (green, pulsing dot) --- */
+.badge--installed {
+  color: var(--color-success);
+  background: var(--color-success-dim);
+}
+
+.badge--installed .badge__dot {
+  background: var(--color-success);
+  animation: pulse 2s ease-in-out infinite;
+}
+
+/* --- Not installed (grey, static dot) --- */
+.badge--not-installed {
+  color: var(--text-muted);
+  background: rgba(74, 85, 104, 0.15);
+}
+
+.badge--not-installed .badge__dot {
+  background: var(--text-muted);
+}
+
+/* --- Outdated (amber dot) --- */
+.badge--outdated {
+  color: var(--color-warning);
+  background: var(--color-warning-dim);
+}
+
+.badge--outdated .badge__dot {
+  background: var(--color-warning);
+  animation: pulse 2s ease-in-out infinite;
+}
+
+/* --- Running --- */
+.badge--running {
+  color: var(--accent-cyan);
+  background: var(--accent-cyan-dim);
+}
+
+.badge--running .badge__dot {
+  background: var(--accent-cyan);
+  animation: pulse 1s ease-in-out infinite;
+}
+
+/* --- Error --- */
+.badge--error {
+  color: var(--color-error);
+  background: var(--color-error-dim);
+}
+
+.badge--error .badge__dot {
+  background: var(--color-error);
+}
+
+/* ============================================================
+   6. PROGRESS BARS
+   Gradient fill, glow shadow, rounded, smooth transitions.
+   ============================================================ */
+
+/* Progress track */
+.progress {
+  width: 100%;
+  height: 8px;
+  background: var(--bg-primary);
+  border-radius: 9999px;
+  overflow: hidden;
+  position: relative;
+  border: 1px solid var(--border-default);
+}
+
+/* Progress fill */
+.progress__fill {
+  height: 100%;
+  border-radius: 9999px;
+  background: linear-gradient(90deg, var(--progress-start), var(--progress-end));
+  box-shadow: 0 0 10px var(--progress-glow);
+  transition: width var(--transition-progress);
+  min-width: 0;
+  position: relative;
+}
+
+/* Animated shine on the fill */
+.progress__fill::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    rgba(255, 255, 255, 0.15),
+    transparent
+  );
+  animation: shimmer 2s ease-in-out infinite;
+}
+
+/* Large progress bar variant */
+.progress--lg {
+  height: 12px;
+}
+
+/* Small progress bar variant */
+.progress--sm {
+  height: 4px;
+  border: none;
+}
+
+/* Indeterminate progress (no known width) */
+.progress--indeterminate .progress__fill {
+  width: 30% !important;
+  animation: shimmer 1.5s ease-in-out infinite;
+}
+
+/* Progress with label */
+.progress-wrapper {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+}
+
+.progress-wrapper__label {
+  display: flex;
+  justify-content: space-between;
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  color: var(--text-secondary);
+}
+
+.progress-wrapper__value {
+  color: var(--accent-cyan);
+  font-weight: 600;
+}
+
+/* ============================================================
+   7. TABLES
+   Results summary table with striped rows.
+   ============================================================ */
+
+.table-container {
+  overflow-x: auto;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-lg);
+}
+
+.table {
+  width: 100%;
+  border-collapse: collapse;
+  font-family: var(--font-mono);
+  font-size: var(--font-size-sm);
+}
+
+/* Table header */
+.table thead th {
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
+  font-weight: 600;
+  font-size: var(--font-size-xs);
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  padding: var(--space-sm) var(--space-lg);
+  text-align: left;
+  border-bottom: 1px solid var(--border-default);
+  white-space: nowrap;
+  user-select: none;
+}
+
+/* Table body cells */
+.table tbody td {
+  padding: var(--space-sm) var(--space-lg);
+  color: var(--text-primary);
+  border-bottom: 1px solid rgba(42, 58, 74, 0.5);
+  vertical-align: middle;
+}
+
+/* Striped rows */
+.table--striped tbody tr:nth-child(even) {
+  background: rgba(20, 24, 36, 0.4);
+}
+
+/* Hover rows */
+.table--hover tbody tr {
+  transition: background var(--transition-fast);
+}
+
+.table--hover tbody tr:hover {
+  background: var(--accent-cyan-dim);
+}
+
+/* Remove last row border */
+.table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+/* Numeric/right-aligned column */
+.table .col-num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Status column */
+.table .col-status {
+  text-align: center;
+}
+
+/* ============================================================
+   8. LOG VIEWER
+   Terminal-like container with colored log levels, monospace
+   text, and auto-scroll indicator.
+   ============================================================ */
+
+/* Log container */
+.log-viewer {
+  background: var(--bg-primary);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-lg);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-sm);
+  line-height: 1.7;
+  overflow-y: auto;
+  max-height: 400px;
+  padding: var(--space-md);
+  position: relative;
+  user-select: text;
+}
+
+/* Individual log line */
+.log-line {
+  padding: 1px var(--space-sm);
+  border-radius: var(--radius-sm);
+  animation: logSlideIn 200ms ease-out;
+  display: flex;
+  gap: var(--space-sm);
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.log-line:hover {
+  background: rgba(30, 35, 54, 0.5);
+}
+
+/* Log timestamp */
+.log-line__time {
+  color: var(--text-muted);
+  flex-shrink: 0;
+  font-size: var(--font-size-xs);
+  min-width: 70px;
+}
+
+/* Log level labels */
+.log-line__level {
+  font-weight: 600;
+  flex-shrink: 0;
+  min-width: 50px;
+  text-transform: uppercase;
+  font-size: var(--font-size-xs);
+}
+
+.log-line__level--info  { color: var(--accent-cyan); }
+.log-line__level--warn  { color: var(--color-warning); }
+.log-line__level--error { color: var(--color-error); }
+.log-line__level--debug { color: var(--accent-purple); }
+.log-line__level--trace { color: var(--text-muted); }
+
+/* Log message content */
+.log-line__msg {
+  color: var(--text-secondary);
+  flex: 1;
+}
+
+/* Error-level lines have a subtle red background */
+.log-line--error {
+  background: var(--color-error-dim);
+}
+
+/* Warning lines */
+.log-line--warn {
+  background: var(--color-warning-dim);
+}
+
+/* Auto-scroll indicator (shown when user scrolled up) */
+.log-viewer__scroll-indicator {
+  position: sticky;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  display: flex;
+  justify-content: center;
+  padding: var(--space-xs);
+  background: linear-gradient(transparent, var(--bg-primary));
+}
+
+.log-viewer__scroll-btn {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  color: var(--accent-cyan);
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-default);
+  border-radius: 9999px;
+  padding: 2px var(--space-md);
+  cursor: pointer;
+  transition: background var(--transition-fast);
+}
+
+.log-viewer__scroll-btn:hover {
+  background: var(--bg-surface);
+}
+
+/* Log viewer header bar */
+.log-viewer__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--space-sm) var(--space-md);
+  border-bottom: 1px solid var(--border-default);
+  background: var(--bg-secondary);
+  border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+}
+
+.log-viewer__header-title {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 1px;
+}
+
+/* ============================================================
+   9. LANGUAGE CHIPS
+   Small rounded tags with checkbox for language selection.
+   ============================================================ */
+
+/* Chip container */
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-xs);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  font-weight: 500;
+  padding: var(--space-xs) var(--space-md);
+  border-radius: 9999px;
+  border: 1px solid var(--border-default);
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
+  cursor: pointer;
+  user-select: none;
+  transition: background var(--transition-fast),
+              border-color var(--transition-fast),
+              color var(--transition-fast),
+              box-shadow var(--transition-fast);
+}
+
+.chip:hover {
+  border-color: var(--border-hover);
+  color: var(--text-primary);
+  background: var(--bg-surface);
+}
+
+/* Selected chip state */
+.chip--selected {
+  background: var(--accent-cyan-dim);
+  border-color: var(--accent-cyan);
+  color: var(--accent-cyan);
+}
+
+.chip--selected:hover {
+  background: rgba(0, 255, 204, 0.2);
+  border-color: var(--accent-cyan);
+  color: var(--accent-cyan);
+}
+
+/* Chip checkbox (hidden native, custom visual) */
+.chip__checkbox {
+  width: 12px;
+  height: 12px;
+  border-radius: 3px;
+  border: 1px solid var(--border-default);
+  background: var(--bg-primary);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  transition: background var(--transition-fast),
+              border-color var(--transition-fast);
+}
+
+.chip--selected .chip__checkbox {
+  background: var(--accent-cyan);
+  border-color: var(--accent-cyan);
+}
+
+/* Checkmark inside checkbox */
+.chip--selected .chip__checkbox::after {
+  content: '';
+  width: 5px;
+  height: 3px;
+  border-left: 1.5px solid var(--text-inverse);
+  border-bottom: 1.5px solid var(--text-inverse);
+  transform: rotate(-45deg) translateY(-1px);
+}
+
+/* Chip icon (language icon) */
+.chip__icon {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+}
+
+/* Chip label */
+.chip__label {
+  white-space: nowrap;
+}
+
+/* Chip group: flex-wrap container for multiple chips */
+.chip-group {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-sm);
+}
+
+/* ============================================================
+   10. SEPARATORS / DIVIDERS
+   Subtle horizontal rules with gradient fade.
+   ============================================================ */
+
+/* Basic separator */
+.separator {
+  height: 1px;
+  width: 100%;
+  border: none;
+  background: var(--border-default);
+  margin: var(--space-lg) 0;
+}
+
+/* Gradient fade separator */
+.separator--fade {
+  background: linear-gradient(
+    90deg,
+    transparent,
+    var(--border-default) 20%,
+    var(--border-default) 80%,
+    transparent
+  );
+}
+
+/* Accent separator (cyan) */
+.separator--accent {
+  background: linear-gradient(
+    90deg,
+    transparent,
+    var(--accent-cyan-dim) 20%,
+    var(--accent-cyan) 50%,
+    var(--accent-cyan-dim) 80%,
+    transparent
+  );
+  height: 1px;
+}
+
+/* Vertical separator */
+.separator--vertical {
+  width: 1px;
+  height: auto;
+  min-height: 16px;
+  margin: 0 var(--space-md);
+  align-self: stretch;
+  background: var(--border-default);
+}
+
+/* ============================================================
+   11. SECTION HEADERS
+   Uppercase, letter-spaced, muted color, with subtle line
+   decoration.
+   ============================================================ */
+
+.section-header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-md);
+  margin-bottom: var(--space-lg);
+}
+
+/* Section title text */
+.section-header__title {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 2px;
+  white-space: nowrap;
+}
+
+/* Decorative line after the title */
+.section-header__line {
+  flex: 1;
+  height: 1px;
+  background: linear-gradient(
+    90deg,
+    var(--border-default),
+    transparent
+  );
+}
+
+/* Section header with count badge */
+.section-header__count {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  color: var(--accent-cyan);
+  background: var(--accent-cyan-dim);
+  padding: 0 var(--space-sm);
+  border-radius: 9999px;
+  font-weight: 600;
+}
+
+/* ============================================================
+   12. SPINNER
+   Loading spinner for async operations.
+   ============================================================ */
+
+.spinner {
+  width: 20px;
+  height: 20px;
+  border: 2px solid var(--border-default);
+  border-top-color: var(--accent-cyan);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+  flex-shrink: 0;
+}
+
+.spinner--sm {
+  width: 14px;
+  height: 14px;
+  border-width: 1.5px;
+}
+
+.spinner--lg {
+  width: 32px;
+  height: 32px;
+  border-width: 3px;
+}
+
+/* ============================================================
+   13. TOOLTIPS
+   Small informational popovers.
+   ============================================================ */
+
+.tooltip-wrapper {
+  position: relative;
+  display: inline-flex;
+}
+
+.tooltip {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 50%;
+  transform: translateX(-50%);
+  background: var(--bg-surface);
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+  font-size: var(--font-size-xs);
+  padding: var(--space-xs) var(--space-sm);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-default);
+  box-shadow: var(--shadow-md);
+  white-space: nowrap;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity var(--transition-fast);
+  z-index: 1000;
+}
+
+/* Arrow */
+.tooltip::after {
+  content: '';
+  position: absolute;
+  top: 100%;
+  left: 50%;
+  transform: translateX(-50%);
+  border: 4px solid transparent;
+  border-top-color: var(--border-default);
+}
+
+.tooltip-wrapper:hover .tooltip {
+  opacity: 1;
+}
+
+/* ============================================================
+   14. EMPTY STATE
+   Shown when a section has no content.
+   ============================================================ */
+
+.empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-2xl);
+  text-align: center;
+  color: var(--text-muted);
+}
+
+.empty-state__icon {
+  font-size: 48px;
+  margin-bottom: var(--space-lg);
+  opacity: 0.3;
+}
+
+.empty-state__title {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-base);
+  font-weight: 600;
+  color: var(--text-secondary);
+  margin-bottom: var(--space-sm);
+}
+
+.empty-state__description {
+  font-size: var(--font-size-sm);
+  max-width: 320px;
+}
+
+/* ============================================================
+   15. DIALOG / MODAL OVERLAY
+   Centered overlay for confirmations or settings.
+   ============================================================ */
+
+.dialog-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(10, 14, 27, 0.8);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 900;
+  animation: fadeSlideUp 200ms ease-out;
+}
+
+.dialog {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-xl);
+  box-shadow: var(--shadow-lg);
+  padding: var(--space-xl);
+  min-width: 360px;
+  max-width: 480px;
+  width: 90%;
+  animation: fadeSlideUp 250ms ease-out;
+}
+
+.dialog__title {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-lg);
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: var(--space-md);
+}
+
+.dialog__body {
+  font-size: var(--font-size-sm);
+  color: var(--text-secondary);
+  margin-bottom: var(--space-xl);
+  line-height: 1.6;
+}
+
+.dialog__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-sm);
+}
+
+/* ============================================================
+   16. ICON HELPERS
+   Sizing for inline SVG icons used in buttons and labels.
+   ============================================================ */
+
+.icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.icon--xs { width: 12px; height: 12px; }
+.icon--sm { width: 16px; height: 16px; }
+.icon--md { width: 20px; height: 20px; }
+.icon--lg { width: 24px; height: 24px; }
+.icon--xl { width: 32px; height: 32px; }

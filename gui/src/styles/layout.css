@@ -1,0 +1,466 @@
+/* ============================================================
+   SCIP-IO Layout Utilities
+   App layout structure, grid/flex utilities, spacing, sizing,
+   positioning, and responsive helpers.
+   ============================================================ */
+
+/* ============================================================
+   1. APP LAYOUT STRUCTURE
+   Top-level containers for the Tauri window.
+   ============================================================ */
+
+/* Root application container */
+.app-container {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  position: relative;
+  overflow: hidden;
+}
+
+/* Scanline overlay — subtle CRT-style background effect */
+.app-container::after {
+  content: '';
+  position: fixed;
+  inset: 0;
+  background: repeating-linear-gradient(
+    0deg,
+    transparent,
+    transparent 2px,
+    rgba(0, 255, 204, 0.012) 2px,
+    rgba(0, 255, 204, 0.012) 4px
+  );
+  pointer-events: none;
+  z-index: 9999;
+  animation: scanlineMove 8s linear infinite;
+}
+
+/* Scrollable main content area below titlebar */
+.main-content {
+  flex: 1;
+  overflow-y: auto;
+  padding: var(--space-xl);
+}
+
+/* Content wrapper with max-width for readability */
+.content-wrapper {
+  max-width: 1200px;
+  margin: 0 auto;
+  width: 100%;
+}
+
+/* Full-width content (no max-width constraint) */
+.content-full {
+  width: 100%;
+}
+
+/* ============================================================
+   2. SECTION LAYOUT
+   Common section patterns used in the main content area.
+   ============================================================ */
+
+/* Vertical section with spacing between children */
+.section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-lg);
+}
+
+.section + .section {
+  margin-top: var(--space-2xl);
+}
+
+/* Two-column layout: sidebar + main */
+.layout-sidebar {
+  display: grid;
+  grid-template-columns: 280px 1fr;
+  gap: var(--space-xl);
+  height: 100%;
+}
+
+/* Sidebar content */
+.layout-sidebar__aside {
+  overflow-y: auto;
+  padding: var(--space-lg);
+  border-right: 1px solid var(--border-default);
+  background: var(--bg-secondary);
+}
+
+/* Main content next to sidebar */
+.layout-sidebar__main {
+  overflow-y: auto;
+  padding: var(--space-xl);
+}
+
+/* Stacked layout: top fixed area + scrollable body */
+.layout-stacked {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+.layout-stacked__header {
+  flex-shrink: 0;
+  padding: var(--space-lg);
+  border-bottom: 1px solid var(--border-default);
+  background: var(--bg-secondary);
+}
+
+.layout-stacked__body {
+  flex: 1;
+  overflow-y: auto;
+  padding: var(--space-xl);
+}
+
+.layout-stacked__footer {
+  flex-shrink: 0;
+  padding: var(--space-md) var(--space-lg);
+  border-top: 1px solid var(--border-default);
+  background: var(--bg-secondary);
+}
+
+/* ============================================================
+   3. GRID UTILITIES
+   ============================================================ */
+
+.grid { display: grid; }
+
+/* Fixed column counts */
+.grid-1 { grid-template-columns: 1fr; }
+.grid-2 { grid-template-columns: repeat(2, 1fr); }
+.grid-3 { grid-template-columns: repeat(3, 1fr); }
+.grid-4 { grid-template-columns: repeat(4, 1fr); }
+
+/* Auto-fit responsive grid */
+.grid-auto-sm {
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+}
+
+.grid-auto-md {
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+}
+
+.grid-auto-lg {
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+}
+
+/* Grid gap values */
+.gap-xs  { gap: var(--space-xs); }
+.gap-sm  { gap: var(--space-sm); }
+.gap-md  { gap: var(--space-md); }
+.gap-lg  { gap: var(--space-lg); }
+.gap-xl  { gap: var(--space-xl); }
+.gap-2xl { gap: var(--space-2xl); }
+
+/* Row/column specific gaps */
+.row-gap-sm { row-gap: var(--space-sm); }
+.row-gap-md { row-gap: var(--space-md); }
+.row-gap-lg { row-gap: var(--space-lg); }
+.col-gap-sm { column-gap: var(--space-sm); }
+.col-gap-md { column-gap: var(--space-md); }
+.col-gap-lg { column-gap: var(--space-lg); }
+
+/* Grid span helpers */
+.col-span-2 { grid-column: span 2; }
+.col-span-3 { grid-column: span 3; }
+.col-span-full { grid-column: 1 / -1; }
+
+/* ============================================================
+   4. FLEX UTILITIES
+   ============================================================ */
+
+.flex { display: flex; }
+.inline-flex { display: inline-flex; }
+
+/* Direction */
+.flex-col { flex-direction: column; }
+.flex-row { flex-direction: row; }
+.flex-col-reverse { flex-direction: column-reverse; }
+.flex-row-reverse { flex-direction: row-reverse; }
+
+/* Wrap */
+.flex-wrap { flex-wrap: wrap; }
+.flex-nowrap { flex-wrap: nowrap; }
+
+/* Grow / shrink */
+.flex-1 { flex: 1; }
+.flex-auto { flex: auto; }
+.flex-none { flex: none; }
+.grow-0 { flex-grow: 0; }
+.grow { flex-grow: 1; }
+.shrink-0 { flex-shrink: 0; }
+.shrink { flex-shrink: 1; }
+
+/* Alignment */
+.items-center  { align-items: center; }
+.items-start   { align-items: flex-start; }
+.items-end     { align-items: flex-end; }
+.items-stretch { align-items: stretch; }
+.items-baseline { align-items: baseline; }
+
+/* Justify */
+.justify-center  { justify-content: center; }
+.justify-between { justify-content: space-between; }
+.justify-end     { justify-content: flex-end; }
+.justify-start   { justify-content: flex-start; }
+.justify-around  { justify-content: space-around; }
+.justify-evenly  { justify-content: space-evenly; }
+
+/* Self alignment */
+.self-center { align-self: center; }
+.self-start  { align-self: flex-start; }
+.self-end    { align-self: flex-end; }
+.self-stretch { align-self: stretch; }
+
+/* ============================================================
+   5. SPACING UTILITIES
+   Padding and margin helpers matching the spacing scale.
+   ============================================================ */
+
+/* --- Padding --- */
+.p-0   { padding: 0; }
+.p-xs  { padding: var(--space-xs); }
+.p-sm  { padding: var(--space-sm); }
+.p-md  { padding: var(--space-md); }
+.p-lg  { padding: var(--space-lg); }
+.p-xl  { padding: var(--space-xl); }
+.p-2xl { padding: var(--space-2xl); }
+
+/* Horizontal padding */
+.px-xs  { padding-left: var(--space-xs); padding-right: var(--space-xs); }
+.px-sm  { padding-left: var(--space-sm); padding-right: var(--space-sm); }
+.px-md  { padding-left: var(--space-md); padding-right: var(--space-md); }
+.px-lg  { padding-left: var(--space-lg); padding-right: var(--space-lg); }
+.px-xl  { padding-left: var(--space-xl); padding-right: var(--space-xl); }
+
+/* Vertical padding */
+.py-xs  { padding-top: var(--space-xs); padding-bottom: var(--space-xs); }
+.py-sm  { padding-top: var(--space-sm); padding-bottom: var(--space-sm); }
+.py-md  { padding-top: var(--space-md); padding-bottom: var(--space-md); }
+.py-lg  { padding-top: var(--space-lg); padding-bottom: var(--space-lg); }
+.py-xl  { padding-top: var(--space-xl); padding-bottom: var(--space-xl); }
+
+/* Directional padding */
+.pt-sm { padding-top: var(--space-sm); }
+.pt-md { padding-top: var(--space-md); }
+.pt-lg { padding-top: var(--space-lg); }
+.pb-sm { padding-bottom: var(--space-sm); }
+.pb-md { padding-bottom: var(--space-md); }
+.pb-lg { padding-bottom: var(--space-lg); }
+.pl-sm { padding-left: var(--space-sm); }
+.pl-md { padding-left: var(--space-md); }
+.pr-sm { padding-right: var(--space-sm); }
+.pr-md { padding-right: var(--space-md); }
+
+/* --- Margin --- */
+.m-0   { margin: 0; }
+.m-auto { margin: auto; }
+
+/* Directional margins */
+.mt-0  { margin-top: 0; }
+.mt-xs { margin-top: var(--space-xs); }
+.mt-sm { margin-top: var(--space-sm); }
+.mt-md { margin-top: var(--space-md); }
+.mt-lg { margin-top: var(--space-lg); }
+.mt-xl { margin-top: var(--space-xl); }
+.mt-2xl { margin-top: var(--space-2xl); }
+
+.mb-0  { margin-bottom: 0; }
+.mb-xs { margin-bottom: var(--space-xs); }
+.mb-sm { margin-bottom: var(--space-sm); }
+.mb-md { margin-bottom: var(--space-md); }
+.mb-lg { margin-bottom: var(--space-lg); }
+.mb-xl { margin-bottom: var(--space-xl); }
+
+.ml-sm { margin-left: var(--space-sm); }
+.ml-md { margin-left: var(--space-md); }
+.ml-auto { margin-left: auto; }
+
+.mr-sm { margin-right: var(--space-sm); }
+.mr-md { margin-right: var(--space-md); }
+.mr-auto { margin-right: auto; }
+
+/* Horizontal auto-center */
+.mx-auto { margin-left: auto; margin-right: auto; }
+
+/* ============================================================
+   6. SIZING UTILITIES
+   ============================================================ */
+
+/* Width */
+.w-full { width: 100%; }
+.w-auto { width: auto; }
+.w-fit  { width: fit-content; }
+.min-w-0 { min-width: 0; }
+.max-w-sm  { max-width: 320px; }
+.max-w-md  { max-width: 480px; }
+.max-w-lg  { max-width: 640px; }
+.max-w-xl  { max-width: 800px; }
+.max-w-2xl { max-width: 1024px; }
+.max-w-full { max-width: 100%; }
+
+/* Height */
+.h-full { height: 100%; }
+.h-auto { height: auto; }
+.h-screen { height: 100vh; }
+.min-h-0 { min-height: 0; }
+.min-h-screen { min-height: 100vh; }
+
+/* ============================================================
+   7. OVERFLOW UTILITIES
+   ============================================================ */
+
+.overflow-hidden  { overflow: hidden; }
+.overflow-auto    { overflow: auto; }
+.overflow-visible { overflow: visible; }
+.overflow-x-auto  { overflow-x: auto; }
+.overflow-x-hidden { overflow-x: hidden; }
+.overflow-y-auto  { overflow-y: auto; }
+.overflow-y-hidden { overflow-y: hidden; }
+
+/* Scroll snap for horizontal carousels */
+.scroll-snap-x {
+  overflow-x: auto;
+  scroll-snap-type: x mandatory;
+}
+
+.scroll-snap-item {
+  scroll-snap-align: start;
+}
+
+/* ============================================================
+   8. POSITIONING UTILITIES
+   ============================================================ */
+
+.relative { position: relative; }
+.absolute { position: absolute; }
+.fixed    { position: fixed; }
+.sticky   { position: sticky; top: 0; }
+.inset-0  { inset: 0; }
+
+/* Z-index scale */
+.z-0    { z-index: 0; }
+.z-10   { z-index: 10; }
+.z-20   { z-index: 20; }
+.z-50   { z-index: 50; }
+.z-100  { z-index: 100; }
+.z-max  { z-index: 9999; }
+
+/* ============================================================
+   9. DISPLAY UTILITIES
+   ============================================================ */
+
+.block        { display: block; }
+.inline-block { display: inline-block; }
+.inline       { display: inline; }
+.hidden       { display: none; }
+.contents     { display: contents; }
+
+/* Visibility (takes space but invisible) */
+.invisible { visibility: hidden; }
+.visible   { visibility: visible; }
+
+/* Opacity */
+.opacity-0   { opacity: 0; }
+.opacity-50  { opacity: 0.5; }
+.opacity-75  { opacity: 0.75; }
+.opacity-100 { opacity: 1; }
+
+/* ============================================================
+   10. BORDER UTILITIES
+   ============================================================ */
+
+.border     { border: 1px solid var(--border-default); }
+.border-0   { border: none; }
+.border-t   { border-top: 1px solid var(--border-default); }
+.border-b   { border-bottom: 1px solid var(--border-default); }
+.border-l   { border-left: 1px solid var(--border-default); }
+.border-r   { border-right: 1px solid var(--border-default); }
+
+.rounded-sm { border-radius: var(--radius-sm); }
+.rounded-md { border-radius: var(--radius-md); }
+.rounded-lg { border-radius: var(--radius-lg); }
+.rounded-xl { border-radius: var(--radius-xl); }
+.rounded-full { border-radius: 9999px; }
+.rounded-none { border-radius: 0; }
+
+/* ============================================================
+   11. BACKGROUND UTILITIES
+   ============================================================ */
+
+.bg-primary   { background: var(--bg-primary); }
+.bg-secondary { background: var(--bg-secondary); }
+.bg-tertiary  { background: var(--bg-tertiary); }
+.bg-surface   { background: var(--bg-surface); }
+.bg-transparent { background: transparent; }
+
+/* ============================================================
+   12. CURSOR UTILITIES
+   ============================================================ */
+
+.cursor-pointer  { cursor: pointer; }
+.cursor-default  { cursor: default; }
+.cursor-not-allowed { cursor: not-allowed; }
+.cursor-grab     { cursor: grab; }
+.cursor-grabbing { cursor: grabbing; }
+
+/* ============================================================
+   13. POINTER-EVENTS UTILITIES
+   ============================================================ */
+
+.pointer-events-none { pointer-events: none; }
+.pointer-events-auto { pointer-events: auto; }
+
+/* ============================================================
+   14. RESPONSIVE BREAKPOINTS
+   Tauri apps have a fixed window, but these handle resizing.
+   Mobile-first approach: defaults apply, then scale up.
+   ============================================================ */
+
+/* Small window (< 640px) */
+@media (max-width: 639px) {
+  .main-content {
+    padding: var(--space-md);
+  }
+
+  .layout-sidebar {
+    grid-template-columns: 1fr;
+  }
+
+  .layout-sidebar__aside {
+    border-right: none;
+    border-bottom: 1px solid var(--border-default);
+    max-height: 200px;
+  }
+
+  .grid-2,
+  .grid-3,
+  .grid-4 {
+    grid-template-columns: 1fr;
+  }
+
+  /* Responsive visibility */
+  .hide-sm { display: none; }
+}
+
+/* Medium window (640px - 1023px) */
+@media (min-width: 640px) and (max-width: 1023px) {
+  .grid-3 {
+    grid-template-columns: repeat(2, 1fr);
+  }
+
+  .grid-4 {
+    grid-template-columns: repeat(2, 1fr);
+  }
+
+  .hide-md { display: none; }
+}
+
+/* Large window (>= 1024px) */
+@media (min-width: 1024px) {
+  .hide-lg { display: none; }
+
+  .show-lg {
+    display: initial;
+  }
+}

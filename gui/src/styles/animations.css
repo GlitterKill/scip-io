@@ -1,0 +1,333 @@
+/* ============================================================
+   SCIP-IO Animations & Keyframes
+   All animation definitions and utility classes for the
+   cyberpunk-corporate dark theme.
+   ============================================================ */
+
+/* ============================================================
+   1. KEYFRAME DEFINITIONS
+   ============================================================ */
+
+/* --- Panel / element entrance --- */
+@keyframes fadeSlideUp {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* --- Fade slide down (for dropdowns) --- */
+@keyframes fadeSlideDown {
+  from {
+    opacity: 0;
+    transform: translateY(-8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* --- Simple fade in --- */
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+/* --- Simple fade out --- */
+@keyframes fadeOut {
+  from { opacity: 1; }
+  to   { opacity: 0; }
+}
+
+/* --- Status dot / element pulse --- */
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.4; }
+}
+
+/* --- Log line slide in from left --- */
+@keyframes logSlideIn {
+  from {
+    opacity: 0;
+    transform: translateX(-10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+/* --- Scanline overlay movement --- */
+@keyframes scanlineMove {
+  0%   { transform: translateY(0); }
+  100% { transform: translateY(10px); }
+}
+
+/* --- Neon flicker for headings --- */
+@keyframes neonFlicker {
+  0%, 100% { opacity: 1; }
+  92%      { opacity: 1; }
+  93%      { opacity: 0.8; }
+  94%      { opacity: 1; }
+  96%      { opacity: 0.9; }
+  97%      { opacity: 1; }
+}
+
+/* --- Spinner rotation --- */
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}
+
+/* --- Progress indeterminate shimmer --- */
+@keyframes shimmer {
+  0%   { transform: translateX(-100%); }
+  100% { transform: translateX(200%); }
+}
+
+/* --- Glow pulse for active/running elements --- */
+@keyframes glowPulse {
+  0%, 100% {
+    box-shadow: 0 0 5px var(--accent-cyan-glow);
+  }
+  50% {
+    box-shadow: 0 0 20px var(--accent-cyan-glow),
+                0 0 40px rgba(0, 255, 204, 0.1);
+  }
+}
+
+/* --- Magenta glow pulse variant --- */
+@keyframes glowPulseMagenta {
+  0%, 100% {
+    box-shadow: 0 0 5px var(--accent-magenta-glow);
+  }
+  50% {
+    box-shadow: 0 0 20px var(--accent-magenta-glow),
+                0 0 40px rgba(255, 0, 170, 0.1);
+  }
+}
+
+/* --- Scale pop for click feedback --- */
+@keyframes scalePop {
+  0%   { transform: scale(1); }
+  50%  { transform: scale(1.05); }
+  100% { transform: scale(1); }
+}
+
+/* --- Shake for error feedback --- */
+@keyframes shake {
+  0%, 100% { transform: translateX(0); }
+  10%, 50%, 90% { transform: translateX(-3px); }
+  30%, 70% { transform: translateX(3px); }
+}
+
+/* --- Progress bar fill expand (for determinate progress) --- */
+@keyframes progressFill {
+  from { width: 0%; }
+}
+
+/* --- Slide in from right (for notifications/toasts) --- */
+@keyframes slideInRight {
+  from {
+    opacity: 0;
+    transform: translateX(24px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+/* --- Slide out to right (for dismissing) --- */
+@keyframes slideOutRight {
+  from {
+    opacity: 1;
+    transform: translateX(0);
+  }
+  to {
+    opacity: 0;
+    transform: translateX(24px);
+  }
+}
+
+/* --- Typing cursor blink for terminal effects --- */
+@keyframes cursorBlink {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0; }
+}
+
+/* --- Border trace: rotating dashed border effect --- */
+@keyframes borderTrace {
+  from { stroke-dashoffset: 100; }
+  to   { stroke-dashoffset: 0; }
+}
+
+/* --- Titlebar accent gradient scroll --- */
+@keyframes gradientShift {
+  0%   { background-position: 0% 50%; }
+  50%  { background-position: 100% 50%; }
+  100% { background-position: 0% 50%; }
+}
+
+/* ============================================================
+   2. ANIMATION UTILITY CLASSES
+   Apply these to elements directly for common effects.
+   ============================================================ */
+
+/* --- Entrance animations --- */
+.animate-fade-in {
+  animation: fadeSlideUp 300ms ease-out;
+}
+
+.animate-fade-in-fast {
+  animation: fadeSlideUp 150ms ease-out;
+}
+
+.animate-fade-in-slow {
+  animation: fadeSlideUp 500ms ease-out;
+}
+
+.animate-fade-down {
+  animation: fadeSlideDown 300ms ease-out;
+}
+
+.animate-slide-in-right {
+  animation: slideInRight 300ms ease-out;
+}
+
+.animate-slide-out-right {
+  animation: slideOutRight 200ms ease-out forwards;
+}
+
+/* --- Looping animations --- */
+.animate-pulse {
+  animation: pulse 2s ease-in-out infinite;
+}
+
+.animate-pulse-fast {
+  animation: pulse 1s ease-in-out infinite;
+}
+
+.animate-spin {
+  animation: spin 1s linear infinite;
+}
+
+.animate-spin-slow {
+  animation: spin 2s linear infinite;
+}
+
+.animate-glow {
+  animation: glowPulse 2s ease-in-out infinite;
+}
+
+.animate-glow-magenta {
+  animation: glowPulseMagenta 2s ease-in-out infinite;
+}
+
+.animate-neon {
+  animation: neonFlicker 4s ease-in-out infinite;
+}
+
+.animate-shimmer {
+  animation: shimmer 2s ease-in-out infinite;
+}
+
+.animate-cursor-blink {
+  animation: cursorBlink 1s step-end infinite;
+}
+
+.animate-gradient {
+  animation: gradientShift 6s ease infinite;
+}
+
+/* --- One-shot feedback --- */
+.animate-pop {
+  animation: scalePop 300ms ease-out;
+}
+
+.animate-shake {
+  animation: shake 400ms ease-out;
+}
+
+/* ============================================================
+   3. STAGGERED ENTRANCE DELAYS
+   Use on sibling elements for cascading appear effects.
+   For example: .animate-fade-in.stagger-2 on the second item.
+   ============================================================ */
+
+.stagger-1 { animation-delay: 50ms;  animation-fill-mode: backwards; }
+.stagger-2 { animation-delay: 100ms; animation-fill-mode: backwards; }
+.stagger-3 { animation-delay: 150ms; animation-fill-mode: backwards; }
+.stagger-4 { animation-delay: 200ms; animation-fill-mode: backwards; }
+.stagger-5 { animation-delay: 250ms; animation-fill-mode: backwards; }
+.stagger-6 { animation-delay: 300ms; animation-fill-mode: backwards; }
+.stagger-7 { animation-delay: 350ms; animation-fill-mode: backwards; }
+.stagger-8 { animation-delay: 400ms; animation-fill-mode: backwards; }
+
+/* ============================================================
+   4. TRANSITION UTILITIES
+   For elements that need smooth state transitions rather than
+   full keyframe animations.
+   ============================================================ */
+
+.transition-none {
+  transition: none !important;
+}
+
+.transition-fast {
+  transition: all var(--transition-fast);
+}
+
+.transition-base {
+  transition: all var(--transition-base);
+}
+
+.transition-slow {
+  transition: all var(--transition-slow);
+}
+
+/* Property-specific transitions */
+.transition-opacity {
+  transition: opacity var(--transition-base);
+}
+
+.transition-transform {
+  transition: transform var(--transition-base);
+}
+
+.transition-colors {
+  transition: color var(--transition-base),
+              background-color var(--transition-base),
+              border-color var(--transition-base);
+}
+
+.transition-shadow {
+  transition: box-shadow var(--transition-base);
+}
+
+/* ============================================================
+   5. REDUCED MOTION
+   Respect user preference for reduced animations.
+   ============================================================ */
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+
+  /* Keep spinners functional but faster */
+  .animate-spin,
+  .spinner {
+    animation-duration: 0.01ms !important;
+  }
+}

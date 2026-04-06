@@ -1,0 +1,21 @@
+/target
+*.scip
+.scip-io.toml
+PRD.md
+
+# Node / Vite
+node_modules/
+gui/dist/
+
+# Backups / scratch
+src_old/
+
+# Editor / IDE
+.vscode/
+.idea/
+
+# Claude Code local (per-machine) settings
+.claude/settings.local.json
+
+# Tauri generated
+src-tauri/gen/schemas/

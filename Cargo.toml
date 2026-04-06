@@ -1,0 +1,48 @@
+[workspace]
+members = ["crates/scip-io-core", "crates/scip-io-cli", "src-tauri"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "SCIP Index Orchestrator"
+
+[workspace.dependencies]
+# SCIP protobuf
+scip = "0.7"
+protobuf = "3"
+
+# Async runtime + HTTP (for downloading indexer binaries)
+tokio = { version = "1", features = ["full"] }
+reqwest = { version = "0.12", features = ["stream", "json"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+
+# Error handling + logging
+anyhow = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Utilities
+dirs = "6"
+walkdir = "2"
+tempfile = "3"
+sha2 = "0.10"
+hex = "0.4"
+futures-util = "0.3"
+
+# Archive extraction + PATH lookup
+flate2 = "1"
+tar = "0.4"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+which = "7"
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+indicatif = "0.17"
+console = "0.15"
