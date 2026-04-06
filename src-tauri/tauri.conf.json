@@ -27,6 +27,11 @@
     }
   },
   "bundle": {
+    "active": true,
+    "targets": ["deb", "appimage", "msi", "nsis", "app", "dmg"],
+    "category": "DeveloperTool",
+    "shortDescription": "SCIP index orchestrator for multi-language codebases",
+    "longDescription": "SCIP-IO detects project languages, downloads and manages SCIP indexer binaries, runs them in parallel, and merges the resulting .scip files into a single index.scip.",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
