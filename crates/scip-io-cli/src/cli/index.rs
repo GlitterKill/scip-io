@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -20,11 +21,16 @@ struct IndexerTask {
     entry: &'static IndexerEntry,
     binary_path: PathBuf,
     project_root: PathBuf,
+    /// Additional detected languages whose indexing is handled by the same
+    /// tool invocation (e.g. `javascript` is covered by a single
+    /// `scip-typescript` run when `tsconfig.json` has `allowJs: true`).
+    covers: Vec<String>,
 }
 
 /// Result of running a single indexer.
 struct IndexerResult {
     lang_name: String,
+    covers: Vec<String>,
     outcome: Result<PathBuf>,
 }
 
@@ -90,8 +96,17 @@ pub async fn run(args: IndexArgs) -> Result<()> {
             entry,
             binary_path,
             project_root: path.clone(),
+            covers: Vec::new(),
         });
     }
+
+    // Dedupe tasks whose indexer binary handles multiple languages in a
+    // single invocation. The canonical case is scip-typescript, which
+    // indexes both .ts and .js files from one run when tsconfig.json
+    // has `allowJs: true`. Running it twice would just produce a
+    // duplicate index. Detection still reports all languages; this is
+    // only about how many times the tool is actually invoked.
+    let tasks = dedupe_tasks_by_indexer(tasks, is_json);
 
     // Phase 2: Run indexers in parallel with timeout
     let parallel = args.parallel.unwrap_or(4) as usize;
@@ -113,6 +128,7 @@ pub async fn run(args: IndexArgs) -> Result<()> {
             let dur = timeout_duration;
             async move {
                 let lang_name = task.lang.name().to_string();
+                let covers = task.covers.clone();
                 let outcome = tokio::time::timeout(
                     dur,
                     runner::run_indexer(
@@ -126,10 +142,12 @@ pub async fn run(args: IndexArgs) -> Result<()> {
                 match outcome {
                     Ok(result) => IndexerResult {
                         lang_name,
+                        covers,
                         outcome: result,
                     },
                     Err(_) => IndexerResult {
                         lang_name: lang_name.clone(),
+                        covers,
                         outcome: Err(anyhow::anyhow!(
                             "Indexer for {} timed out after {}s",
                             lang_name,
@@ -157,6 +175,14 @@ pub async fn run(args: IndexArgs) -> Result<()> {
                         result.lang_name,
                         output.display()
                     );
+                    for covered in &result.covers {
+                        println!(
+                            "    {} {} covered by {} run",
+                            style("->").dim(),
+                            covered,
+                            result.lang_name
+                        );
+                    }
                 }
                 scip_outputs.push(output);
             }
@@ -168,8 +194,19 @@ pub async fn run(args: IndexArgs) -> Result<()> {
                         result.lang_name,
                         err
                     );
+                    for covered in &result.covers {
+                        eprintln!(
+                            "    {} {} also failed (covered by {} run)",
+                            style("->").dim(),
+                            covered,
+                            result.lang_name
+                        );
+                    }
                 }
-                failures.push((result.lang_name, format!("{:#}", err)));
+                failures.push((result.lang_name.clone(), format!("{:#}", err)));
+                for covered in &result.covers {
+                    failures.push((covered.clone(), format!("{:#}", err)));
+                }
             }
         }
     }
@@ -292,4 +329,73 @@ fn run_dry_run(args: &IndexArgs, languages: &[Language], is_json: bool) -> Resul
         }
     }
     Ok(())
+}
+
+/// Group tasks by their `indexer_name` and collapse each group to a single
+/// invocation. When multiple detected languages resolve to the same
+/// indexer tool (e.g. scip-typescript handles both TypeScript and
+/// JavaScript), running it once is enough — the extra languages are
+/// tracked in `covers` so they can be reported in the output.
+///
+/// Within a group the "primary" task is chosen by preferring the one whose
+/// `default_args` do NOT include `--infer-tsconfig`: that flag only helps
+/// projects lacking a tsconfig.json, and in a dedup situation we already
+/// know another task in the group is indexing the same tsconfig-backed
+/// project, so the simpler invocation is the right choice.
+fn dedupe_tasks_by_indexer(tasks: Vec<IndexerTask>, is_json: bool) -> Vec<IndexerTask> {
+    let mut grouped: HashMap<String, Vec<IndexerTask>> = HashMap::new();
+    let mut order: Vec<String> = Vec::new();
+    for task in tasks {
+        let key = task.entry.indexer_name.clone();
+        if !grouped.contains_key(&key) {
+            order.push(key.clone());
+        }
+        grouped.entry(key).or_default().push(task);
+    }
+
+    let mut out = Vec::with_capacity(order.len());
+    for key in order {
+        let mut group = grouped.remove(&key).unwrap();
+        if group.len() == 1 {
+            out.push(group.pop().unwrap());
+            continue;
+        }
+
+        // Pick the primary: prefer args without `--infer-tsconfig`,
+        // then fall back to lexicographic language name for determinism.
+        group.sort_by(|a, b| {
+            let a_infer = a
+                .entry
+                .default_args
+                .iter()
+                .any(|x| x == "--infer-tsconfig");
+            let b_infer = b
+                .entry
+                .default_args
+                .iter()
+                .any(|x| x == "--infer-tsconfig");
+            a_infer
+                .cmp(&b_infer)
+                .then_with(|| a.lang.name().cmp(b.lang.name()))
+        });
+
+        let mut iter = group.into_iter();
+        let mut primary = iter.next().unwrap();
+        for extra in iter {
+            if !is_json {
+                println!(
+                    "  {} {} will be indexed by the {} run for {} (shared tool: {})",
+                    style("i").yellow(),
+                    extra.lang.name(),
+                    primary.lang.name(),
+                    primary.lang.name(),
+                    primary.entry.indexer_name,
+                );
+            }
+            primary.covers.push(extra.lang.name().to_string());
+        }
+        out.push(primary);
+    }
+
+    out
 }

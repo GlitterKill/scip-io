@@ -6,8 +6,6 @@ use anyhow::Result;
 use std::path::Path;
 use walkdir::WalkDir;
 
-use crate::detect::languages::LanguageKind;
-
 /// Scan a project root and return all detected languages.
 pub fn scan_languages(root: &Path) -> Result<Vec<Language>> {
     let mut detected = Vec::new();
@@ -40,18 +38,6 @@ pub fn scan_languages(root: &Path) -> Result<Vec<Language>> {
                 detected.push(lang.with_evidence(relative.clone()));
             }
         }
-    }
-
-    // scip-typescript is the only SCIP indexer for both TypeScript and
-    // JavaScript. In a project that has a tsconfig.json, running it a
-    // second time for JavaScript just re-indexes the same .ts files
-    // (the `--infer-tsconfig` flag is a no-op when a tsconfig already
-    // exists), producing a duplicate index. When TypeScript is detected,
-    // drop JavaScript — users who want .js files indexed alongside .ts
-    // should set `"allowJs": true` in tsconfig.json and scip-typescript
-    // will pick them up in the single TypeScript run.
-    if seen.contains(&LanguageKind::TypeScript) {
-        detected.retain(|l| l.kind != LanguageKind::JavaScript);
     }
 
     detected.sort_by_key(|l| l.name());
@@ -240,26 +226,21 @@ mod tests {
     }
 
     #[test]
-    fn test_javascript_dropped_when_typescript_present() {
+    fn test_both_javascript_and_typescript_detected() {
         // A typical TS project has both package.json and tsconfig.json.
-        // JavaScript should be dropped because scip-typescript handles
-        // both languages in a single run and would otherwise produce a
-        // duplicate index.
+        // Detection should report both languages so users see what's
+        // in their project; dedup of the actual indexer invocation is
+        // the indexing layer's job.
         let (_dir, project) =
             create_fixture_project(&["package.json", "tsconfig.json", "src/index.ts"]);
         let langs = scan_languages(&project).unwrap();
         assert!(langs.iter().any(|l| l.kind == LanguageKind::TypeScript));
-        assert!(
-            !langs.iter().any(|l| l.kind == LanguageKind::JavaScript),
-            "JavaScript should not be detected when TypeScript is present"
-        );
+        assert!(langs.iter().any(|l| l.kind == LanguageKind::JavaScript));
     }
 
     #[test]
     fn test_javascript_detected_without_typescript() {
         // Pure JavaScript project: only package.json, no tsconfig.json.
-        // JavaScript should still be detected so scip-typescript can
-        // infer a tsconfig and index the .js files.
         let (_dir, project) = create_fixture_project(&["package.json", "src/index.js"]);
         let langs = scan_languages(&project).unwrap();
         assert!(langs.iter().any(|l| l.kind == LanguageKind::JavaScript));

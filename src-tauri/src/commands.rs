@@ -1,7 +1,8 @@
 use scip_io_core::config::ProjectConfig;
-use scip_io_core::detect::scan_languages;
+use scip_io_core::detect::{Language, scan_languages};
 use scip_io_core::indexer::install_dir;
 use scip_io_core::indexer::registry::REGISTRY;
+use scip_io_core::indexer::IndexerEntry;
 use scip_io_core::progress::{ProgressEvent, ProgressHandler};
 use scip_io_core::validate::validate_scip_file;
 use serde::Serialize;
@@ -265,59 +266,105 @@ pub async fn start_indexing(
             .collect()
     };
 
+    // Dedupe by indexer_name so a tool that handles multiple languages
+    // (e.g. scip-typescript for both .ts and .js via `allowJs: true`)
+    // is only invoked once. Languages rolled into another task are
+    // tracked as `covers` and still reported in the results.
+    let plans = build_indexing_plans(&to_index);
+
     let mut outputs = Vec::new();
     let mut lang_results: Vec<serde_json::Value> = Vec::new();
     let indexing_start = std::time::Instant::now();
 
-    for lang in &to_index {
+    for plan in &plans {
         if CANCEL_FLAG.load(Ordering::SeqCst) {
             return Err("Indexing cancelled".to_string());
         }
 
-        if let Some(entry) = REGISTRY.get(lang) {
-            // Download indexer
-            let binary = entry
-                .ensure_installed(&handler)
-                .await
-                .map_err(|e| format!("Download failed: {}", e))?;
+        let lang = &plan.primary;
+        let entry = plan.entry;
 
-            // Run indexer
-            let start = std::time::Instant::now();
-            handler.on_event(ProgressEvent::IndexerStart {
-                language: lang.kind.name().to_string(),
-                command: format!("{} {}", binary.display(), entry.default_args.join(" ")),
-            });
+        // Log covered languages so the UI can show they're folded
+        // into this run instead of silently disappearing.
+        for covered in &plan.covers {
+            handler.emit_frontend(serde_json::json!({
+                "kind": "log",
+                "level": "info",
+                "message": format!(
+                    "{} will be indexed by the {} run (shared tool: {})",
+                    covered.kind.name(),
+                    lang.kind.name(),
+                    entry.indexer_name,
+                ),
+            }));
+        }
 
-            match scip_io_core::indexer::runner::run_indexer(&binary, entry, &root, lang).await {
-                Ok(output_path) => {
-                    let duration = start.elapsed();
-                    handler.on_event(ProgressEvent::IndexerComplete {
-                        language: lang.kind.name().to_string(),
-                        duration_secs: duration.as_secs_f64(),
-                        output: output_path.clone(),
-                    });
+        // Download indexer
+        let binary = entry
+            .ensure_installed(&handler)
+            .await
+            .map_err(|e| format!("Download failed: {}", e))?;
 
-                    // Read per-language stats from the SCIP output
-                    let (files, symbols) = match validate_scip_file(&output_path) {
-                        Ok(v) => {
-                            let s = v.stats.unwrap_or_default();
-                            (s.documents, s.symbols)
-                        }
-                        Err(_) => (0, 0),
-                    };
+        // Run indexer
+        let start = std::time::Instant::now();
+        handler.on_event(ProgressEvent::IndexerStart {
+            language: lang.kind.name().to_string(),
+            command: format!("{} {}", binary.display(), entry.default_args.join(" ")),
+        });
 
+        match scip_io_core::indexer::runner::run_indexer(&binary, entry, &root, lang).await {
+            Ok(output_path) => {
+                let duration = start.elapsed();
+                handler.on_event(ProgressEvent::IndexerComplete {
+                    language: lang.kind.name().to_string(),
+                    duration_secs: duration.as_secs_f64(),
+                    output: output_path.clone(),
+                });
+
+                // Read per-language stats from the SCIP output
+                let (files, symbols) = match validate_scip_file(&output_path) {
+                    Ok(v) => {
+                        let s = v.stats.unwrap_or_default();
+                        (s.documents, s.symbols)
+                    }
+                    Err(_) => (0, 0),
+                };
+
+                lang_results.push(serde_json::json!({
+                    "name": lang.kind.name(),
+                    "files": files,
+                    "symbols": symbols,
+                    "duration": (duration.as_secs_f64() * 1000.0) as u64,
+                }));
+
+                // Emit a derived result for each covered language so
+                // the UI still shows them. They share the primary's
+                // stats because the output file is the same.
+                for covered in &plan.covers {
                     lang_results.push(serde_json::json!({
-                        "name": lang.kind.name(),
+                        "name": covered.kind.name(),
                         "files": files,
                         "symbols": symbols,
                         "duration": (duration.as_secs_f64() * 1000.0) as u64,
+                        "coveredBy": lang.kind.name(),
                     }));
-                    outputs.push(output_path);
                 }
-                Err(e) => {
+
+                outputs.push(output_path);
+            }
+            Err(e) => {
+                handler.on_event(ProgressEvent::IndexerFailed {
+                    language: lang.kind.name().to_string(),
+                    error: e.to_string(),
+                });
+                for covered in &plan.covers {
                     handler.on_event(ProgressEvent::IndexerFailed {
-                        language: lang.kind.name().to_string(),
-                        error: e.to_string(),
+                        language: covered.kind.name().to_string(),
+                        error: format!(
+                            "covered by {} run which failed: {}",
+                            lang.kind.name(),
+                            e
+                        ),
                     });
                 }
             }
@@ -497,6 +544,63 @@ pub async fn check_updates() -> Result<Vec<UpdateInfo>, String> {
     }
 
     Ok(updates)
+}
+
+/// Execution plan for a single indexer invocation. `covers` holds extra
+/// detected languages whose indexing is folded into the `primary` run —
+/// e.g. `scip-typescript` handles both TypeScript and JavaScript in one
+/// invocation when `tsconfig.json` has `allowJs: true`.
+struct IndexingPlan {
+    primary: Language,
+    entry: &'static IndexerEntry,
+    covers: Vec<Language>,
+}
+
+/// Group selected languages by their indexer tool and collapse shared
+/// tools into one invocation. Within a group the primary is chosen by
+/// preferring args without `--infer-tsconfig` (that flag only helps
+/// projects lacking a tsconfig.json; when TypeScript and JavaScript are
+/// both detected, a tsconfig.json exists and the plain invocation is
+/// the right choice).
+fn build_indexing_plans(languages: &[Language]) -> Vec<IndexingPlan> {
+    let mut plans: Vec<IndexingPlan> = Vec::new();
+
+    for lang in languages {
+        let entry = match REGISTRY.get(lang) {
+            Some(e) => e,
+            None => continue,
+        };
+
+        if let Some(existing) = plans
+            .iter_mut()
+            .find(|p| p.entry.indexer_name == entry.indexer_name)
+        {
+            let existing_infer = existing
+                .entry
+                .default_args
+                .iter()
+                .any(|x| x == "--infer-tsconfig");
+            let new_infer = entry.default_args.iter().any(|x| x == "--infer-tsconfig");
+
+            if existing_infer && !new_infer {
+                // The new entry has a cleaner invocation — promote it
+                // to primary and demote the old one to covered.
+                let demoted = std::mem::replace(&mut existing.primary, lang.clone());
+                existing.entry = entry;
+                existing.covers.push(demoted);
+            } else {
+                existing.covers.push(lang.clone());
+            }
+        } else {
+            plans.push(IndexingPlan {
+                primary: lang.clone(),
+                entry,
+                covers: Vec::new(),
+            });
+        }
+    }
+
+    plans
 }
 
 #[tauri::command]
