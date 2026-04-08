@@ -1,8 +1,8 @@
 use scip_io_core::config::ProjectConfig;
 use scip_io_core::detect::{Language, scan_languages};
+use scip_io_core::indexer::IndexerEntry;
 use scip_io_core::indexer::install_dir;
 use scip_io_core::indexer::registry::REGISTRY;
-use scip_io_core::indexer::IndexerEntry;
 use scip_io_core::progress::{ProgressEvent, ProgressHandler};
 use scip_io_core::validate::validate_scip_file;
 use serde::Serialize;
@@ -360,11 +360,7 @@ pub async fn start_indexing(
                 for covered in &plan.covers {
                     handler.on_event(ProgressEvent::IndexerFailed {
                         language: covered.kind.name().to_string(),
-                        error: format!(
-                            "covered by {} run which failed: {}",
-                            lang.kind.name(),
-                            e
-                        ),
+                        error: format!("covered by {} run which failed: {}", lang.kind.name(), e),
                     });
                 }
             }

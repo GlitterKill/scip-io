@@ -364,16 +364,8 @@ fn dedupe_tasks_by_indexer(tasks: Vec<IndexerTask>, is_json: bool) -> Vec<Indexe
         // Pick the primary: prefer args without `--infer-tsconfig`,
         // then fall back to lexicographic language name for determinism.
         group.sort_by(|a, b| {
-            let a_infer = a
-                .entry
-                .default_args
-                .iter()
-                .any(|x| x == "--infer-tsconfig");
-            let b_infer = b
-                .entry
-                .default_args
-                .iter()
-                .any(|x| x == "--infer-tsconfig");
+            let a_infer = a.entry.default_args.iter().any(|x| x == "--infer-tsconfig");
+            let b_infer = b.entry.default_args.iter().any(|x| x == "--infer-tsconfig");
             a_infer
                 .cmp(&b_infer)
                 .then_with(|| a.lang.name().cmp(b.lang.name()))
