@@ -64,7 +64,11 @@ export interface AppState {
     language: string;
     version: string;
     installed: boolean;
+    installable: boolean;
+    managed: boolean;
     installedPath: string | null;
+    actionIndexer: string;
+    coveredBy: string | null;
   }>;
   isIndexing: boolean;
   indexerProgress: Map<string, IndexerProgress>;

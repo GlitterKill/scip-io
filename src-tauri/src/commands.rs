@@ -1,11 +1,12 @@
 use scip_io_core::config::ProjectConfig;
 use scip_io_core::detect::{Language, scan_languages};
-use scip_io_core::indexer::IndexerEntry;
-use scip_io_core::indexer::install_dir;
 use scip_io_core::indexer::registry::REGISTRY;
+use scip_io_core::indexer::version::version_is_newer;
+use scip_io_core::indexer::{IndexerEntry, install_dir, is_managed_install_path};
 use scip_io_core::progress::{ProgressEvent, ProgressHandler};
 use scip_io_core::validate::validate_scip_file;
 use serde::Serialize;
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::{AppHandle, Emitter};
@@ -25,7 +26,11 @@ pub struct IndexerStatusInfo {
     pub binary_name: String,
     pub github_repo: String,
     pub installed: bool,
+    pub installable: bool,
+    pub managed: bool,
     pub installed_path: Option<String>,
+    pub action_indexer: String,
+    pub covered_by: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -35,6 +40,10 @@ pub struct UpdateInfo {
     pub current_version: String,
     pub latest_version: String,
     pub update_available: bool,
+    pub installed: bool,
+    pub managed: bool,
+    pub action_indexer: String,
+    pub error: Option<String>,
 }
 
 struct TauriProgressHandler {
@@ -271,18 +280,15 @@ pub async fn start_indexing(
     // is only invoked once. Languages rolled into another task are
     // tracked as `covers` and still reported in the results.
     let plans = build_indexing_plans(&to_index);
+    if plans.is_empty() {
+        return Err("No registered SCIP indexers found for the selected languages".to_string());
+    }
 
-    let mut outputs = Vec::new();
-    let mut lang_results: Vec<serde_json::Value> = Vec::new();
-    let indexing_start = std::time::Instant::now();
-
-    for plan in &plans {
+    let mut prepared_plans = Vec::with_capacity(plans.len());
+    for plan in plans {
         if CANCEL_FLAG.load(Ordering::SeqCst) {
             return Err("Indexing cancelled".to_string());
         }
-
-        let lang = &plan.primary;
-        let entry = plan.entry;
 
         // Log covered languages so the UI can show they're folded
         // into this run instead of silently disappearing.
@@ -293,26 +299,49 @@ pub async fn start_indexing(
                 "message": format!(
                     "{} will be indexed by the {} run (shared tool: {})",
                     covered.kind.name(),
-                    lang.kind.name(),
-                    entry.indexer_name,
+                    plan.primary.kind.name(),
+                    plan.entry.indexer_name,
                 ),
             }));
         }
 
-        // Download indexer
-        let binary = entry
+        // Preflight installation before any indexer process is invoked. This
+        // lets first-run indexing install missing tools and still complete in
+        // the same operation.
+        let binary = plan
+            .entry
             .ensure_installed(&handler)
             .await
-            .map_err(|e| format!("Download failed: {}", e))?;
+            .map_err(|e| format!("Indexer install failed: {}", e))?;
+
+        prepared_plans.push(PreparedIndexingPlan {
+            primary: plan.primary,
+            entry: plan.entry,
+            covers: plan.covers,
+            binary,
+        });
+    }
+
+    let mut outputs = Vec::new();
+    let mut lang_results: Vec<serde_json::Value> = Vec::new();
+    let indexing_start = std::time::Instant::now();
+
+    for plan in &prepared_plans {
+        if CANCEL_FLAG.load(Ordering::SeqCst) {
+            return Err("Indexing cancelled".to_string());
+        }
+
+        let lang = &plan.primary;
+        let entry = plan.entry;
 
         // Run indexer
         let start = std::time::Instant::now();
         handler.on_event(ProgressEvent::IndexerStart {
             language: lang.kind.name().to_string(),
-            command: format!("{} {}", binary.display(), entry.default_args.join(" ")),
+            command: format!("{} {}", plan.binary.display(), entry.default_args.join(" ")),
         });
 
-        match scip_io_core::indexer::runner::run_indexer(&binary, entry, &root, lang).await {
+        match scip_io_core::indexer::runner::run_indexer(&plan.binary, entry, &root, lang).await {
             Ok(output_path) => {
                 let duration = start.elapsed();
                 handler.on_event(ProgressEvent::IndexerComplete {
@@ -365,6 +394,10 @@ pub async fn start_indexing(
                 }
             }
         }
+    }
+
+    if outputs.is_empty() {
+        return Err("No SCIP output was generated; all selected indexer runs failed".to_string());
     }
 
     // Determine the final output path (resolve to absolute)
@@ -432,22 +465,84 @@ pub async fn cancel_indexing() -> Result<(), String> {
 
 #[tauri::command]
 pub async fn get_indexer_status() -> Result<Vec<IndexerStatusInfo>, String> {
-    let entries = REGISTRY.all();
-    Ok(entries
-        .iter()
-        .map(|e| {
-            let installed_path = e.installed_path();
-            IndexerStatusInfo {
-                name: e.indexer_name.clone(),
-                language: e.language.clone(),
-                version: e.version.clone(),
-                binary_name: e.binary_name.clone(),
-                github_repo: e.github_repo.clone(),
-                installed: installed_path.is_some(),
-                installed_path: installed_path.map(|p| p.to_string_lossy().to_string()),
-            }
-        })
-        .collect())
+    let mut seen = BTreeSet::new();
+    let mut statuses = Vec::new();
+
+    for entry in REGISTRY.all() {
+        if seen.insert(entry.indexer_name.clone()) {
+            statuses.push(indexer_status_for_entry(entry));
+        }
+    }
+
+    Ok(statuses)
+}
+
+#[tauri::command]
+pub async fn install_indexer(app: AppHandle, indexer: String) -> Result<IndexerStatusInfo, String> {
+    let entry = find_indexer_entry(&indexer)
+        .ok_or_else(|| format!("No SCIP indexer matches '{indexer}'"))?;
+    let action_entry = action_entry_for(entry)
+        .ok_or_else(|| format!("No install target registered for '{}'", entry.indexer_name))?;
+    if !action_entry.is_installable() {
+        return Err(format!(
+            "{} cannot be automatically installed",
+            entry.indexer_name
+        ));
+    }
+
+    let handler = TauriProgressHandler { app };
+    action_entry
+        .ensure_installed(&handler)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    Ok(indexer_status_for_entry(entry))
+}
+
+#[tauri::command]
+pub async fn uninstall_indexer(indexer: String) -> Result<IndexerStatusInfo, String> {
+    let entry = find_indexer_entry(&indexer)
+        .ok_or_else(|| format!("No SCIP indexer matches '{indexer}'"))?;
+    let action_entry = action_entry_for(entry).ok_or_else(|| {
+        format!(
+            "No uninstall target registered for '{}'",
+            entry.indexer_name
+        )
+    })?;
+    action_entry
+        .uninstall_managed()
+        .map_err(|e| e.to_string())?;
+    Ok(indexer_status_for_entry(entry))
+}
+
+#[tauri::command]
+pub async fn update_indexer(
+    app: AppHandle,
+    indexer: String,
+    version: String,
+) -> Result<IndexerStatusInfo, String> {
+    let entry = find_indexer_entry(&indexer)
+        .ok_or_else(|| format!("No SCIP indexer matches '{indexer}'"))?;
+    let action_entry = action_entry_for(entry)
+        .ok_or_else(|| format!("No update target registered for '{}'", entry.indexer_name))?;
+
+    if !action_entry.is_installed() {
+        return Err(format!("{} is not installed", action_entry.indexer_name));
+    }
+    if !action_entry.is_managed_installed() {
+        return Err(format!(
+            "{} is installed outside SCIP-IO's managed cache",
+            action_entry.indexer_name
+        ));
+    }
+
+    let handler = TauriProgressHandler { app };
+    action_entry
+        .update_managed_to_version(&version, &handler)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    Ok(indexer_status_for_entry(entry))
 }
 
 #[tauri::command]
@@ -470,11 +565,15 @@ pub async fn clean_cache(language: Option<String>) -> Result<String, String> {
     if let Some(lang) = language {
         let entries = REGISTRY.all();
         for entry in entries {
-            if entry.language.eq_ignore_ascii_case(&lang)
-                && let Some(path) = entry.installed_path()
-            {
-                std::fs::remove_file(&path).map_err(|e| e.to_string())?;
-                return Ok(format!("Removed: {}", path.display()));
+            if indexer_matches(entry, &lang) {
+                let Some(action_entry) = action_entry_for(entry) else {
+                    return Ok("No matching managed indexer found".to_string());
+                };
+                return match action_entry.uninstall_managed() {
+                    Ok(Some(path)) => Ok(format!("Removed: {}", path.display())),
+                    Ok(None) => Ok("No managed indexer install found".to_string()),
+                    Err(e) => Err(e.to_string()),
+                };
             }
         }
         Ok("No matching indexer found".to_string())
@@ -497,42 +596,41 @@ pub async fn validate_index(
 #[tauri::command]
 pub async fn check_updates() -> Result<Vec<UpdateInfo>, String> {
     let mut updates = Vec::new();
-    let client = reqwest::Client::new();
+    let mut seen = BTreeSet::new();
 
     for entry in REGISTRY.all() {
-        let url = format!(
-            "https://api.github.com/repos/{}/releases/latest",
-            entry.github_repo
-        );
+        let Some(action_entry) = action_entry_for(entry) else {
+            continue;
+        };
+        if !seen.insert(action_entry.indexer_name.clone()) || !action_entry.is_installed() {
+            continue;
+        }
 
-        let latest = match client
-            .get(&url)
-            .header("User-Agent", "scip-io")
-            .header("Accept", "application/vnd.github.v3+json")
-            .send()
-            .await
-        {
-            Ok(resp) if resp.status().is_success() => {
-                match resp.json::<serde_json::Value>().await {
-                    Ok(json) => json["tag_name"]
-                        .as_str()
-                        .unwrap_or("unknown")
-                        .trim_start_matches('v')
-                        .to_string(),
-                    Err(_) => "unknown".to_string(),
-                }
-            }
-            _ => "check failed".to_string(),
+        let current_version = action_entry
+            .installed_version()
+            .unwrap_or_else(|| action_entry.version.clone());
+        let managed = action_entry.is_managed_installed();
+        let latest_result =
+            scip_io_core::indexer::install::resolve_latest_compatible_version(action_entry).await;
+        let (latest_version, update_available, error) = match latest_result {
+            Ok(latest) => (
+                latest.clone(),
+                managed && version_is_newer(&latest, &current_version),
+                None,
+            ),
+            Err(err) => ("unknown".to_string(), false, Some(err.to_string())),
         };
 
         updates.push(UpdateInfo {
-            name: entry.indexer_name.clone(),
-            language: entry.language.clone(),
-            current_version: entry.version.clone(),
-            latest_version: latest.clone(),
-            update_available: latest != entry.version
-                && latest != "unknown"
-                && latest != "check failed",
+            name: action_entry.indexer_name.clone(),
+            language: languages_for_action_entry(action_entry),
+            current_version,
+            latest_version,
+            update_available,
+            installed: true,
+            managed,
+            action_indexer: action_entry.indexer_name.clone(),
+            error,
         });
 
         // Rate limit
@@ -552,6 +650,13 @@ struct IndexingPlan {
     covers: Vec<Language>,
 }
 
+struct PreparedIndexingPlan {
+    primary: Language,
+    entry: &'static IndexerEntry,
+    covers: Vec<Language>,
+    binary: PathBuf,
+}
+
 /// Group selected languages by their indexer tool and collapse shared
 /// tools into one invocation. Within a group the primary is chosen by
 /// preferring args without `--infer-tsconfig` (that flag only helps
@@ -562,7 +667,7 @@ fn build_indexing_plans(languages: &[Language]) -> Vec<IndexingPlan> {
     let mut plans: Vec<IndexingPlan> = Vec::new();
 
     for lang in languages {
-        let entry = match REGISTRY.get(lang) {
+        let entry = match REGISTRY.runnable_for(lang) {
             Some(e) => e,
             None => continue,
         };
@@ -597,6 +702,197 @@ fn build_indexing_plans(languages: &[Language]) -> Vec<IndexingPlan> {
     }
 
     plans
+}
+
+fn find_indexer_entry(identifier: &str) -> Option<&'static IndexerEntry> {
+    REGISTRY
+        .all()
+        .iter()
+        .find(|entry| indexer_matches(entry, identifier))
+}
+
+fn action_entry_for(entry: &'static IndexerEntry) -> Option<&'static IndexerEntry> {
+    REGISTRY.action_entry_for(entry)
+}
+
+fn indexer_matches(entry: &IndexerEntry, identifier: &str) -> bool {
+    entry.indexer_name.eq_ignore_ascii_case(identifier)
+        || entry.binary_name.eq_ignore_ascii_case(identifier)
+        || entry.language.eq_ignore_ascii_case(identifier)
+}
+
+fn indexer_status_for_entry(entry: &IndexerEntry) -> IndexerStatusInfo {
+    let action_entry = REGISTRY.action_entry_for(entry).unwrap_or(entry);
+    let languages = languages_for_status_entry(entry);
+    let installed_path = action_entry.installed_path();
+    let managed = installed_path
+        .as_deref()
+        .is_some_and(is_managed_install_path);
+    let covered_by = (action_entry.indexer_name != entry.indexer_name)
+        .then_some(action_entry.indexer_name.clone());
+
+    IndexerStatusInfo {
+        name: entry.indexer_name.clone(),
+        language: languages,
+        version: entry.version.clone(),
+        binary_name: action_entry.binary_name.clone(),
+        github_repo: entry.github_repo.clone(),
+        installed: installed_path.is_some(),
+        installable: action_entry.is_installable(),
+        managed,
+        installed_path: installed_path.map(|p| p.to_string_lossy().to_string()),
+        action_indexer: action_entry.indexer_name.clone(),
+        covered_by,
+    }
+}
+
+fn languages_for_status_entry(entry: &IndexerEntry) -> String {
+    REGISTRY
+        .all()
+        .iter()
+        .filter(|candidate| candidate.indexer_name == entry.indexer_name)
+        .map(|candidate| candidate.language.clone())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn languages_for_action_entry(action_entry: &IndexerEntry) -> String {
+    REGISTRY
+        .all()
+        .iter()
+        .filter(|candidate| {
+            REGISTRY
+                .action_entry_for(candidate)
+                .is_some_and(|candidate_action| {
+                    candidate_action.indexer_name == action_entry.indexer_name
+                })
+        })
+        .map(|candidate| candidate.language.clone())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeSet;
+
+    #[test]
+    fn find_indexer_entry_accepts_indexer_binary_and_language_names() {
+        assert_eq!(
+            find_indexer_entry("scip-typescript").map(|entry| entry.indexer_name.as_str()),
+            Some("scip-typescript")
+        );
+        assert_eq!(
+            find_indexer_entry("rust-analyzer").map(|entry| entry.binary_name.as_str()),
+            Some("rust-analyzer")
+        );
+        assert_eq!(
+            find_indexer_entry("javascript").map(|entry| entry.indexer_name.as_str()),
+            Some("scip-typescript")
+        );
+    }
+
+    #[tokio::test]
+    async fn get_indexer_status_returns_one_row_per_indexer_binary() {
+        let statuses = get_indexer_status().await.unwrap();
+        let unique_indexers = REGISTRY
+            .all()
+            .iter()
+            .map(|entry| entry.indexer_name.as_str())
+            .collect::<BTreeSet<_>>();
+
+        assert_eq!(statuses.len(), unique_indexers.len());
+        assert_eq!(
+            statuses
+                .iter()
+                .filter(|status| status.name == "scip-typescript")
+                .count(),
+            1
+        );
+        assert!(
+            statuses
+                .iter()
+                .find(|status| status.name == "scip-typescript")
+                .unwrap()
+                .language
+                .contains("javascript")
+        );
+        assert!(
+            statuses
+                .iter()
+                .find(|status| status.name == "scip-java")
+                .unwrap()
+                .language
+                .contains("scala")
+        );
+    }
+
+    #[test]
+    fn indexer_status_exposes_installability_for_dashboard_actions() {
+        let kotlin = find_indexer_entry("kotlin").unwrap();
+        let python = find_indexer_entry("scip-python").unwrap();
+
+        assert!(indexer_status_for_entry(kotlin).installable);
+        assert!(indexer_status_for_entry(python).installable);
+    }
+
+    #[test]
+    fn indexer_status_exposes_kotlin_as_scip_java_proxy_action() {
+        let kotlin = find_indexer_entry("kotlin").unwrap();
+        let java = find_indexer_entry("scip-java").unwrap();
+
+        let kotlin_status = indexer_status_for_entry(kotlin);
+        let java_status = indexer_status_for_entry(java);
+
+        assert_eq!(kotlin_status.name, "scip-kotlin");
+        assert_eq!(kotlin_status.binary_name, "scip-java");
+        assert_eq!(kotlin_status.action_indexer, "scip-java");
+        assert_eq!(kotlin_status.covered_by.as_deref(), Some("scip-java"));
+        assert_eq!(kotlin_status.installed, java_status.installed);
+        assert_eq!(kotlin_status.managed, java_status.managed);
+        assert_eq!(kotlin_status.installed_path, java_status.installed_path);
+    }
+
+    #[test]
+    fn kotlin_indexing_plan_runs_scip_java() {
+        let kotlin = scip_io_core::detect::languages::LanguageKind::Kotlin
+            .with_evidence("build.gradle.kts".into());
+        let plans = build_indexing_plans(&[kotlin]);
+
+        assert_eq!(plans.len(), 1);
+        assert_eq!(plans[0].primary.kind.name(), "kotlin");
+        assert_eq!(plans[0].entry.indexer_name, "scip-java");
+    }
+
+    #[test]
+    fn java_and_kotlin_share_one_scip_java_plan() {
+        let java =
+            scip_io_core::detect::languages::LanguageKind::Java.with_evidence("pom.xml".into());
+        let kotlin = scip_io_core::detect::languages::LanguageKind::Kotlin
+            .with_evidence("build.gradle.kts".into());
+        let plans = build_indexing_plans(&[java, kotlin]);
+
+        assert_eq!(plans.len(), 1);
+        assert_eq!(plans[0].entry.indexer_name, "scip-java");
+        assert!(
+            plans[0]
+                .covers
+                .iter()
+                .any(|lang| lang.kind.name() == "kotlin")
+        );
+    }
+
+    #[test]
+    fn update_language_summary_uses_logical_languages_for_action_indexer() {
+        let java = find_indexer_entry("scip-java").unwrap();
+
+        let languages = languages_for_action_entry(java);
+
+        assert!(languages.contains("java"));
+        assert!(languages.contains("scala"));
+        assert!(languages.contains("kotlin"));
+    }
 }
 
 #[tauri::command]

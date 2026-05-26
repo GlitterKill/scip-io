@@ -4,6 +4,7 @@ use anyhow::{Context, Result};
 
 use crate::detect::Language;
 use crate::indexer::IndexerEntry;
+use crate::scip_language::normalize_scip_file_languages;
 
 /// Run an indexer binary against a project root and return the output .scip path.
 pub async fn run_indexer(
@@ -69,6 +70,15 @@ pub async fn run_indexer(
                 output_file.display()
             );
         }
+    }
+
+    let updated_languages = normalize_scip_file_languages(&output_file, Some(lang.name()))?;
+    if updated_languages > 0 {
+        tracing::info!(
+            path = %output_file.display(),
+            docs = updated_languages,
+            "filled missing SCIP document languages"
+        );
     }
 
     Ok(output_file)

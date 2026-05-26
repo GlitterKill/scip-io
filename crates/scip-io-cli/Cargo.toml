@@ -22,3 +22,6 @@ serde_json = { workspace = true }
 reqwest = { workspace = true }
 futures-util = { workspace = true }
 dirs = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

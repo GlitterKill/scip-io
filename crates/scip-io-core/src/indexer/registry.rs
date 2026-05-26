@@ -140,8 +140,10 @@ impl Registry {
                     version: "0.6.0".into(),
                     default_args: vec!["index".into()],
                     output_file: "index.scip".into(),
-                    install_method: InstallMethod::Unsupported {
-                        reason: "scip-kotlin is a Kotlin compiler plugin invoked through scip-java, not a standalone binary".into(),
+                    install_method: InstallMethod::CoveredBy {
+                        indexer_name: "scip-java".into(),
+                        reason: "Kotlin indexing is provided by scip-java's Gradle Kotlin support"
+                            .into(),
                     },
                 },
                 IndexerEntry {
@@ -163,6 +165,29 @@ impl Registry {
     /// Get the indexer entry for a detected language.
     pub fn get(&self, lang: &Language) -> Option<&IndexerEntry> {
         self.entries.iter().find(|e| e.language == lang.name())
+    }
+
+    /// Resolve the install/run entry for an indexer row.
+    ///
+    /// Some rows are logical capabilities rather than standalone binaries.
+    /// Kotlin is one of those: users should see Kotlin as supported, but the
+    /// actual install and execution path is `scip-java`.
+    pub fn action_entry_for(&self, entry: &IndexerEntry) -> Option<&IndexerEntry> {
+        match &entry.install_method {
+            InstallMethod::CoveredBy { indexer_name, .. } => self
+                .entries
+                .iter()
+                .find(|candidate| candidate.indexer_name.eq_ignore_ascii_case(indexer_name)),
+            _ => self.entries.iter().find(|candidate| {
+                candidate.indexer_name == entry.indexer_name && candidate.language == entry.language
+            }),
+        }
+    }
+
+    /// Get the executable indexer entry for a detected language.
+    pub fn runnable_for(&self, lang: &Language) -> Option<&IndexerEntry> {
+        self.get(lang)
+            .and_then(|entry| self.action_entry_for(entry))
     }
 
     /// Return all registered indexers.
@@ -285,14 +310,20 @@ mod tests {
         ));
     }
     #[test]
-    fn test_registry_kotlin_is_unsupported() {
+    fn test_registry_kotlin_is_covered_by_scip_java() {
         let registry = &*REGISTRY;
         let lang = LanguageKind::Kotlin.with_evidence(String::new());
         let entry = registry.get(&lang).unwrap();
         assert!(matches!(
             entry.install_method,
-            InstallMethod::Unsupported { .. }
+            InstallMethod::CoveredBy { .. }
         ));
+        assert_eq!(
+            registry
+                .runnable_for(&lang)
+                .map(|entry| entry.indexer_name.as_str()),
+            Some("scip-java")
+        );
     }
 
     #[test]
@@ -351,6 +382,30 @@ mod tests {
                     assert!(
                         !windows_asset.is_empty(),
                         "Empty windows_asset for {}",
+                        entry.indexer_name
+                    );
+                }
+                InstallMethod::CoveredBy {
+                    indexer_name,
+                    reason,
+                } => {
+                    assert!(
+                        !indexer_name.is_empty(),
+                        "Empty covered-by indexer for {}",
+                        entry.indexer_name
+                    );
+                    assert!(
+                        registry
+                            .all()
+                            .iter()
+                            .any(|candidate| candidate.indexer_name == *indexer_name),
+                        "Covered-by indexer {} for {} is not registered",
+                        indexer_name,
+                        entry.indexer_name
+                    );
+                    assert!(
+                        !reason.is_empty(),
+                        "Empty reason for {}",
                         entry.indexer_name
                     );
                 }

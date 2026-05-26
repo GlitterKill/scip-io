@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::path::Path;
 
 use anyhow::{Context, Result};
@@ -76,6 +76,37 @@ pub fn validate_scip_file(path: &Path) -> Result<ValidationResult> {
         }
     }
 
+    // Check for missing language metadata. Some upstream indexers emit this
+    // structurally valid but low-quality output, so validation calls it out.
+    let missing_language_docs: Vec<String> = index
+        .documents
+        .iter()
+        .filter(|doc| doc.language.trim().is_empty())
+        .map(|doc| {
+            if doc.relative_path.is_empty() {
+                "<empty relative_path>".to_string()
+            } else {
+                doc.relative_path.clone()
+            }
+        })
+        .collect();
+    if !missing_language_docs.is_empty() {
+        let mut examples = missing_language_docs
+            .iter()
+            .take(5)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", ");
+        if missing_language_docs.len() > 5 {
+            examples.push_str(", ...");
+        }
+        warnings.push(format!(
+            "{} document(s) have empty language metadata: {}",
+            missing_language_docs.len(),
+            examples
+        ));
+    }
+
     // Collect stats
     let total_symbols: usize = index.documents.iter().map(|d| d.symbols.len()).sum();
     let total_occurrences: usize = index.documents.iter().map(|d| d.occurrences.len()).sum();
@@ -83,8 +114,8 @@ pub fn validate_scip_file(path: &Path) -> Result<ValidationResult> {
         .documents
         .iter()
         .map(|d| d.language.clone())
-        .filter(|l| !l.is_empty())
-        .collect::<HashSet<_>>()
+        .filter(|l| !l.trim().is_empty())
+        .collect::<BTreeSet<_>>()
         .into_iter()
         .collect();
 
@@ -198,6 +229,44 @@ mod tests {
         let result = validate_scip_file(file.path()).unwrap();
         assert!(!result.warnings.is_empty());
         assert!(result.warnings[0].contains("empty relative_path"));
+    }
+
+    #[test]
+    fn test_validate_empty_language_warns() {
+        let mut index = scip::types::Index::new();
+        let mut doc = scip::types::Document::new();
+        doc.relative_path = "src/main.ts".to_string();
+        index.documents.push(doc);
+
+        let bytes = index.write_to_bytes().unwrap();
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(&bytes).unwrap();
+        let result = validate_scip_file(file.path()).unwrap();
+
+        assert!(result.valid);
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("empty language metadata"))
+        );
+    }
+
+    #[test]
+    fn test_validate_whitespace_language_is_not_reported_in_stats() {
+        let mut index = scip::types::Index::new();
+        let mut doc = scip::types::Document::new();
+        doc.relative_path = "src/main.ts".to_string();
+        doc.language = "   ".to_string();
+        index.documents.push(doc);
+
+        let bytes = index.write_to_bytes().unwrap();
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(&bytes).unwrap();
+        let result = validate_scip_file(file.path()).unwrap();
+        let stats = result.stats.unwrap();
+
+        assert!(stats.languages.is_empty());
     }
 
     #[test]

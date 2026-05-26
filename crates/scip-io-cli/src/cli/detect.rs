@@ -1,7 +1,7 @@
 use anyhow::Result;
 use console::style;
 
-use scip_io_core::detect::scan_languages;
+use scip_io_core::detect::{LanguageScanOptions, scan_languages_with_options};
 
 use super::DetectArgs;
 
@@ -13,7 +13,12 @@ pub async fn run(args: DetectArgs) -> Result<()> {
 
     tracing::info!(?path, "scanning for languages");
 
-    let languages = scan_languages(&path)?;
+    let languages = scan_languages_with_options(
+        &path,
+        LanguageScanOptions {
+            max_depth: args.depth.or(Some(3)),
+        },
+    )?;
 
     if languages.is_empty() {
         match args.format.as_str() {

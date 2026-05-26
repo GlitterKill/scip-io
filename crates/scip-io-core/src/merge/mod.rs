@@ -5,6 +5,8 @@ use anyhow::{Context, Result};
 use protobuf::Message;
 use scip::types::{Document, Index, Metadata, ToolInfo};
 
+use crate::scip_language::fill_missing_document_languages;
+
 /// Merge multiple SCIP index files into a single output file.
 pub fn merge_scip_files(inputs: &[impl AsRef<Path>], output: &Path) -> Result<()> {
     let mut merged = Index::new();
@@ -30,6 +32,18 @@ pub fn merge_scip_files(inputs: &[impl AsRef<Path>], output: &Path) -> Result<()
 
         let index = Index::parse_from_bytes(&bytes)
             .with_context(|| format!("Failed to parse SCIP index from {}", input_path.display()))?;
+        let mut index = index;
+
+        // Older or third-party indexers can omit Document.language. Repair it
+        // before merging so the combined file has complete per-document metadata.
+        let updated_languages = fill_missing_document_languages(&mut index, None);
+        if updated_languages > 0 {
+            tracing::info!(
+                path = %input_path.display(),
+                docs = updated_languages,
+                "filled missing SCIP document languages before merge"
+            );
+        }
 
         for doc in index.documents {
             let key = doc.relative_path.clone();
@@ -68,6 +82,19 @@ pub fn merge_scip_files(inputs: &[impl AsRef<Path>], output: &Path) -> Result<()
 
 /// Merge source document's occurrences and symbols into target.
 fn merge_document(target: &mut Document, source: Document) {
+    let target_language = target.language.trim();
+    let source_language = source.language.trim();
+    if target_language.is_empty() && !source_language.is_empty() {
+        target.language = source_language.to_string();
+    } else if !source_language.is_empty() && target_language != source_language {
+        tracing::warn!(
+            path = %target.relative_path,
+            target = %target.language,
+            source = %source.language,
+            "conflicting SCIP document languages; keeping first document language"
+        );
+    }
+
     // Append occurrences (they reference line/col positions, so duplicates are harmless)
     target.occurrences.extend(source.occurrences);
 
@@ -148,6 +175,111 @@ mod tests {
 
         let merged = Index::parse_from_bytes(&std::fs::read(&out)?)?;
         assert_eq!(merged.documents.len(), 1);
+
+        Ok(())
+    }
+
+    #[test]
+    fn merge_fills_missing_document_languages() -> Result<()> {
+        let dir = TempDir::new()?;
+
+        let mut idx = Index::new();
+        let mut doc = Document::new();
+        doc.relative_path = "src/lib.ts".into();
+        idx.documents.push(doc);
+
+        let path = dir.path().join("typescript.scip");
+        let out = dir.path().join("merged.scip");
+
+        std::fs::write(&path, idx.write_to_bytes()?)?;
+
+        merge_scip_files(&[&path], &out)?;
+
+        let merged = Index::parse_from_bytes(&std::fs::read(&out)?)?;
+        assert_eq!(merged.documents[0].language, "typescript");
+
+        Ok(())
+    }
+
+    #[test]
+    fn merge_does_not_infer_language_from_input_filename() -> Result<()> {
+        let dir = TempDir::new()?;
+
+        let mut idx = Index::new();
+        let mut doc = Document::new();
+        doc.relative_path = "Makefile".into();
+        idx.documents.push(doc);
+
+        let path = dir.path().join("cpp.scip");
+        let out = dir.path().join("merged.scip");
+
+        std::fs::write(&path, idx.write_to_bytes()?)?;
+
+        merge_scip_files(&[&path], &out)?;
+
+        let merged = Index::parse_from_bytes(&std::fs::read(&out)?)?;
+        assert_eq!(merged.documents[0].language, "");
+
+        Ok(())
+    }
+
+    #[test]
+    fn merge_preserves_language_from_duplicate_document() -> Result<()> {
+        let dir = TempDir::new()?;
+
+        let mut idx1 = Index::new();
+        let mut doc1 = Document::new();
+        doc1.relative_path = "Dockerfile".into();
+        idx1.documents.push(doc1);
+
+        let mut idx2 = Index::new();
+        let mut doc2 = Document::new();
+        doc2.relative_path = "Dockerfile".into();
+        doc2.language = "dockerfile".into();
+        idx2.documents.push(doc2);
+
+        let path1 = dir.path().join("idx1.scip");
+        let path2 = dir.path().join("idx2.scip");
+        let out = dir.path().join("merged.scip");
+
+        std::fs::write(&path1, idx1.write_to_bytes()?)?;
+        std::fs::write(&path2, idx2.write_to_bytes()?)?;
+
+        merge_scip_files(&[&path1, &path2], &out)?;
+
+        let merged = Index::parse_from_bytes(&std::fs::read(&out)?)?;
+        assert_eq!(merged.documents[0].language, "dockerfile");
+
+        Ok(())
+    }
+
+    #[test]
+    fn merge_keeps_first_language_for_conflicting_duplicate_documents() -> Result<()> {
+        let dir = TempDir::new()?;
+
+        let mut idx1 = Index::new();
+        let mut doc1 = Document::new();
+        doc1.relative_path = "src/shared.ts".into();
+        doc1.language = "typescript".into();
+        idx1.documents.push(doc1);
+
+        let mut idx2 = Index::new();
+        let mut doc2 = Document::new();
+        doc2.relative_path = "src/shared.ts".into();
+        doc2.language = "javascript".into();
+        idx2.documents.push(doc2);
+
+        let path1 = dir.path().join("idx1.scip");
+        let path2 = dir.path().join("idx2.scip");
+        let out = dir.path().join("merged.scip");
+
+        std::fs::write(&path1, idx1.write_to_bytes()?)?;
+        std::fs::write(&path2, idx2.write_to_bytes()?)?;
+
+        merge_scip_files(&[&path1, &path2], &out)?;
+
+        let merged = Index::parse_from_bytes(&std::fs::read(&out)?)?;
+        assert_eq!(merged.documents[0].language, "typescript");
 
         Ok(())
     }

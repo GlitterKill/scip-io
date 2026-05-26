@@ -184,7 +184,7 @@ function renderActions(results: NonNullable<ReturnType<typeof store.getState>['r
   backBtn.className = 'btn btn--secondary';
   backBtn.textContent = 'Back to Dashboard';
   backBtn.addEventListener('click', () => {
-    store.setState({ screen: 'dashboard' });
+    returnToDashboard();
   });
   actions.appendChild(backBtn);
 
@@ -193,7 +193,7 @@ function renderActions(results: NonNullable<ReturnType<typeof store.getState>['r
   againBtn.className = 'btn btn--primary';
   againBtn.textContent = 'Index Again';
   againBtn.addEventListener('click', () => {
-    store.setState({ screen: 'dashboard', results: null, logs: [], overallProgress: 0, pipelineStep: 'detect' });
+    returnToDashboard(true);
   });
   actions.appendChild(againBtn);
 
@@ -221,10 +221,22 @@ function renderBackButton(): HTMLElement {
   backBtn.className = 'btn btn--secondary';
   backBtn.textContent = 'Back to Dashboard';
   backBtn.addEventListener('click', () => {
-    store.setState({ screen: 'dashboard' });
+    returnToDashboard();
   });
   actions.appendChild(backBtn);
   return actions;
+}
+
+function returnToDashboard(clearLogs = false): void {
+  store.setState({
+    screen: 'dashboard',
+    results: null,
+    isIndexing: false,
+    indexerProgress: new Map(),
+    overallProgress: 0,
+    pipelineStep: 'detect',
+    ...(clearLogs ? { logs: [] } : {}),
+  });
 }
 
 // ----- Utilities -----

@@ -19,7 +19,7 @@
 **SCIP-IO** is a polyglot [SCIP](https://sourcegraph.com/docs/code-search/code-navigation/scip) index orchestrator written in Rust. It takes the pain out of generating precise code-intelligence indexes for multi-language projects by doing the whole pipeline for you:
 
 1. **Detects** every language in your project from manifest files.
-2. **Installs** the correct SCIP indexer binary for each language (downloading from GitHub releases, npm, `dotnet tool`, Coursier, or reusing what's already on your `PATH`).
+2. **Installs** the latest compatible SCIP indexer binary for each language (downloading from GitHub releases, npm, `dotnet tool`, Coursier, or reusing what's already on your `PATH`).
 3. **Runs** each indexer against your project with sensible defaults.
 4. **Merges** every per-language `.scip` file into a single deterministic `index.scip`.
 5. **Validates** the final index so you know it's wellformed.
@@ -100,7 +100,7 @@ Detection is **manifest-driven**, not extension-based. Walking every `.ts` or `.
 
 ```mermaid
 flowchart TD
-    Start([Start]) --> Walk[Walk project tree<br/>max depth 3]
+    Start([Start]) --> Walk[Walk project tree<br/>default max depth 3]
     Walk --> Skip{Hidden or<br/>ignored dir?<br/>.git, node_modules,<br/>target, vendor, venv}
     Skip -- Yes --> Walk
     Skip -- No --> Match{Matches a<br/>manifest pattern?}
@@ -145,6 +145,25 @@ flowchart TD
     style Use fill:#0a0e1b,stroke:#00ffcc,color:#00ffcc
     style Fail fill:#0a0e1b,stroke:#ff3366,color:#ff3366
 ```
+
+Both the CLI and GUI complete this "ensure installed" phase before launching
+any indexer process, so a first run can resolve the latest compatible missing
+indexer, download it, and still finish the requested index operation. Managed
+installs record the installed version for later update checks. The GUI dashboard also exposes
+Install/Uninstall actions for each registered indexer. Uninstall only removes
+tools managed in SCIP-IO's local cache; binaries discovered on your system
+`PATH` are reported as installed but must be removed outside SCIP-IO.
+The CLI exposes the same lifecycle controls with `scip-io install`,
+`scip-io uninstall`, and `scip-io update`; `scip-io update` checks installed
+managed indexers, reports the results, and opens a terminal picker unless you
+pass `--lang` or `--all` for non-interactive updates.
+The Kotlin row is shown as covered by `scip-java`; installing or uninstalling
+that row manages `scip-java`, which is the tool that provides Kotlin indexing.
+The Settings update check inspects installed indexers, reports non-managed
+tools separately, and offers per-indexer or bulk updates for managed installs
+when a newer compatible version is available.
+On Windows, SCIP-IO also repairs managed `scip-python` npm installs affected
+by the upstream `path.sep` regex crash before running the indexer.
 
 ### Merge
 
@@ -277,7 +296,7 @@ Detected 3 languages:
 |-------------------|----------------------------------------------|
 | `-p, --path`      | Project root (defaults to current directory) |
 | `-f, --format`    | `text` (default) or `json`                   |
-| `-d, --depth`     | Max directory depth to scan                  |
+| `-d, --depth`     | Max directory depth to scan (default `3`)    |
 
 ### `scip-io index`
 
@@ -301,6 +320,7 @@ scip-io index --all-roots
 
 # Index specific sub-project roots
 scip-io index --roots ./services/api,./services/web
+scip-io index --path ./repo --roots ./services/api,./services/web
 
 # Keep the per-language .scip files instead of merging
 scip-io index --no-merge
@@ -321,8 +341,13 @@ scip-io index --parallel 4 --timeout 600
 | `--timeout`       | Per-indexer timeout in seconds                                        |
 | `-f, --format`    | `text` or `json` progress output                                      |
 | `--dry-run`       | Print the plan without running anything                               |
-| `--roots`         | Comma-separated sub-project roots to index                            |
-| `--all-roots`     | Auto-discover every sub-project root in a monorepo                    |
+| `--roots`         | Comma-separated sub-project roots to index; relative paths resolve from `--path` |
+| `--all-roots`     | Auto-discover every manifest-bearing project root under `--path`, skipping ignored dirs |
+
+`--roots` and `--all-roots` index each selected project root separately and
+merge the generated `.scip` files into the requested output unless `--no-merge`
+is set. `--all-roots` scans all non-ignored descendants for known manifest
+files, so use `--roots` when you want an explicit subset.
 
 ### `scip-io status`
 
@@ -346,6 +371,43 @@ Indexer Status:
   scip-clang        v0.4.0   ○ not installed
 ```
 
+### `scip-io install`
+
+Install one indexer by language, indexer name, or binary name. Installs resolve
+the latest compatible live version at runtime.
+
+```sh
+scip-io install python
+scip-io install --lang rust
+scip-io install scip-typescript
+```
+
+### `scip-io update`
+
+Check installed indexers for newer compatible versions. With no arguments, the
+command reports update status and opens a terminal menu with per-indexer choices
+and an Update All option when more than one update is available.
+
+```sh
+scip-io update              # report updates, then choose from a terminal menu
+scip-io update --lang rust  # non-interactive update for one language/indexer
+scip-io update scip-dotnet  # non-interactive update by indexer name
+scip-io update --all        # non-interactive update for every available update
+```
+
+Indexers installed outside SCIP-IO's managed cache are reported, but they are
+not updated or removed by SCIP-IO.
+
+### `scip-io uninstall`
+
+Remove one SCIP-IO-managed indexer by language, indexer name, or binary name.
+
+```sh
+scip-io uninstall python
+scip-io uninstall --lang kotlin  # removes managed scip-java
+scip-io uninstall scip-python --dry-run
+```
+
 ### `scip-io merge`
 
 Manually merge a set of `.scip` files into one. Useful for CI where per-language files are built in separate stages.
@@ -365,7 +427,8 @@ scip-io merge *.scip --output merged.scip --validate
 
 ### `scip-io validate`
 
-Parse a `.scip` file, check structural invariants, and print stats.
+Parse a `.scip` file, check structural invariants, warn on incomplete
+document metadata such as missing languages, and print stats.
 
 ```sh
 scip-io validate index.scip
@@ -384,10 +447,12 @@ index.scip is valid
 
 ### `scip-io clean`
 
-Remove cached indexer binaries.
+Remove cached indexer binaries. Prefer `scip-io uninstall <target>` for a single
+indexer. `clean` only removes SCIP-IO-managed cache files; indexers discovered
+on your system `PATH` are skipped.
 
 ```sh
-scip-io clean                  # interactive prompt
+scip-io clean                  # remove all installed managed indexers
 scip-io clean --lang rust      # only rust-analyzer
 scip-io clean --all            # wipe the whole cache dir
 scip-io clean --dry-run        # show what would be removed

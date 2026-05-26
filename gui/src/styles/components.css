@@ -682,6 +682,13 @@
   text-align: center;
 }
 
+/* Row action column */
+.table .col-actions {
+  text-align: right;
+  width: 1%;
+  white-space: nowrap;
+}
+
 /* ============================================================
    8. LOG VIEWER
    Terminal-like container with colored log levels, monospace

@@ -1,5 +1,5 @@
-use std::collections::HashMap;
-use std::path::PathBuf;
+use std::collections::{BTreeSet, HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -7,10 +7,13 @@ use anyhow::{Context, Result, bail};
 use console::style;
 use futures_util::stream::{self, StreamExt};
 
-use scip_io_core::detect::{Language, scan_languages};
+use scip_io_core::detect::{
+    Language, LanguageScanOptions, discover_project_roots, scan_languages_with_options,
+};
 use scip_io_core::indexer::registry::REGISTRY;
 use scip_io_core::indexer::{IndexerEntry, runner};
 use scip_io_core::merge::merge_scip_files;
+use scip_io_core::scip_language::prefix_scip_file_document_paths;
 
 use super::IndexArgs;
 use super::progress_handler::CliProgressHandler;
@@ -27,6 +30,12 @@ struct IndexerTask {
     covers: Vec<String>,
 }
 
+/// Languages detected for one project root.
+struct ProjectLanguages {
+    root: PathBuf,
+    languages: Vec<Language>,
+}
+
 /// Result of running a single indexer.
 struct IndexerResult {
     lang_name: String,
@@ -41,22 +50,14 @@ pub async fn run(args: IndexArgs) -> Result<()> {
         .unwrap_or_else(|| std::env::current_dir().unwrap());
     let path = path.canonicalize()?;
 
-    // Detect or filter languages
-    let languages = if args.lang.is_empty() {
-        scan_languages(&path)?
-    } else {
-        let detected = scan_languages(&path)?;
-        detected
-            .into_iter()
-            .filter(|l| {
-                args.lang
-                    .iter()
-                    .any(|name| name.eq_ignore_ascii_case(l.name()))
-            })
-            .collect()
-    };
+    let project_roots = resolve_project_roots(&args, &path)?;
+    let projects = detect_languages_for_roots(&args, &project_roots)?;
+    let total_languages = projects
+        .iter()
+        .map(|project| project.languages.len())
+        .sum::<usize>();
 
-    if languages.is_empty() {
+    if total_languages == 0 {
         bail!("No supported languages found to index");
     }
 
@@ -64,19 +65,11 @@ pub async fn run(args: IndexArgs) -> Result<()> {
 
     // Dry-run mode: show what would be done then exit
     if args.dry_run {
-        return run_dry_run(&args, &languages, is_json);
+        return run_dry_run(&args, &projects, is_json);
     }
 
     if !is_json {
-        println!(
-            "{} Indexing: {}",
-            style(">").cyan().bold(),
-            languages
-                .iter()
-                .map(|l| l.name())
-                .collect::<Vec<_>>()
-                .join(", ")
-        );
+        print_index_plan(&projects, &path);
     }
 
     let progress = Arc::new(CliProgressHandler::new());
@@ -84,20 +77,22 @@ pub async fn run(args: IndexArgs) -> Result<()> {
     // Phase 1: Ensure all indexers are installed (sequentially, to avoid
     // duplicate downloads of the same binary)
     let mut tasks = Vec::new();
-    for lang in &languages {
-        let entry = REGISTRY
-            .get(lang)
-            .with_context(|| format!("No indexer registered for {}", lang.name()))?;
+    for project in &projects {
+        for lang in &project.languages {
+            let entry = REGISTRY
+                .runnable_for(lang)
+                .with_context(|| format!("No indexer registered for {}", lang.name()))?;
 
-        let binary_path = entry.ensure_installed(progress.as_ref()).await?;
+            let binary_path = entry.ensure_installed(progress.as_ref()).await?;
 
-        tasks.push(IndexerTask {
-            lang: lang.clone(),
-            entry,
-            binary_path,
-            project_root: path.clone(),
-            covers: Vec::new(),
-        });
+            tasks.push(IndexerTask {
+                lang: lang.clone(),
+                entry,
+                binary_path,
+                project_root: project.root.clone(),
+                covers: Vec::new(),
+            });
+        }
     }
 
     // Dedupe tasks whose indexer binary handles multiple languages in a
@@ -123,9 +118,11 @@ pub async fn run(args: IndexArgs) -> Result<()> {
         );
     }
 
+    let base_path_for_results = path.clone();
     let results: Vec<IndexerResult> = stream::iter(tasks)
         .map(|task| {
             let dur = timeout_duration;
+            let base_path = base_path_for_results.clone();
             async move {
                 let lang_name = task.lang.name().to_string();
                 let covers = task.covers.clone();
@@ -140,10 +137,23 @@ pub async fn run(args: IndexArgs) -> Result<()> {
                 )
                 .await;
                 match outcome {
-                    Ok(result) => IndexerResult {
+                    Ok(Ok(output)) => {
+                        let outcome = prefix_output_paths_for_project_root(
+                            &output,
+                            &task.project_root,
+                            &base_path,
+                        )
+                        .map(|_| output);
+                        IndexerResult {
+                            lang_name,
+                            covers,
+                            outcome,
+                        }
+                    }
+                    Ok(Err(err)) => IndexerResult {
                         lang_name,
                         covers,
-                        outcome: result,
+                        outcome: Err(err),
                     },
                     Err(_) => IndexerResult {
                         lang_name: lang_name.clone(),
@@ -241,7 +251,13 @@ pub async fn run(args: IndexArgs) -> Result<()> {
 
     if is_json {
         let result = serde_json::json!({
-            "languages": languages.iter().map(|l| l.name()).collect::<Vec<_>>(),
+            "languages": unique_language_names(&projects),
+            "projects": projects.iter().map(|project| {
+                serde_json::json!({
+                    "root": project.root.display().to_string(),
+                    "languages": project.languages.iter().map(|l| l.name()).collect::<Vec<_>>(),
+                })
+            }).collect::<Vec<_>>(),
             "outputs": scip_outputs.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
             "merged": if !args.no_merge && !scip_outputs.is_empty() {
                 Some(args.output.display().to_string())
@@ -280,21 +296,156 @@ pub async fn run(args: IndexArgs) -> Result<()> {
     Ok(())
 }
 
+/// Resolve which project roots the index command should operate on.
+fn resolve_project_roots(args: &IndexArgs, base_path: &Path) -> Result<Vec<PathBuf>> {
+    if args.all_roots {
+        let roots = discover_project_roots(base_path)?;
+        if roots.is_empty() {
+            bail!(
+                "No language config roots found under {}",
+                base_path.display()
+            );
+        }
+        return Ok(roots);
+    }
+
+    if !args.roots.is_empty() {
+        let canonical_base = base_path
+            .canonicalize()
+            .with_context(|| format!("Invalid base path: {}", base_path.display()))?;
+        let mut seen = HashSet::new();
+        let mut roots = Vec::new();
+        for root in &args.roots {
+            let candidate = if root.is_absolute() {
+                root.clone()
+            } else {
+                base_path.join(root)
+            };
+            let candidate = candidate
+                .canonicalize()
+                .with_context(|| format!("Invalid project root: {}", candidate.display()))?;
+            if !candidate.starts_with(&canonical_base) {
+                bail!(
+                    "Project root {} is outside base path {}",
+                    candidate.display(),
+                    base_path.display()
+                );
+            }
+            if seen.insert(candidate.clone()) {
+                roots.push(candidate);
+            }
+        }
+        return Ok(roots);
+    }
+
+    Ok(vec![base_path.to_path_buf()])
+}
+
+fn detect_languages_for_roots(
+    args: &IndexArgs,
+    project_roots: &[PathBuf],
+) -> Result<Vec<ProjectLanguages>> {
+    project_roots
+        .iter()
+        .map(|root| {
+            let detected = scan_languages_with_options(
+                root,
+                LanguageScanOptions {
+                    max_depth: if args.all_roots { Some(1) } else { Some(3) },
+                },
+            )?;
+            let languages = if args.lang.is_empty() {
+                detected
+            } else {
+                detected
+                    .into_iter()
+                    .filter(|l| {
+                        args.lang
+                            .iter()
+                            .any(|name| name.eq_ignore_ascii_case(l.name()))
+                    })
+                    .collect()
+            };
+            Ok(ProjectLanguages {
+                root: root.clone(),
+                languages,
+            })
+        })
+        .collect()
+}
+
+fn print_index_plan(projects: &[ProjectLanguages], base_path: &Path) {
+    println!("{} Indexing:", style(">").cyan().bold());
+    for project in projects {
+        println!(
+            "  {} {}",
+            style("root").dim(),
+            display_project_root(&project.root, base_path)
+        );
+        println!(
+            "    {}",
+            project
+                .languages
+                .iter()
+                .map(|l| l.name())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+}
+
+fn display_project_root(root: &Path, base_path: &Path) -> String {
+    root.strip_prefix(base_path)
+        .ok()
+        .filter(|relative| !relative.as_os_str().is_empty())
+        .map(|relative| relative.display().to_string())
+        .unwrap_or_else(|| root.display().to_string())
+}
+
+fn unique_language_names(projects: &[ProjectLanguages]) -> Vec<&'static str> {
+    let mut seen = BTreeSet::new();
+    for project in projects {
+        for language in &project.languages {
+            seen.insert(language.name());
+        }
+    }
+    seen.into_iter().collect()
+}
+
+fn prefix_output_paths_for_project_root(
+    output: &Path,
+    project_root: &Path,
+    base_path: &Path,
+) -> Result<usize> {
+    let Ok(relative_root) = project_root.strip_prefix(base_path) else {
+        return Ok(0);
+    };
+    if relative_root.as_os_str().is_empty() {
+        return Ok(0);
+    }
+
+    let prefix = relative_root.to_string_lossy().replace('\\', "/");
+    prefix_scip_file_document_paths(output, &prefix)
+}
+
 /// Dry-run mode: show what would happen without executing anything.
-fn run_dry_run(args: &IndexArgs, languages: &[Language], is_json: bool) -> Result<()> {
+fn run_dry_run(args: &IndexArgs, projects: &[ProjectLanguages], is_json: bool) -> Result<()> {
     if is_json {
-        let plan: Vec<serde_json::Value> = languages
+        let plan: Vec<serde_json::Value> = projects
             .iter()
-            .map(|lang| {
-                let indexer = REGISTRY.get(lang);
-                serde_json::json!({
-                    "language": lang.name(),
-                    "evidence": lang.evidence(),
-                    "indexer": indexer.map(|e| &e.indexer_name),
-                    "installed": indexer.map(|e| e.is_installed()).unwrap_or(false),
-                    "command": indexer.map(|e| {
-                        format!("{} {}", e.binary_name, e.default_args.join(" "))
-                    }),
+            .flat_map(|project| {
+                project.languages.iter().map(|lang| {
+                    let indexer = REGISTRY.runnable_for(lang);
+                    serde_json::json!({
+                        "root": project.root.display().to_string(),
+                        "language": lang.name(),
+                        "evidence": lang.evidence(),
+                        "indexer": indexer.map(|e| &e.indexer_name),
+                        "installed": indexer.map(|e| e.is_installed()).unwrap_or(false),
+                        "command": indexer.map(|e| {
+                            format!("{} {}", e.binary_name, e.default_args.join(" "))
+                        }),
+                    })
                 })
             })
             .collect();
@@ -304,23 +455,30 @@ fn run_dry_run(args: &IndexArgs, languages: &[Language], is_json: bool) -> Resul
             "{} Dry run -- the following would be indexed:",
             style("*").cyan().bold()
         );
-        for lang in languages {
-            let indexer = REGISTRY.get(lang);
-            let status = match indexer {
-                Some(e) if e.is_installed() => format!("{} (installed)", e.indexer_name),
-                Some(e) => format!("{} (will download)", e.indexer_name),
-                None => "no indexer registered".to_string(),
-            };
-            println!("  {} {} -- {}", style(">").cyan(), lang.name(), status);
-            if let Some(e) = indexer {
-                println!(
-                    "    command: {} {}",
-                    e.binary_name,
-                    e.default_args.join(" ")
-                );
+        for project in projects {
+            println!("  {} {}", style("root").dim(), project.root.display());
+            for lang in &project.languages {
+                let indexer = REGISTRY.runnable_for(lang);
+                let status = match indexer {
+                    Some(e) if e.is_installed() => format!("{} (installed)", e.indexer_name),
+                    Some(e) => format!("{} (will download)", e.indexer_name),
+                    None => "no indexer registered".to_string(),
+                };
+                println!("    {} {} -- {}", style(">").cyan(), lang.name(), status);
+                if let Some(e) = indexer {
+                    println!(
+                        "      command: {} {}",
+                        e.binary_name,
+                        e.default_args.join(" ")
+                    );
+                }
             }
         }
-        if !args.no_merge && languages.len() > 1 {
+        let language_count = projects
+            .iter()
+            .map(|project| project.languages.len())
+            .sum::<usize>();
+        if !args.no_merge && language_count > 1 {
             println!(
                 "  {} Merge output: {}",
                 style(">").cyan(),
@@ -331,22 +489,20 @@ fn run_dry_run(args: &IndexArgs, languages: &[Language], is_json: bool) -> Resul
     Ok(())
 }
 
-/// Group tasks by their `indexer_name` and collapse each group to a single
-/// invocation. When multiple detected languages resolve to the same
-/// indexer tool (e.g. scip-typescript handles both TypeScript and
-/// JavaScript), running it once is enough — the extra languages are
-/// tracked in `covers` so they can be reported in the output.
-///
-/// Within a group the "primary" task is chosen by preferring the one whose
-/// `default_args` do NOT include `--infer-tsconfig`: that flag only helps
-/// projects lacking a tsconfig.json, and in a dedup situation we already
-/// know another task in the group is indexing the same tsconfig-backed
-/// project, so the simpler invocation is the right choice.
+/// Group tasks by their `indexer_name` and project root, then collapse each
+/// group to a single invocation. When multiple detected languages in the same
+/// project root resolve to the same indexer tool (e.g. scip-typescript handles
+/// both TypeScript and JavaScript), running it once is enough. The same indexer
+/// in a different project root remains a separate task.
 fn dedupe_tasks_by_indexer(tasks: Vec<IndexerTask>, is_json: bool) -> Vec<IndexerTask> {
     let mut grouped: HashMap<String, Vec<IndexerTask>> = HashMap::new();
     let mut order: Vec<String> = Vec::new();
     for task in tasks {
-        let key = task.entry.indexer_name.clone();
+        let key = format!(
+            "{}\0{}",
+            task.project_root.display(),
+            task.entry.indexer_name
+        );
         if !grouped.contains_key(&key) {
             order.push(key.clone());
         }
@@ -390,4 +546,92 @@ fn dedupe_tasks_by_indexer(tasks: Vec<IndexerTask>, is_json: bool) -> Vec<Indexe
     }
 
     out
+}
+#[cfg(test)]
+mod tests {
+    use super::{IndexArgs, detect_languages_for_roots, resolve_project_roots};
+    use scip_io_core::LanguageKind;
+    use std::fs;
+    use std::path::PathBuf;
+    use tempfile::TempDir;
+
+    fn base_args() -> IndexArgs {
+        IndexArgs {
+            path: None,
+            lang: Vec::new(),
+            output: PathBuf::from("index.scip"),
+            no_merge: false,
+            parallel: None,
+            timeout: None,
+            format: "text".to_string(),
+            dry_run: true,
+            roots: Vec::new(),
+            all_roots: false,
+        }
+    }
+
+    fn fixture(files: &[&str]) -> (TempDir, PathBuf) {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path().join("project");
+        fs::create_dir_all(&root).unwrap();
+        for file in files {
+            let path = root.join(file);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, "").unwrap();
+        }
+        (dir, root)
+    }
+
+    #[test]
+    fn resolve_project_roots_uses_explicit_roots_relative_to_base_path() {
+        let (_dir, root) = fixture(&["services/api/Cargo.toml", "packages/web/package.json"]);
+        let mut args = base_args();
+        args.roots = vec![PathBuf::from("services/api"), PathBuf::from("packages/web")];
+
+        let roots = resolve_project_roots(&args, &root).unwrap();
+        assert_eq!(
+            roots,
+            vec![
+                root.join("services/api").canonicalize().unwrap(),
+                root.join("packages/web").canonicalize().unwrap(),
+            ]
+        );
+    }
+
+    #[test]
+    fn resolve_project_roots_discovers_all_manifest_roots() {
+        let (_dir, root) = fixture(&["services/api/Cargo.toml", "packages/web/package.json"]);
+        let mut args = base_args();
+        args.all_roots = true;
+
+        let roots = resolve_project_roots(&args, &root).unwrap();
+        assert_eq!(
+            roots,
+            vec![root.join("packages/web"), root.join("services/api")]
+        );
+    }
+
+    #[test]
+    fn all_roots_detects_direct_languages_for_each_discovered_root() {
+        let (_dir, root) = fixture(&["package.json", "services/api/Cargo.toml"]);
+        let mut args = base_args();
+        args.all_roots = true;
+
+        let roots = resolve_project_roots(&args, &root).unwrap();
+        let projects = detect_languages_for_roots(&args, &roots).unwrap();
+
+        let root_project = projects
+            .iter()
+            .find(|project| project.root == root)
+            .expect("root project");
+        assert_eq!(root_project.languages.len(), 1);
+        assert_eq!(root_project.languages[0].kind, LanguageKind::JavaScript);
+
+        let api_project = projects
+            .iter()
+            .find(|project| project.root == root.join("services/api"))
+            .expect("api project");
+        assert_eq!(api_project.languages.len(), 1);
+        assert_eq!(api_project.languages[0].kind, LanguageKind::Rust);
+    }
 }

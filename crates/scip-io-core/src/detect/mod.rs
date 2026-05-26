@@ -3,19 +3,38 @@ pub mod languages;
 pub use languages::Language;
 
 use anyhow::Result;
-use std::path::Path;
+use std::collections::{BTreeSet, HashSet};
+use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
+
+/// Options that control manifest-based language scanning.
+#[derive(Debug, Clone, Copy)]
+pub struct LanguageScanOptions {
+    /// Maximum `walkdir` depth to scan. `None` scans all non-ignored
+    /// descendants, while `Some(3)` preserves the original default behavior.
+    pub max_depth: Option<usize>,
+}
+
+impl Default for LanguageScanOptions {
+    fn default() -> Self {
+        Self { max_depth: Some(3) }
+    }
+}
 
 /// Scan a project root and return all detected languages.
 pub fn scan_languages(root: &Path) -> Result<Vec<Language>> {
-    let mut detected = Vec::new();
-    let mut seen = std::collections::HashSet::new();
+    scan_languages_with_options(root, LanguageScanOptions::default())
+}
 
-    for entry in WalkDir::new(root)
-        .max_depth(3)
-        .into_iter()
-        .filter_entry(|e| !is_hidden_or_ignored(e))
-    {
+/// Scan a project root with explicit scan options.
+pub fn scan_languages_with_options(
+    root: &Path,
+    options: LanguageScanOptions,
+) -> Result<Vec<Language>> {
+    let mut detected = Vec::new();
+    let mut seen = HashSet::new();
+
+    for entry in walker(root, options) {
         let entry = entry?;
         if !entry.file_type().is_file() {
             continue;
@@ -42,6 +61,58 @@ pub fn scan_languages(root: &Path) -> Result<Vec<Language>> {
 
     detected.sort_by_key(|l| l.name());
     Ok(detected)
+}
+
+/// Discover manifest-bearing project roots below `root`.
+///
+/// This intentionally returns directories containing known language manifests,
+/// not every directory with source files. Ignored directories are skipped.
+pub fn discover_project_roots(root: &Path) -> Result<Vec<PathBuf>> {
+    discover_project_roots_with_options(root, LanguageScanOptions { max_depth: None })
+}
+
+/// Discover project roots with explicit scan options.
+pub fn discover_project_roots_with_options(
+    root: &Path,
+    options: LanguageScanOptions,
+) -> Result<Vec<PathBuf>> {
+    let mut roots = BTreeSet::new();
+
+    for entry in walker(root, options) {
+        let entry = entry?;
+        if !entry.file_type().is_file() {
+            continue;
+        }
+
+        let file_name = entry.file_name().to_string_lossy();
+        if is_language_manifest(&file_name)
+            && let Some(parent) = entry.path().parent()
+        {
+            roots.insert(parent.to_path_buf());
+        }
+    }
+
+    Ok(roots.into_iter().collect())
+}
+
+fn walker(
+    root: &Path,
+    options: LanguageScanOptions,
+) -> impl Iterator<Item = walkdir::Result<walkdir::DirEntry>> {
+    let walker = WalkDir::new(root);
+    let walker = match options.max_depth {
+        Some(depth) => walker.max_depth(depth),
+        None => walker,
+    };
+    walker
+        .into_iter()
+        .filter_entry(|e| !is_hidden_or_ignored(e))
+}
+
+fn is_language_manifest(file_name: &str) -> bool {
+    Language::ALL
+        .iter()
+        .any(|lang| lang.matches_manifest(file_name))
 }
 
 fn is_hidden_or_ignored(entry: &walkdir::DirEntry) -> bool {
@@ -195,6 +266,43 @@ mod tests {
         let (_dir, project) = create_fixture_project(&["sub/Cargo.toml"]);
         let langs = scan_languages(&project).unwrap();
         assert!(langs.iter().any(|l| l.kind == LanguageKind::Rust));
+    }
+
+    #[test]
+    fn scan_languages_with_options_respects_depth() {
+        let (_dir, project) = create_fixture_project(&["services/api/Cargo.toml"]);
+
+        let shallow =
+            scan_languages_with_options(&project, LanguageScanOptions { max_depth: Some(2) })
+                .unwrap();
+        assert!(shallow.is_empty());
+
+        let deep =
+            scan_languages_with_options(&project, LanguageScanOptions { max_depth: Some(3) })
+                .unwrap();
+        assert!(deep.iter().any(|l| l.kind == LanguageKind::Rust));
+    }
+
+    #[test]
+    fn discover_project_roots_finds_manifest_directories() {
+        let (_dir, project) = create_fixture_project(&[
+            "services/api/Cargo.toml",
+            "packages/web/package.json",
+            "node_modules/noise/go.mod",
+        ]);
+
+        let roots = discover_project_roots(&project).unwrap();
+        let roots: Vec<_> = roots
+            .iter()
+            .map(|path| {
+                path.strip_prefix(&project)
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/")
+            })
+            .collect();
+
+        assert_eq!(roots, vec!["packages/web", "services/api"]);
     }
 
     #[test]

@@ -14,7 +14,11 @@ export interface IndexerStatusInfo {
   binary_name: string;
   github_repo: string;
   installed: boolean;
+  installable: boolean;
+  managed: boolean;
   installed_path: string | null;
+  action_indexer: string;
+  covered_by: string | null;
 }
 
 export interface UpdateInfo {
@@ -23,6 +27,10 @@ export interface UpdateInfo {
   current_version: string;
   latest_version: string;
   update_available: boolean;
+  installed: boolean;
+  managed: boolean;
+  action_indexer: string;
+  error: string | null;
 }
 
 export interface ValidationResult {
@@ -50,6 +58,18 @@ export async function cancelIndexing(): Promise<void> {
 
 export async function getIndexerStatus(): Promise<IndexerStatusInfo[]> {
   return invoke('get_indexer_status');
+}
+
+export async function installIndexer(indexer: string): Promise<IndexerStatusInfo> {
+  return invoke('install_indexer', { indexer });
+}
+
+export async function uninstallIndexer(indexer: string): Promise<IndexerStatusInfo> {
+  return invoke('uninstall_indexer', { indexer });
+}
+
+export async function updateIndexer(indexer: string, version: string): Promise<IndexerStatusInfo> {
+  return invoke('update_indexer', { indexer, version });
 }
 
 export async function getConfig(path: string): Promise<unknown> {

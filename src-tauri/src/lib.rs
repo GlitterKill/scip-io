@@ -1,7 +1,5 @@
 mod commands;
 
-use tauri::Manager;
-
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -11,6 +9,9 @@ pub fn run() {
             commands::start_indexing,
             commands::cancel_indexing,
             commands::get_indexer_status,
+            commands::install_indexer,
+            commands::uninstall_indexer,
+            commands::update_indexer,
             commands::get_config,
             commands::save_config,
             commands::clean_cache,
@@ -18,10 +19,12 @@ pub fn run() {
             commands::check_updates,
             commands::reveal_in_explorer,
         ])
-        .setup(|app| {
+        .setup(|_app| {
             #[cfg(debug_assertions)]
             {
-                let window = app.get_webview_window("main").unwrap();
+                use tauri::Manager;
+
+                let window = _app.get_webview_window("main").unwrap();
                 window.open_devtools();
             }
             Ok(())

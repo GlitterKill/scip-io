@@ -1,6 +1,16 @@
 import { store, addLog } from '../state/store.js';
-import { detectLanguages, getIndexerStatus, startIndexing } from '../bridge/tauri.js';
+import {
+  detectLanguages,
+  getIndexerStatus,
+  installIndexer,
+  startIndexing,
+  uninstallIndexer,
+} from '../bridge/tauri.js';
 import { renderStatusBadge } from './StatusBadge.js';
+
+const pendingIndexerActions = new Set<string>();
+
+type IndexerRow = ReturnType<typeof store.getState>['indexers'][number];
 
 export function initApp(_container: HTMLElement): void {
   // Legacy stub; the real entry point is now main.ts
@@ -233,6 +243,7 @@ function renderIndexerTable(container: HTMLElement): void {
           <th>Language</th>
           <th>Version</th>
           <th class="col-status">Status</th>
+          <th class="col-actions">Action</th>
         </tr>
       </thead>
     `;
@@ -243,7 +254,15 @@ function renderIndexerTable(container: HTMLElement): void {
 
       const tdName = document.createElement('td');
       tdName.className = 'text-primary font-medium';
-      tdName.textContent = idx.name;
+      const nameLine = document.createElement('div');
+      nameLine.textContent = idx.name;
+      tdName.appendChild(nameLine);
+      if (idx.coveredBy) {
+        const coverageLine = document.createElement('div');
+        coverageLine.className = 'text-xs text-muted mt-xs';
+        coverageLine.textContent = `Covered by ${idx.coveredBy}`;
+        tdName.appendChild(coverageLine);
+      }
       tr.appendChild(tdName);
 
       const tdLang = document.createElement('td');
@@ -260,6 +279,11 @@ function renderIndexerTable(container: HTMLElement): void {
       const badge = renderStatusBadge(idx.installed ? 'installed' : 'not-installed');
       tdStatus.appendChild(badge);
       tr.appendChild(tdStatus);
+
+      const tdAction = document.createElement('td');
+      tdAction.className = 'col-actions';
+      tdAction.appendChild(renderIndexerActionButton(idx));
+      tr.appendChild(tdAction);
 
       tbody.appendChild(tr);
     });
@@ -400,7 +424,11 @@ async function handleFetchIndexers() {
       language: idx.language,
       version: idx.version,
       installed: idx.installed,
+      installable: idx.installable,
+      managed: idx.managed,
       installedPath: idx.installed_path,
+      actionIndexer: idx.action_indexer,
+      coveredBy: idx.covered_by,
     }));
     store.setState({ indexers });
   } catch (err) {
@@ -410,19 +438,103 @@ async function handleFetchIndexers() {
     if (!store.getState().indexers.length) {
       store.setState({
         indexers: [
-          { name: 'scip-typescript', language: 'TypeScript', version: 'v0.3.11', installed: true, installedPath: null },
-          { name: 'rust-analyzer', language: 'Rust', version: 'v0.0.225', installed: false, installedPath: null },
-          { name: 'scip-go', language: 'Go', version: 'v0.1.0', installed: false, installedPath: null },
-          { name: 'scip-java', language: 'Java', version: 'v0.9.0', installed: false, installedPath: null },
-          { name: 'scip-python', language: 'Python', version: 'v0.5.2', installed: true, installedPath: null },
-          { name: 'scip-dotnet', language: 'C#', version: 'v0.4.0', installed: false, installedPath: null },
-          { name: 'scip-ruby', language: 'Ruby', version: 'v0.3.0', installed: false, installedPath: null },
-          { name: 'scip-kotlin', language: 'Kotlin', version: 'v0.2.0', installed: false, installedPath: null },
-          { name: 'scip-clang', language: 'C/C++', version: 'v0.1.5', installed: false, installedPath: null },
+          { name: 'scip-typescript', language: 'typescript, javascript', version: '0.4.0', installed: true, installable: true, managed: true, installedPath: null, actionIndexer: 'scip-typescript', coveredBy: null },
+          { name: 'rust-analyzer', language: 'rust', version: '2026-03-30', installed: false, installable: true, managed: false, installedPath: null, actionIndexer: 'rust-analyzer', coveredBy: null },
+          { name: 'scip-go', language: 'go', version: 'v0.1.26', installed: false, installable: true, managed: false, installedPath: null, actionIndexer: 'scip-go', coveredBy: null },
+          { name: 'scip-java', language: 'java, scala', version: 'v0.12.3', installed: false, installable: true, managed: false, installedPath: null, actionIndexer: 'scip-java', coveredBy: null },
+          { name: 'scip-python', language: 'python', version: '0.6.6', installed: true, installable: true, managed: true, installedPath: null, actionIndexer: 'scip-python', coveredBy: null },
+          { name: 'scip-dotnet', language: 'csharp', version: '0.2.13', installed: false, installable: true, managed: false, installedPath: null, actionIndexer: 'scip-dotnet', coveredBy: null },
+          { name: 'scip-ruby', language: 'ruby', version: 'v0.4.7', installed: false, installable: true, managed: false, installedPath: null, actionIndexer: 'scip-ruby', coveredBy: null },
+          { name: 'scip-kotlin', language: 'kotlin', version: '0.6.0', installed: false, installable: true, managed: false, installedPath: null, actionIndexer: 'scip-java', coveredBy: 'scip-java' },
+          { name: 'scip-clang', language: 'cpp', version: 'v0.4.0', installed: false, installable: true, managed: false, installedPath: null, actionIndexer: 'scip-clang', coveredBy: null },
         ],
       });
     }
   }
+}
+
+function renderIndexerActionButton(idx: IndexerRow): HTMLButtonElement {
+  const isPending = pendingIndexerActions.has(idx.actionIndexer);
+  const button = document.createElement('button');
+  button.className = idx.installed ? 'btn btn--danger btn--sm' : 'btn btn--primary btn--sm';
+  button.textContent = isPending ? 'Working...' : idx.installed ? 'Uninstall' : 'Install';
+  button.disabled = isPending || !canRunIndexerAction(idx);
+  button.title = getIndexerActionTitle(idx);
+  button.setAttribute('aria-label', getIndexerActionLabel(idx, button.textContent));
+
+  button.addEventListener('click', () => {
+    if (idx.installed) {
+      handleUninstallIndexer(idx);
+    } else {
+      handleInstallIndexer(idx);
+    }
+  });
+
+  return button;
+}
+
+function canRunIndexerAction(idx: IndexerRow): boolean {
+  if (idx.installed) {
+    return idx.managed;
+  }
+  return idx.installable;
+}
+
+function getIndexerActionTitle(idx: IndexerRow): string {
+  if (idx.installed && !idx.managed) {
+    return `${idx.actionIndexer} is installed outside SCIP-IO; remove it from PATH manually.`;
+  }
+  if (!idx.installed && !idx.installable) {
+    return 'Automatic install is not supported for this indexer.';
+  }
+  if (idx.coveredBy) {
+    return idx.installed
+      ? `Uninstall ${idx.actionIndexer} to remove ${idx.name} support`
+      : `Install ${idx.actionIndexer} to enable ${idx.name}`;
+  }
+  return idx.installed ? `Uninstall ${idx.name}` : `Install ${idx.name}`;
+}
+
+function getIndexerActionLabel(idx: IndexerRow, verb: string): string {
+  if (idx.coveredBy) {
+    return `${verb} ${idx.actionIndexer} for ${idx.name}`;
+  }
+  return `${verb} ${idx.name}`;
+}
+
+async function handleInstallIndexer(idx: IndexerRow): Promise<void> {
+  await runIndexerAction(idx, async () => {
+    addLog('info', `${getIndexerActionLabel(idx, 'Installing')}...`);
+    await installIndexer(idx.actionIndexer);
+    addLog('success', `${idx.actionIndexer} installed`);
+  });
+}
+
+async function handleUninstallIndexer(idx: IndexerRow): Promise<void> {
+  await runIndexerAction(idx, async () => {
+    addLog('info', `${getIndexerActionLabel(idx, 'Uninstalling')}...`);
+    await uninstallIndexer(idx.actionIndexer);
+    addLog('success', `${idx.actionIndexer} uninstalled`);
+  });
+}
+
+async function runIndexerAction(idx: IndexerRow, action: () => Promise<void>): Promise<void> {
+  pendingIndexerActions.add(idx.actionIndexer);
+  refreshIndexerRows();
+  try {
+    await action();
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    addLog('error', `${idx.name} action failed: ${message}`);
+  } finally {
+    pendingIndexerActions.delete(idx.actionIndexer);
+    await handleFetchIndexers();
+    refreshIndexerRows();
+  }
+}
+
+function refreshIndexerRows(): void {
+  store.setState({ indexers: [...store.getState().indexers] });
 }
 
 async function handleIndexAll() {
@@ -456,6 +568,8 @@ async function handleIndexAll() {
     const message = err instanceof Error ? err.message : String(err);
     addLog('error', `Indexing failed: ${message}`);
     store.setState({ isIndexing: false });
+  } finally {
+    await handleFetchIndexers();
   }
 }
 

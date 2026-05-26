@@ -1,16 +1,15 @@
 import { store, addLog } from '../state/store.js';
-import { getConfig, saveConfig, cleanCache, checkUpdates } from '../bridge/tauri.js';
+import { getConfig, saveConfig, cleanCache, checkUpdates, updateIndexer, type UpdateInfo } from '../bridge/tauri.js';
 
 // Known indexers for the override section
 const KNOWN_INDEXERS = [
   { name: 'scip-typescript', language: 'TypeScript/JavaScript', defaultBinary: 'scip-typescript' },
   { name: 'rust-analyzer', language: 'Rust', defaultBinary: 'rust-analyzer' },
   { name: 'scip-go', language: 'Go', defaultBinary: 'scip-go' },
-  { name: 'scip-java', language: 'Java', defaultBinary: 'scip-java' },
+  { name: 'scip-java', language: 'Java/Scala/Kotlin', defaultBinary: 'scip-java' },
   { name: 'scip-python', language: 'Python', defaultBinary: 'scip-python' },
   { name: 'scip-dotnet', language: 'C#', defaultBinary: 'scip-dotnet' },
   { name: 'scip-ruby', language: 'Ruby', defaultBinary: 'scip-ruby' },
-  { name: 'scip-kotlin', language: 'Kotlin', defaultBinary: 'scip-kotlin' },
   { name: 'scip-clang', language: 'C/C++', defaultBinary: 'scip-clang' },
 ];
 
@@ -27,6 +26,9 @@ let overrides: IndexerOverride[] = KNOWN_INDEXERS.map((idx) => ({
   args: '',
   expanded: false,
 }));
+let latestUpdateResults: UpdateInfo[] = [];
+let hasCheckedUpdates = false;
+const pendingUpdateActions = new Set<string>();
 
 export function renderSettings(container: HTMLElement): void {
   const wrapper = document.createElement('div');
@@ -291,6 +293,7 @@ function renderUpdatesSection(): HTMLElement {
   const resultsArea = document.createElement('div');
   resultsArea.id = 'update-results';
   resultsArea.className = 'flex-1';
+  renderUpdateResults(resultsArea);
   body.appendChild(resultsArea);
 
   panel.appendChild(body);
@@ -448,26 +451,143 @@ async function handleCheckUpdates() {
   }
 
   try {
-    const updates = await checkUpdates();
+    latestUpdateResults = await checkUpdates();
+    hasCheckedUpdates = true;
     if (resultsArea) {
-      if (updates.length === 0) {
-        resultsArea.innerHTML = '<span class="text-sm text-success">All indexers are up to date.</span>';
-      } else {
-        const available = updates.filter((u) => u.update_available);
-        if (available.length === 0) {
-          resultsArea.innerHTML = '<span class="text-sm text-success">All indexers are up to date.</span>';
-        } else {
-          resultsArea.innerHTML = `<span class="text-sm text-warning">${available.length} update(s) available: ${available.map((u) => u.name).join(', ')}</span>`;
-        }
-      }
+      renderUpdateResults(resultsArea);
     }
-    addLog('info', `Update check complete: ${updates.filter((u) => u.update_available).length} update(s) available`);
+    addLog('info', `Update check complete: ${latestUpdateResults.filter((u) => u.update_available).length} update(s) available`);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     if (resultsArea) {
       resultsArea.innerHTML = `<span class="text-sm text-error">Check failed: ${escapeHtml(message)}</span>`;
     }
     addLog('error', `Update check failed: ${message}`);
+  }
+}
+
+function renderUpdateResults(container: HTMLElement): void {
+  container.innerHTML = '';
+  if (latestUpdateResults.length === 0) {
+    container.innerHTML = hasCheckedUpdates
+      ? '<span class="text-sm text-muted">No installed indexers found.</span>'
+      : '<span class="text-sm text-muted">No update check has run.</span>';
+    return;
+  }
+
+  const available = latestUpdateResults.filter((update) => update.update_available);
+  const failures = latestUpdateResults.filter((update) => update.error);
+  const manual = latestUpdateResults.filter((update) => update.installed && !update.managed);
+
+  if (available.length === 0 && failures.length === 0 && manual.length === 0) {
+    container.innerHTML = '<span class="text-sm text-success">Installed managed indexers are up to date.</span>';
+    return;
+  }
+
+  const list = document.createElement('div');
+  list.className = 'flex flex-col gap-sm';
+
+  available.forEach((update) => {
+    list.appendChild(renderUpdateItem(update, true));
+  });
+  manual.forEach((update) => {
+    list.appendChild(renderUpdateItem(update, false, 'Installed outside SCIP-IO; update manually.'));
+  });
+  failures.forEach((update) => {
+    list.appendChild(renderUpdateItem(update, false, update.error || 'Update check failed.'));
+  });
+
+  if (available.length > 1) {
+    const updateAll = document.createElement('button');
+    updateAll.className = 'btn btn--primary btn--sm';
+    updateAll.textContent = pendingUpdateActions.has('__all__') ? 'Updating...' : 'Update All';
+    updateAll.disabled = pendingUpdateActions.size > 0;
+    updateAll.addEventListener('click', handleUpdateAll);
+    list.appendChild(updateAll);
+  }
+
+  container.appendChild(list);
+}
+
+function renderUpdateItem(update: UpdateInfo, canUpdate: boolean, note?: string): HTMLElement {
+  const row = document.createElement('div');
+  row.className = 'flex items-center justify-between gap-md';
+
+  const details = document.createElement('div');
+  details.className = 'text-sm';
+  const message = note
+    ? `${update.name}: ${note}`
+    : `${update.name}: ${update.current_version} -> ${update.latest_version}`;
+  details.textContent = message;
+  row.appendChild(details);
+
+  if (canUpdate) {
+    const button = document.createElement('button');
+    button.className = 'btn btn--secondary btn--sm';
+    button.textContent = pendingUpdateActions.has(update.action_indexer) ? 'Updating...' : 'Update';
+    button.disabled = pendingUpdateActions.size > 0;
+    button.title = `Update ${update.name} to ${update.latest_version}`;
+    button.addEventListener('click', () => handleUpdateOne(update));
+    row.appendChild(button);
+  }
+
+  return row;
+}
+
+async function handleUpdateOne(update: UpdateInfo): Promise<void> {
+  pendingUpdateActions.add(update.action_indexer);
+  refreshUpdateResults();
+  try {
+    addLog('info', `Updating ${update.name} to ${update.latest_version}...`);
+    await updateIndexer(update.action_indexer, update.latest_version);
+    addLog('success', `${update.name} updated to ${update.latest_version}`);
+    latestUpdateResults = await checkUpdates();
+    refreshUpdateResults();
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    addLog('error', `Update failed for ${update.name}: ${message}`);
+    showNotification(`Update failed for ${update.name}`, 'error');
+  } finally {
+    pendingUpdateActions.delete(update.action_indexer);
+    refreshUpdateResults();
+  }
+}
+
+async function handleUpdateAll(): Promise<void> {
+  const available = latestUpdateResults.filter((update) => update.update_available);
+  pendingUpdateActions.add('__all__');
+  available.forEach((update) => pendingUpdateActions.add(update.action_indexer));
+  refreshUpdateResults();
+  const failures: string[] = [];
+  try {
+    for (const update of available) {
+      try {
+        addLog('info', `Updating ${update.name} to ${update.latest_version}...`);
+        await updateIndexer(update.action_indexer, update.latest_version);
+        addLog('success', `${update.name} updated to ${update.latest_version}`);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        failures.push(update.name);
+        addLog('error', `Update failed for ${update.name}: ${message}`);
+      }
+    }
+    latestUpdateResults = await checkUpdates();
+    refreshUpdateResults();
+    if (failures.length > 0) {
+      showNotification(`Failed to update ${failures.length} indexer(s)`, 'error');
+    } else {
+      showNotification('All indexers updated', 'success');
+    }
+  } finally {
+    pendingUpdateActions.clear();
+    refreshUpdateResults();
+  }
+}
+
+function refreshUpdateResults(): void {
+  const resultsArea = document.getElementById('update-results');
+  if (resultsArea) {
+    renderUpdateResults(resultsArea);
   }
 }
 

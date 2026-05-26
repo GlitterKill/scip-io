@@ -3,8 +3,10 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use futures_util::StreamExt;
+use serde::Deserialize;
 
-use crate::indexer::{IndexerEntry, InstallMethod, install_dir};
+use crate::indexer::version::normalize_version;
+use crate::indexer::{IndexerEntry, InstallMethod, install_dir, npm_package_dir};
 use crate::progress::{ProgressEvent, ProgressHandler};
 
 // ---------------------------------------------------------------------------
@@ -88,6 +90,281 @@ fn github_release_url(github_repo: &str, version: &str, asset: &str) -> String {
         "https://github.com/{}/releases/download/{}/{}",
         github_repo, version, asset,
     )
+}
+
+async fn latest_github_release_tag(github_repo: &str) -> Result<String> {
+    let url = format!("https://api.github.com/repos/{github_repo}/releases/latest");
+    let response = reqwest::Client::new()
+        .get(&url)
+        .header("User-Agent", "scip-io")
+        .header("Accept", "application/vnd.github.v3+json")
+        .send()
+        .await
+        .with_context(|| format!("Failed to check latest release for {github_repo}"))?;
+
+    if !response.status().is_success() {
+        bail!(
+            "GitHub latest release check failed for {}: HTTP {}",
+            github_repo,
+            response.status()
+        );
+    }
+
+    let json = response
+        .json::<serde_json::Value>()
+        .await
+        .with_context(|| format!("Failed to parse latest release for {github_repo}"))?;
+    json["tag_name"]
+        .as_str()
+        .map(str::to_owned)
+        .filter(|tag| !tag.trim().is_empty())
+        .with_context(|| format!("Latest release for {github_repo} has no tag_name"))
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct GitHubRelease {
+    tag_name: String,
+    #[serde(default)]
+    prerelease: bool,
+    #[serde(default)]
+    draft: bool,
+    #[serde(default)]
+    assets: Vec<GitHubAsset>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct GitHubAsset {
+    name: String,
+}
+
+async fn github_releases(github_repo: &str) -> Result<Vec<GitHubRelease>> {
+    let url = format!("https://api.github.com/repos/{github_repo}/releases?per_page=20");
+    let response = reqwest::Client::new()
+        .get(&url)
+        .header("User-Agent", "scip-io")
+        .header("Accept", "application/vnd.github.v3+json")
+        .send()
+        .await
+        .with_context(|| format!("Failed to check releases for {github_repo}"))?;
+
+    if !response.status().is_success() {
+        bail!(
+            "GitHub release check failed for {}: HTTP {}",
+            github_repo,
+            response.status()
+        );
+    }
+
+    response
+        .json::<Vec<GitHubRelease>>()
+        .await
+        .with_context(|| format!("Failed to parse releases for {github_repo}"))
+}
+
+async fn github_release_by_tag(github_repo: &str, tag: &str) -> Result<GitHubRelease> {
+    let url = format!("https://api.github.com/repos/{github_repo}/releases/tags/{tag}");
+    let response = reqwest::Client::new()
+        .get(&url)
+        .header("User-Agent", "scip-io")
+        .header("Accept", "application/vnd.github.v3+json")
+        .send()
+        .await
+        .with_context(|| format!("Failed to check release {tag} for {github_repo}"))?;
+
+    if !response.status().is_success() {
+        bail!(
+            "GitHub release check failed for {} {}: HTTP {}",
+            github_repo,
+            tag,
+            response.status()
+        );
+    }
+
+    response
+        .json::<GitHubRelease>()
+        .await
+        .with_context(|| format!("Failed to parse release {tag} for {github_repo}"))
+}
+
+async fn latest_compatible_github_release_tag(entry: &IndexerEntry) -> Result<String> {
+    let releases = github_releases(&entry.github_repo).await?;
+    first_compatible_github_release_tag(entry, &releases)
+}
+
+fn first_compatible_github_release_tag(
+    entry: &IndexerEntry,
+    releases: &[GitHubRelease],
+) -> Result<String> {
+    for release in releases {
+        let tag = release.tag_name.trim();
+        if tag.is_empty() || release.draft || release.prerelease || is_moving_release_tag(tag) {
+            continue;
+        }
+
+        let expected_assets = expected_github_assets(entry, tag)?;
+        if expected_assets.is_empty() {
+            continue;
+        }
+        if release
+            .assets
+            .iter()
+            .any(|asset| expected_assets.contains(&asset.name))
+        {
+            return Ok(tag.to_owned());
+        }
+    }
+
+    bail!(
+        "No compatible {} release found for this platform",
+        entry.indexer_name
+    )
+}
+
+fn is_moving_release_tag(tag: &str) -> bool {
+    let tag = tag.trim().to_ascii_lowercase();
+    matches!(
+        tag.as_str(),
+        "nightly" | "latest" | "main" | "master" | "snapshot"
+    )
+}
+
+fn expected_github_assets(entry: &IndexerEntry, version: &str) -> Result<Vec<String>> {
+    match &entry.install_method {
+        InstallMethod::GitHubBinary { asset_pattern }
+        | InstallMethod::GitHubGz { asset_pattern }
+        | InstallMethod::GitHubTarGz { asset_pattern, .. }
+        | InstallMethod::GitHubZip { asset_pattern, .. } => {
+            Ok(pattern_asset_candidates(asset_pattern, version))
+        }
+        InstallMethod::GitHubLauncher {
+            unix_asset,
+            windows_asset,
+        } => Ok(pattern_asset_candidates(
+            if cfg!(windows) {
+                windows_asset
+            } else {
+                unix_asset
+            },
+            version,
+        )),
+        InstallMethod::Npm { .. } | InstallMethod::DotnetTool { .. } => Ok(Vec::new()),
+        InstallMethod::CoveredBy {
+            indexer_name,
+            reason,
+        } => {
+            bail!(
+                "Indexer '{}' is covered by '{}': {}",
+                entry.indexer_name,
+                indexer_name,
+                reason
+            )
+        }
+        InstallMethod::Unsupported { reason } => {
+            bail!(
+                "Indexer '{}' cannot be automatically installed: {}",
+                entry.indexer_name,
+                reason
+            )
+        }
+    }
+}
+
+fn version_pattern_candidates(version: &str) -> Vec<String> {
+    let mut candidates = Vec::new();
+    let raw = version.trim();
+    if !raw.is_empty() {
+        candidates.push(raw.to_owned());
+    }
+
+    let normalized = normalize_version(version);
+    if !normalized.is_empty() && candidates.iter().all(|candidate| candidate != &normalized) {
+        candidates.push(normalized);
+    }
+
+    candidates
+}
+
+fn pattern_asset_candidates(pattern: &str, version: &str) -> Vec<String> {
+    let mut assets = Vec::new();
+    for candidate in version_pattern_candidates(version) {
+        let asset = resolve_pattern(pattern, &candidate);
+        if !assets.contains(&asset) {
+            assets.push(asset);
+        }
+    }
+    assets
+}
+
+async fn select_github_release_asset(
+    github_repo: &str,
+    release_tag: &str,
+    candidates: Vec<String>,
+) -> Result<String> {
+    let release = github_release_by_tag(github_repo, release_tag).await?;
+    for candidate in &candidates {
+        if release.assets.iter().any(|asset| asset.name == *candidate) {
+            return Ok(candidate.clone());
+        }
+    }
+
+    bail!(
+        "Release {} for {} does not contain a compatible asset for this platform. Expected one of: {}",
+        release_tag,
+        github_repo,
+        candidates.join(", ")
+    )
+}
+
+async fn latest_npm_package_version(package: &str) -> Result<String> {
+    let npm = which::which("npm")
+        .context("npm not found on PATH. Install Node.js to use this indexer, or install the indexer manually.")?;
+    let output = tokio::process::Command::new(&npm)
+        .args(["view", package, "version", "--silent"])
+        .output()
+        .await
+        .context("Failed to run npm view")?;
+
+    if !output.status.success() {
+        bail!("npm view failed with {}", output.status);
+    }
+
+    let version = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    if version.is_empty() {
+        bail!("npm returned no latest version for {package}");
+    }
+    Ok(version)
+}
+
+pub async fn resolve_latest_compatible_version(entry: &IndexerEntry) -> Result<String> {
+    match &entry.install_method {
+        InstallMethod::Npm { package } => latest_npm_package_version(package).await,
+        InstallMethod::DotnetTool { .. } => Ok(normalize_version(
+            &latest_github_release_tag(&entry.github_repo).await?,
+        )),
+        InstallMethod::GitHubBinary { .. }
+        | InstallMethod::GitHubGz { .. }
+        | InstallMethod::GitHubTarGz { .. }
+        | InstallMethod::GitHubZip { .. }
+        | InstallMethod::GitHubLauncher { .. } => latest_compatible_github_release_tag(entry).await,
+        InstallMethod::CoveredBy {
+            indexer_name,
+            reason,
+        } => {
+            bail!(
+                "Indexer '{}' is covered by '{}': {}",
+                entry.indexer_name,
+                indexer_name,
+                reason
+            )
+        }
+        InstallMethod::Unsupported { reason } => {
+            bail!(
+                "Indexer '{}' cannot be automatically installed: {}",
+                entry.indexer_name,
+                reason
+            )
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -252,7 +529,12 @@ async fn install_github_binary(
     pattern: &str,
     progress: &dyn ProgressHandler,
 ) -> Result<PathBuf> {
-    let asset = resolve_pattern(pattern, &entry.version);
+    let asset = select_github_release_asset(
+        &entry.github_repo,
+        &entry.version,
+        pattern_asset_candidates(pattern, &entry.version),
+    )
+    .await?;
     let url = github_release_url(&entry.github_repo, &entry.version, &asset);
 
     let dir = install_dir();
@@ -276,7 +558,12 @@ async fn install_github_gz(
     pattern: &str,
     progress: &dyn ProgressHandler,
 ) -> Result<PathBuf> {
-    let asset = resolve_pattern(pattern, &entry.version);
+    let asset = select_github_release_asset(
+        &entry.github_repo,
+        &entry.version,
+        pattern_asset_candidates(pattern, &entry.version),
+    )
+    .await?;
     let url = github_release_url(&entry.github_repo, &entry.version, &asset);
 
     let dir = install_dir();
@@ -308,7 +595,12 @@ async fn install_github_tar_gz(
     binary_path_in_archive: Option<&str>,
     progress: &dyn ProgressHandler,
 ) -> Result<PathBuf> {
-    let asset = resolve_pattern(pattern, &entry.version);
+    let asset = select_github_release_asset(
+        &entry.github_repo,
+        &entry.version,
+        pattern_asset_candidates(pattern, &entry.version),
+    )
+    .await?;
     let url = github_release_url(&entry.github_repo, &entry.version, &asset);
 
     let dir = install_dir();
@@ -338,7 +630,12 @@ async fn install_github_zip(
     binary_path_in_archive: Option<&str>,
     progress: &dyn ProgressHandler,
 ) -> Result<PathBuf> {
-    let asset = resolve_pattern(pattern, &entry.version);
+    let asset = select_github_release_asset(
+        &entry.github_repo,
+        &entry.version,
+        pattern_asset_candidates(pattern, &entry.version),
+    )
+    .await?;
     let url = github_release_url(&entry.github_repo, &entry.version, &asset);
 
     let dir = install_dir();
@@ -367,11 +664,17 @@ async fn install_github_launcher(
     windows_asset: &str,
     progress: &dyn ProgressHandler,
 ) -> Result<PathBuf> {
-    let asset = if cfg!(windows) {
-        resolve_pattern(windows_asset, &entry.version)
+    let pattern = if cfg!(windows) {
+        windows_asset
     } else {
-        resolve_pattern(unix_asset, &entry.version)
+        unix_asset
     };
+    let asset = select_github_release_asset(
+        &entry.github_repo,
+        &entry.version,
+        pattern_asset_candidates(pattern, &entry.version),
+    )
+    .await?;
     let url = github_release_url(&entry.github_repo, &entry.version, &asset);
 
     let dir = install_dir();
@@ -417,6 +720,8 @@ async fn install_npm(
         bail!("npm install failed with {}", status);
     }
 
+    apply_npm_compatibility_repairs(entry, &prefix_dir, package)?;
+
     let bin_dir = prefix_dir.join("node_modules").join(".bin");
     let binary = if cfg!(windows) {
         bin_dir.join(format!("{}.cmd", entry.binary_name))
@@ -433,6 +738,51 @@ async fn install_npm(
     }
 
     Ok(binary)
+}
+
+fn apply_npm_compatibility_repairs(
+    entry: &IndexerEntry,
+    prefix_dir: &Path,
+    package: &str,
+) -> Result<()> {
+    if cfg!(windows) && entry.indexer_name == "scip-python" {
+        let repaired = repair_scip_python_windows_path_separator_regex(prefix_dir, package)?;
+        if repaired {
+            tracing::info!(
+                indexer = %entry.indexer_name,
+                "applied Windows compatibility repair for npm indexer"
+            );
+        }
+    }
+
+    Ok(())
+}
+
+fn repair_scip_python_windows_path_separator_regex(
+    prefix_dir: &Path,
+    package: &str,
+) -> Result<bool> {
+    let bundle = npm_package_dir(prefix_dir, package)
+        .join("dist")
+        .join("scip-python.js");
+    let source = match std::fs::read_to_string(&bundle) {
+        Ok(source) => source,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(err) => return Err(err).with_context(|| format!("Cannot read {}", bundle.display())),
+    };
+
+    let broken = r#"new RegExp(o.sep,"g")"#;
+    let fixed = r#"new RegExp(o.sep.replace(/[.*+?^${}()|[\]\\]/g,"\\$&"),"g")"#;
+    if !source.contains(broken) {
+        return Ok(false);
+    }
+
+    // scip-python 0.6.6 builds an invalid regex from `path.sep` on Windows
+    // (`\` is not a valid regex source by itself). Escape the separator in
+    // the installed bundle until the upstream package ships the same fix.
+    std::fs::write(&bundle, source.replace(broken, fixed))
+        .with_context(|| format!("Cannot write {}", bundle.display()))?;
+    Ok(true)
 }
 
 async fn install_dotnet_tool(
@@ -483,7 +833,30 @@ async fn install_dotnet_tool(
 // Main dispatch
 // ---------------------------------------------------------------------------
 
+pub(crate) fn repair_existing_indexer(entry: &IndexerEntry) -> Result<()> {
+    let dir = install_dir();
+    repair_existing_indexer_from(entry, &dir)
+}
+
+fn repair_existing_indexer_from(entry: &IndexerEntry, install_root: &Path) -> Result<()> {
+    if let InstallMethod::Npm { package } = &entry.install_method {
+        apply_npm_compatibility_repairs(entry, &install_root.join("npm"), package)?;
+    }
+
+    Ok(())
+}
+
 /// Install an indexer using its configured install method.
+pub async fn install_indexer_at_version(
+    entry: &IndexerEntry,
+    version: &str,
+    progress: &dyn ProgressHandler,
+) -> Result<PathBuf> {
+    let mut versioned = entry.clone();
+    versioned.version = version.to_owned();
+    install_indexer(&versioned, progress).await
+}
+
 pub async fn install_indexer(
     entry: &IndexerEntry,
     progress: &dyn ProgressHandler,
@@ -527,6 +900,17 @@ pub async fn install_indexer(
         InstallMethod::DotnetTool { package } => {
             install_dotnet_tool(entry, package, progress).await
         }
+        InstallMethod::CoveredBy {
+            indexer_name,
+            reason,
+        } => {
+            bail!(
+                "Indexer '{}' is covered by '{}': {}",
+                entry.indexer_name,
+                indexer_name,
+                reason
+            )
+        }
         InstallMethod::Unsupported { reason } => {
             bail!(
                 "Indexer \'{}\' cannot be automatically installed: {}",
@@ -545,6 +929,19 @@ pub async fn install_indexer(
 mod tests {
     use super::*;
     use std::io::Write;
+
+    fn entry_with_method(binary_name: &str, install_method: InstallMethod) -> IndexerEntry {
+        IndexerEntry {
+            indexer_name: binary_name.to_string(),
+            language: "test".to_string(),
+            github_repo: "owner/repo".to_string(),
+            binary_name: binary_name.to_string(),
+            version: "1.0.0".to_string(),
+            default_args: Vec::new(),
+            output_file: "index.scip".to_string(),
+            install_method,
+        }
+    }
 
     #[test]
     fn test_platform_os_is_known() {
@@ -605,6 +1002,109 @@ mod tests {
         assert_eq!(
             url,
             "https://github.com/owner/repo/releases/download/v1.0/binary-linux"
+        );
+    }
+
+    #[test]
+    fn chooses_first_release_with_expected_asset() -> Result<()> {
+        let entry = entry_with_method(
+            "tool",
+            InstallMethod::GitHubBinary {
+                asset_pattern: "tool-{version}-{os}".to_string(),
+            },
+        );
+        let releases = vec![
+            GitHubRelease {
+                tag_name: "v2.0.0".to_string(),
+                prerelease: false,
+                draft: false,
+                assets: vec![GitHubAsset {
+                    name: "tool-v2.0.0-other".to_string(),
+                }],
+            },
+            GitHubRelease {
+                tag_name: "v1.9.0".to_string(),
+                prerelease: false,
+                draft: false,
+                assets: vec![GitHubAsset {
+                    name: format!("tool-v1.9.0-{}", platform_os()),
+                }],
+            },
+        ];
+
+        assert_eq!(
+            first_compatible_github_release_tag(&entry, &releases)?,
+            "v1.9.0"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn matches_release_assets_with_normalized_version() -> Result<()> {
+        let entry = entry_with_method(
+            "tool",
+            InstallMethod::GitHubBinary {
+                asset_pattern: "tool_{version}_{os}_{goreleaser_arch}.tar.gz".to_string(),
+            },
+        );
+        let releases = vec![GitHubRelease {
+            tag_name: "v1.9.0".to_string(),
+            prerelease: false,
+            draft: false,
+            assets: vec![GitHubAsset {
+                name: format!("tool_1.9.0_{}_{}.tar.gz", platform_os(), goreleaser_arch()),
+            }],
+        }];
+
+        assert_eq!(
+            first_compatible_github_release_tag(&entry, &releases)?,
+            "v1.9.0"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn skips_prerelease_moving_tags_for_latest_compatible_release() -> Result<()> {
+        let entry = entry_with_method(
+            "tool",
+            InstallMethod::GitHubBinary {
+                asset_pattern: "tool-{version}-{os}".to_string(),
+            },
+        );
+        let releases = vec![
+            GitHubRelease {
+                tag_name: "nightly".to_string(),
+                prerelease: true,
+                draft: false,
+                assets: vec![GitHubAsset {
+                    name: format!("tool-nightly-{}", platform_os()),
+                }],
+            },
+            GitHubRelease {
+                tag_name: "2026-05-25".to_string(),
+                prerelease: false,
+                draft: false,
+                assets: vec![GitHubAsset {
+                    name: format!("tool-2026-05-25-{}", platform_os()),
+                }],
+            },
+        ];
+
+        assert_eq!(
+            first_compatible_github_release_tag(&entry, &releases)?,
+            "2026-05-25"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn pattern_asset_candidates_include_raw_and_normalized_versions() {
+        assert_eq!(
+            pattern_asset_candidates("tool_{version}_{os}.tar.gz", "v1.9.0"),
+            vec![
+                format!("tool_v1.9.0_{}.tar.gz", platform_os()),
+                format!("tool_1.9.0_{}.tar.gz", platform_os()),
+            ]
         );
     }
 
@@ -735,5 +1235,90 @@ mod tests {
         let result = extract_tar_gz(&archive_path, &dest_dir, "missing", None);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("not found"),);
+    }
+
+    #[test]
+    fn repairs_scip_python_windows_path_separator_regex() {
+        let dir = tempfile::tempdir().unwrap();
+        let prefix_dir = dir.path().join("npm");
+        let bundle = super::super::npm_package_dir(&prefix_dir, "@sourcegraph/scip-python")
+            .join("dist")
+            .join("scip-python.js");
+        std::fs::create_dir_all(bundle.parent().unwrap()).unwrap();
+        std::fs::write(
+            &bundle,
+            r#"const o={sep:"\\"};const a=new RegExp(o.sep,"g");"#,
+        )
+        .unwrap();
+
+        let repaired = repair_scip_python_windows_path_separator_regex(
+            &prefix_dir,
+            "@sourcegraph/scip-python",
+        )
+        .unwrap();
+        let contents = std::fs::read_to_string(&bundle).unwrap();
+
+        assert!(repaired);
+        assert!(
+            contents.contains(r#"new RegExp(o.sep.replace(/[.*+?^${}()|[\]\\]/g,"\\$&"),"g")"#)
+        );
+    }
+
+    #[test]
+    fn scip_python_regex_repair_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let prefix_dir = dir.path().join("npm");
+        let bundle = super::super::npm_package_dir(&prefix_dir, "@sourcegraph/scip-python")
+            .join("dist")
+            .join("scip-python.js");
+        std::fs::create_dir_all(bundle.parent().unwrap()).unwrap();
+        std::fs::write(
+            &bundle,
+            r#"const o={sep:"\\"};const a=new RegExp(o.sep.replace(/[.*+?^${}()|[\]\\]/g,"\\$&"),"g");"#,
+        )
+        .unwrap();
+
+        let repaired = repair_scip_python_windows_path_separator_regex(
+            &prefix_dir,
+            "@sourcegraph/scip-python",
+        )
+        .unwrap();
+
+        assert!(!repaired);
+    }
+
+    #[test]
+    fn repairs_existing_scip_python_npm_install() {
+        let dir = tempfile::tempdir().unwrap();
+        let install_root = dir.path().join("bin");
+        let prefix_dir = install_root.join("npm");
+        let bundle = super::super::npm_package_dir(&prefix_dir, "@sourcegraph/scip-python")
+            .join("dist")
+            .join("scip-python.js");
+        std::fs::create_dir_all(bundle.parent().unwrap()).unwrap();
+        std::fs::write(
+            &bundle,
+            r#"const o={sep:"\\"};const a=new RegExp(o.sep,"g");"#,
+        )
+        .unwrap();
+        let entry = IndexerEntry {
+            indexer_name: "scip-python".to_string(),
+            language: "python".to_string(),
+            github_repo: "sourcegraph/scip-python".to_string(),
+            binary_name: "scip-python".to_string(),
+            version: "0.6.6".to_string(),
+            default_args: Vec::new(),
+            output_file: "index.scip".to_string(),
+            install_method: InstallMethod::Npm {
+                package: "@sourcegraph/scip-python".to_string(),
+            },
+        };
+
+        repair_existing_indexer_from(&entry, &install_root).unwrap();
+
+        let contents = std::fs::read_to_string(&bundle).unwrap();
+        assert!(
+            contents.contains(r#"new RegExp(o.sep.replace(/[.*+?^${}()|[\]\\]/g,"\\$&"),"g")"#)
+        );
     }
 }
