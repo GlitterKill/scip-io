@@ -1317,8 +1317,14 @@ mod tests {
         repair_existing_indexer_from(&entry, &install_root).unwrap();
 
         let contents = std::fs::read_to_string(&bundle).unwrap();
-        assert!(
-            contents.contains(r#"new RegExp(o.sep.replace(/[.*+?^${}()|[\]\\]/g,"\\$&"),"g")"#)
-        );
+        // Existing npm installs are only patched on Windows, where the
+        // scip-python bundle builds an invalid regex from `path.sep`.
+        if cfg!(windows) {
+            assert!(
+                contents.contains(r#"new RegExp(o.sep.replace(/[.*+?^${}()|[\]\\]/g,"\\$&"),"g")"#)
+            );
+        } else {
+            assert!(contents.contains(r#"new RegExp(o.sep,"g")"#));
+        }
     }
 }
