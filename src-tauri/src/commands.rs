@@ -1,4 +1,7 @@
 use scip_io_core::config::ProjectConfig;
+use scip_io_core::config_discovery::{
+    discover_additional_configs, supported_additional_config_languages,
+};
 use scip_io_core::detect::{Language, scan_languages};
 use scip_io_core::indexer::registry::REGISTRY;
 use scip_io_core::indexer::version::version_is_newer;
@@ -7,7 +10,7 @@ use scip_io_core::progress::{ProgressEvent, ProgressHandler};
 use scip_io_core::validate::validate_scip_file;
 use serde::Serialize;
 use std::collections::BTreeSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::{AppHandle, Emitter};
 
@@ -247,6 +250,7 @@ pub async fn start_indexing(
     path: String,
     languages: Vec<String>,
     output: String,
+    include_additional_configs: bool,
 ) -> Result<(), String> {
     CANCEL_FLAG.store(false, Ordering::SeqCst);
 
@@ -262,7 +266,7 @@ pub async fn start_indexing(
     });
 
     // Filter languages if specified
-    let to_index: Vec<_> = if languages.is_empty() {
+    let mut to_index: Vec<_> = if languages.is_empty() {
         detected
     } else {
         detected
@@ -274,6 +278,9 @@ pub async fn start_indexing(
             })
             .collect()
     };
+    if include_additional_configs {
+        apply_additional_configs(&root, &languages, &mut to_index)?;
+    }
 
     // Dedupe by indexer_name so a tool that handles multiple languages
     // (e.g. scip-typescript for both .ts and .js via `allowJs: true`)
@@ -338,10 +345,22 @@ pub async fn start_indexing(
         let start = std::time::Instant::now();
         handler.on_event(ProgressEvent::IndexerStart {
             language: lang.kind.name().to_string(),
-            command: format!("{} {}", plan.binary.display(), entry.default_args.join(" ")),
+            command: format!(
+                "{} {}",
+                plan.binary.display(),
+                display_indexer_args(entry, lang, &lang.additional_configs)
+            ),
         });
 
-        match scip_io_core::indexer::runner::run_indexer(&plan.binary, entry, &root, lang).await {
+        match scip_io_core::indexer::runner::run_indexer_with_configs(
+            &plan.binary,
+            entry,
+            &root,
+            lang,
+            &lang.additional_configs,
+        )
+        .await
+        {
             Ok(output_path) => {
                 let duration = start.elapsed();
                 handler.on_event(ProgressEvent::IndexerComplete {
@@ -688,8 +707,20 @@ fn build_indexing_plans(languages: &[Language]) -> Vec<IndexingPlan> {
                 // to primary and demote the old one to covered.
                 let demoted = std::mem::replace(&mut existing.primary, lang.clone());
                 existing.entry = entry;
+                existing
+                    .primary
+                    .additional_configs
+                    .extend(lang.additional_configs.clone());
+                existing.primary.additional_configs.sort();
+                existing.primary.additional_configs.dedup();
                 existing.covers.push(demoted);
             } else {
+                existing
+                    .primary
+                    .additional_configs
+                    .extend(lang.additional_configs.clone());
+                existing.primary.additional_configs.sort();
+                existing.primary.additional_configs.dedup();
                 existing.covers.push(lang.clone());
             }
         } else {
@@ -702,6 +733,64 @@ fn build_indexing_plans(languages: &[Language]) -> Vec<IndexingPlan> {
     }
 
     plans
+}
+
+fn display_indexer_args(
+    entry: &IndexerEntry,
+    language: &Language,
+    additional_configs: &[PathBuf],
+) -> String {
+    let output_file = PathBuf::from(format!("{}.scip", language.kind.name()));
+    scip_io_core::indexer::runner::build_indexer_args(entry, &output_file, additional_configs)
+        .into_iter()
+        .map(|arg| arg.to_string_lossy().to_string())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn apply_additional_configs(
+    root: &Path,
+    filters: &[String],
+    languages: &mut Vec<Language>,
+) -> Result<(), String> {
+    for language in languages.iter_mut() {
+        language.additional_configs =
+            discover_additional_configs(root, language.kind).map_err(|e| e.to_string())?;
+    }
+
+    for &kind in supported_additional_config_languages() {
+        if !language_filter_allows(filters, kind) {
+            continue;
+        }
+        if languages.iter().any(|language| language.kind == kind) {
+            continue;
+        }
+
+        let configs = discover_additional_configs(root, kind).map_err(|e| e.to_string())?;
+        if let Some(first_config) = configs.first() {
+            languages.push(Language {
+                kind,
+                evidence: display_relative_path(first_config, root),
+                additional_configs: configs,
+            });
+        }
+    }
+
+    Ok(())
+}
+
+fn language_filter_allows(filters: &[String], kind: scip_io_core::LanguageKind) -> bool {
+    filters.is_empty()
+        || filters
+            .iter()
+            .any(|name| name.eq_ignore_ascii_case(kind.name()))
+}
+
+fn display_relative_path(path: &Path, root: &Path) -> String {
+    path.strip_prefix(root)
+        .unwrap_or(path)
+        .display()
+        .to_string()
 }
 
 fn find_indexer_entry(identifier: &str) -> Option<&'static IndexerEntry> {
@@ -776,6 +865,20 @@ fn languages_for_action_entry(action_entry: &IndexerEntry) -> String {
 mod tests {
     use super::*;
     use std::collections::BTreeSet;
+    use std::fs;
+    use tempfile::TempDir;
+
+    fn fixture(files: &[&str]) -> (TempDir, PathBuf) {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path().join("project");
+        fs::create_dir_all(&root).unwrap();
+        for file in files {
+            let path = root.join(file);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, "").unwrap();
+        }
+        (dir, root)
+    }
 
     #[test]
     fn find_indexer_entry_accepts_indexer_binary_and_language_names() {
@@ -881,6 +984,56 @@ mod tests {
                 .iter()
                 .any(|lang| lang.kind.name() == "kotlin")
         );
+    }
+
+    #[test]
+    fn shared_indexing_plan_keeps_additional_configs_on_primary_run() {
+        let javascript = scip_io_core::detect::languages::LanguageKind::JavaScript
+            .with_evidence("package.json".into());
+        let mut typescript = scip_io_core::detect::languages::LanguageKind::TypeScript
+            .with_evidence("tsconfig.json".into());
+        typescript.additional_configs = vec![
+            PathBuf::from("tsconfig.json"),
+            PathBuf::from("tsconfig.test.json"),
+        ];
+
+        let plans = build_indexing_plans(&[javascript, typescript]);
+
+        assert_eq!(plans.len(), 1);
+        assert_eq!(plans[0].primary.kind.name(), "typescript");
+        assert_eq!(
+            plans[0].primary.additional_configs,
+            vec![
+                PathBuf::from("tsconfig.json"),
+                PathBuf::from("tsconfig.test.json")
+            ]
+        );
+    }
+
+    #[test]
+    fn apply_additional_configs_adds_config_only_typescript_root() {
+        let (_dir, root) = fixture(&["tsconfig.scripts.json"]);
+        let mut languages = Vec::new();
+
+        apply_additional_configs(&root, &[], &mut languages).unwrap();
+
+        assert_eq!(languages.len(), 1);
+        assert_eq!(languages[0].kind.name(), "typescript");
+        assert_eq!(languages[0].evidence, "tsconfig.scripts.json");
+        assert_eq!(
+            languages[0].additional_configs,
+            vec![root.join("tsconfig.scripts.json")]
+        );
+    }
+
+    #[test]
+    fn apply_additional_configs_respects_selected_language_filter() {
+        let (_dir, root) = fixture(&["tsconfig.scripts.json"]);
+        let mut languages = Vec::new();
+
+        apply_additional_configs(&root, &["rust".to_string()], &mut languages).unwrap();
+
+        assert!(languages.is_empty());
     }
 
     #[test]

@@ -56,6 +56,13 @@ SCIP-IO currently orchestrates **11 languages** across **9 different indexers**:
 
 SCIP-IO will also pick up any of these binaries already on your system `PATH` before downloading a fresh copy.
 
+When you opt in with `--include-additional-configs` or the GUI's Extra configs
+option, SCIP-IO also discovers secondary config files for indexers that accept
+multiple config inputs. Today that includes root-level `tsconfig.json` and
+`tsconfig.*.json` files for `scip-typescript` and `.sln`, `.csproj`, or `.vbproj` inputs for
+`scip-dotnet`. Other languages continue to use their normal project-root or
+workspace behavior until their indexers expose a safe multi-config contract.
+
 ---
 
 ## How it works
@@ -318,6 +325,9 @@ scip-io index --dry-run
 # Index a monorepo by discovering every sub-project root
 scip-io index --all-roots
 
+# Include supported secondary config files such as tsconfig.test.json
+scip-io index --include-additional-configs
+
 # Index specific sub-project roots
 scip-io index --roots ./services/api,./services/web
 scip-io index --path ./repo --roots ./services/api,./services/web
@@ -343,11 +353,19 @@ scip-io index --parallel 4 --timeout 600
 | `--dry-run`       | Print the plan without running anything                               |
 | `--roots`         | Comma-separated sub-project roots to index; relative paths resolve from `--path` |
 | `--all-roots`     | Auto-discover every manifest-bearing project root under `--path`, skipping ignored dirs |
+| `--include-additional-configs` | Include supported secondary config files in each indexer run |
 
 `--roots` and `--all-roots` index each selected project root separately and
 merge the generated `.scip` files into the requested output unless `--no-merge`
 is set. `--all-roots` scans all non-ignored descendants for known manifest
 files, so use `--roots` when you want an explicit subset.
+
+By default, SCIP-IO indexes the primary project config for a root. Use
+`--include-additional-configs` when a repository keeps support scripts, test
+targets, or secondary build surfaces in additional config files. For TypeScript,
+SCIP-IO passes root-level `tsconfig.json` and `tsconfig.*.json` files to
+`scip-typescript` in a single invocation, with `tsconfig.json` first. For .NET, SCIP-IO passes all
+discovered `.sln`, `.csproj`, and `.vbproj` files to `scip-dotnet`.
 
 ### `scip-io status`
 
@@ -476,6 +494,7 @@ Drop a `.scip-io.toml` at the root of any project to override defaults:
 ```toml
 # .scip-io.toml
 output = "artifacts/index.scip"
+include_additional_configs = true
 parallel = 4
 timeout = 600
 

@@ -28,3 +28,6 @@ anyhow = { workspace = true }
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
+
+[dev-dependencies]
+tempfile = { workspace = true }

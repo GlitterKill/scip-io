@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Added opt-in additional config discovery for indexing. The CLI now supports
+  `index --include-additional-configs`, and the GUI exposes the same behavior
+  with an Extra configs option. Supported multi-config inputs currently include
+  root-level `tsconfig.json` and `tsconfig.*.json` files for
+  `scip-typescript` and `.sln`, `.csproj`, or `.vbproj` files for
+  `scip-dotnet`.
+
 ## [0.1.4] - 2026-05-26
 
 ### Added

@@ -81,6 +81,7 @@ export interface AppState {
     timeout: number;
     outputFile: string;
     cacheDir: string;
+    includeAdditionalConfigs: boolean;
   };
 }
 
@@ -100,6 +101,7 @@ export const store = new Store<AppState>({
     timeout: 300,
     outputFile: 'index.scip',
     cacheDir: '',
+    includeAdditionalConfigs: false,
   },
 });
 

@@ -64,6 +64,10 @@ export function renderDashboard(container: HTMLElement): void {
     if (indexBtn) {
       indexBtn.disabled = state.isIndexing;
     }
+    const configChip = wrapper.querySelector('#include-additional-configs-chip');
+    if (configChip) {
+      configChip.classList.toggle('chip--selected', state.settings.includeAdditionalConfigs);
+    }
   });
 
   // Fetch initial data
@@ -105,6 +109,33 @@ function renderProjectPathSection(): HTMLElement {
   row.appendChild(browseBtn);
 
   panel.appendChild(row);
+
+  const optionRow = document.createElement('div');
+  optionRow.className = 'flex items-center gap-sm mt-md';
+
+  const configChip = document.createElement('label');
+  configChip.className = `chip${store.getState().settings.includeAdditionalConfigs ? ' chip--selected' : ''}`;
+  configChip.id = 'include-additional-configs-chip';
+  configChip.innerHTML = `
+    <span class="chip__checkbox"></span>
+    <span class="chip__label">Extra configs</span>
+  `;
+  configChip.title = 'Include supported secondary config files such as tsconfig.*.json and additional .sln/.csproj files.';
+  configChip.addEventListener('click', () => {
+    const current = store.getState().settings;
+    const nextValue = !current.includeAdditionalConfigs;
+    store.setState({
+      settings: { ...current, includeAdditionalConfigs: nextValue },
+    });
+    configChip.classList.toggle('chip--selected', nextValue);
+  });
+  optionRow.appendChild(configChip);
+
+  const optionHint = document.createElement('span');
+  optionHint.className = 'form-hint';
+  optionHint.textContent = 'Include supported secondary config files';
+  optionRow.appendChild(optionHint);
+  panel.appendChild(optionRow);
 
   // Action buttons
   const actions = document.createElement('div');
@@ -560,10 +591,20 @@ async function handleIndexAll() {
     ),
   });
 
-  addLog('info', `Starting indexing for: ${selectedLangs.join(', ')}`);
+  addLog(
+    'info',
+    `Starting indexing for: ${selectedLangs.join(', ')}${
+      state.settings.includeAdditionalConfigs ? ' with extra configs' : ''
+    }`
+  );
 
   try {
-    await startIndexing(state.projectPath, selectedLangs, state.settings.outputFile);
+    await startIndexing(
+      state.projectPath,
+      selectedLangs,
+      state.settings.outputFile,
+      state.settings.includeAdditionalConfigs
+    );
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     addLog('error', `Indexing failed: ${message}`);

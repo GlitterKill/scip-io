@@ -97,6 +97,20 @@ function renderGeneralSettings(): HTMLElement {
   `;
   grid.appendChild(parallelField);
 
+  const configsField = document.createElement('div');
+  configsField.className = 'form-field';
+  configsField.innerHTML = `
+    <label class="form-label">Extra Configs</label>
+    <div class="flex items-center gap-sm">
+      <label class="chip ${settings.includeAdditionalConfigs ? 'chip--selected' : ''}" id="setting-extra-configs-chip">
+        <span class="chip__checkbox"></span>
+        <span class="chip__label">Enabled</span>
+      </label>
+      <span class="form-hint">Index supported secondary config files</span>
+    </div>
+  `;
+  grid.appendChild(configsField);
+
   // Timeout
   const timeoutField = document.createElement('div');
   timeoutField.className = 'form-field';
@@ -140,6 +154,18 @@ function renderGeneralSettings(): HTMLElement {
         const current = store.getState().settings;
         store.setState({ settings: { ...current, parallel: !current.parallel } });
         parallelChip.classList.toggle('chip--selected');
+      });
+    }
+
+    const configsChip = document.getElementById('setting-extra-configs-chip');
+    if (configsChip) {
+      configsChip.addEventListener('click', () => {
+        const current = store.getState().settings;
+        const nextValue = !current.includeAdditionalConfigs;
+        store.setState({
+          settings: { ...current, includeAdditionalConfigs: nextValue },
+        });
+        configsChip.classList.toggle('chip--selected', nextValue);
       });
     }
 
@@ -336,6 +362,10 @@ async function loadConfig() {
           timeout: typeof c.timeout === 'number' ? c.timeout : current.timeout,
           outputFile: typeof c.output === 'string' ? c.output : current.outputFile,
           cacheDir: typeof c.cache_dir === 'string' ? c.cache_dir : current.cacheDir,
+          includeAdditionalConfigs:
+            typeof c.include_additional_configs === 'boolean'
+              ? c.include_additional_configs
+              : current.includeAdditionalConfigs,
         },
       });
     }
@@ -356,6 +386,7 @@ async function handleSave() {
     timeout: timeoutInput ? parseInt(timeoutInput.value, 10) || 300 : current.timeout,
     outputFile: outputInput ? outputInput.value || 'index.scip' : current.outputFile,
     cacheDir: cacheInput ? cacheInput.value : current.cacheDir,
+    includeAdditionalConfigs: current.includeAdditionalConfigs,
   };
 
   store.setState({ settings });
@@ -366,6 +397,7 @@ async function handleSave() {
     timeout: settings.timeout,
     output: settings.outputFile,
     cache_dir: settings.cacheDir || undefined,
+    include_additional_configs: settings.includeAdditionalConfigs,
     overrides: overrides
       .filter((o) => o.binaryPath || o.args)
       .map((o) => ({
@@ -393,6 +425,7 @@ function handleReset() {
       timeout: 300,
       outputFile: 'index.scip',
       cacheDir: '',
+      includeAdditionalConfigs: false,
     },
   });
 
@@ -408,11 +441,13 @@ function handleReset() {
   const outputInput = document.getElementById('setting-output') as HTMLInputElement | null;
   const cacheInput = document.getElementById('setting-cache-dir') as HTMLInputElement | null;
   const parallelChip = document.getElementById('setting-parallel-chip');
+  const extraConfigsChip = document.getElementById('setting-extra-configs-chip');
 
   if (timeoutInput) timeoutInput.value = '300';
   if (outputInput) outputInput.value = 'index.scip';
   if (cacheInput) cacheInput.value = '';
   if (parallelChip) parallelChip.classList.add('chip--selected');
+  if (extraConfigsChip) extraConfigsChip.classList.remove('chip--selected');
 
   // Re-render overrides
   const overridesList = document.getElementById('indexer-overrides-list');

@@ -1,3 +1,4 @@
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -13,6 +14,17 @@ pub async fn run_indexer(
     project_root: &Path,
     lang: &Language,
 ) -> Result<PathBuf> {
+    run_indexer_with_configs(binary, entry, project_root, lang, &[]).await
+}
+
+/// Run an indexer binary against a project root with optional config files.
+pub async fn run_indexer_with_configs(
+    binary: &Path,
+    entry: &IndexerEntry,
+    project_root: &Path,
+    lang: &Language,
+    config_paths: &[PathBuf],
+) -> Result<PathBuf> {
     tracing::info!(
         indexer = %entry.indexer_name,
         lang = lang.name(),
@@ -26,22 +38,8 @@ pub async fn run_indexer(
     let mut cmd = tokio::process::Command::new(binary);
     cmd.current_dir(project_root);
 
-    for arg in &entry.default_args {
-        // Replace the generic output file with our language-specific one
-        if arg == "index.scip" {
-            cmd.arg(output_file.to_string_lossy().as_ref());
-        } else {
-            cmd.arg(arg);
-        }
-    }
-
-    // Some indexers accept --output to control the destination
-    if !entry
-        .default_args
-        .iter()
-        .any(|a| a == "--output" || a.contains("index.scip"))
-    {
-        cmd.arg("--output").arg(&output_file);
+    for arg in build_indexer_args(entry, &output_file, config_paths) {
+        cmd.arg(arg);
     }
 
     let status = cmd
@@ -82,4 +80,112 @@ pub async fn run_indexer(
     }
 
     Ok(output_file)
+}
+
+/// Build argv after the binary name, placing supported config files before
+/// the output option so CLIs with positional project arguments can parse them.
+pub fn build_indexer_args(
+    entry: &IndexerEntry,
+    output_file: &Path,
+    config_paths: &[PathBuf],
+) -> Vec<OsString> {
+    let mut args = Vec::new();
+    let mut has_output_arg = false;
+
+    for arg in &entry.default_args {
+        if arg == "index.scip" {
+            args.push(output_file.as_os_str().to_os_string());
+            has_output_arg = true;
+        } else {
+            if arg == "--output" || arg.contains("index.scip") {
+                has_output_arg = true;
+            }
+            args.push(OsString::from(arg));
+        }
+    }
+
+    args.extend(
+        config_paths
+            .iter()
+            .map(|path| path.as_os_str().to_os_string()),
+    );
+
+    // Config-driven indexers need an explicit destination because the default
+    // output file can be overwritten when one invocation spans several configs.
+    // Keep no-config runs on their historical default argv and let the rename
+    // fallback handle indexers that do not expose an output flag.
+    if !config_paths.is_empty() && !has_output_arg {
+        args.push(OsString::from("--output"));
+        args.push(output_file.as_os_str().to_os_string());
+    }
+
+    args
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::indexer::{IndexerEntry, InstallMethod};
+
+    fn entry(default_args: &[&str]) -> IndexerEntry {
+        IndexerEntry {
+            indexer_name: "test-indexer".into(),
+            language: "typescript".into(),
+            github_repo: "owner/repo".into(),
+            binary_name: "test-indexer".into(),
+            version: "1.0.0".into(),
+            default_args: default_args.iter().map(|arg| arg.to_string()).collect(),
+            output_file: "index.scip".into(),
+            install_method: InstallMethod::Unsupported {
+                reason: "test".into(),
+            },
+        }
+    }
+
+    fn strings(args: Vec<OsString>) -> Vec<String> {
+        args.into_iter()
+            .map(|arg| arg.to_string_lossy().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn build_indexer_args_places_config_paths_before_output_flag() {
+        let args = build_indexer_args(
+            &entry(&["index"]),
+            Path::new("typescript.scip"),
+            &[
+                PathBuf::from("tsconfig.json"),
+                PathBuf::from("tsconfig.test.json"),
+            ],
+        );
+
+        assert_eq!(
+            strings(args),
+            vec![
+                "index",
+                "tsconfig.json",
+                "tsconfig.test.json",
+                "--output",
+                "typescript.scip",
+            ]
+        );
+    }
+
+    #[test]
+    fn build_indexer_args_replaces_default_output_placeholder() {
+        let args = build_indexer_args(
+            &entry(&["index", "--output", "index.scip"]),
+            Path::new("go.scip"),
+            &[],
+        );
+
+        assert_eq!(strings(args), vec!["index", "--output", "go.scip"]);
+    }
+
+    #[test]
+    fn build_indexer_args_preserves_default_args_without_configs() {
+        let args = build_indexer_args(&entry(&["index"]), Path::new("typescript.scip"), &[]);
+
+        assert_eq!(strings(args), vec!["index"]);
+    }
 }

@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 
 /// A programming language that SCIP-IO can detect and index.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -21,6 +22,8 @@ pub enum LanguageKind {
 pub struct Language {
     pub kind: LanguageKind,
     pub evidence: String,
+    #[serde(default)]
+    pub additional_configs: Vec<PathBuf>,
 }
 
 impl Language {
@@ -79,7 +82,11 @@ impl LanguageKind {
             Self::Rust => filename == "Cargo.toml",
             Self::Go => filename == "go.mod",
             Self::Java => filename == "pom.xml" || filename == "build.gradle",
-            Self::CSharp => filename.ends_with(".csproj") || filename.ends_with(".sln"),
+            Self::CSharp => {
+                filename.ends_with(".csproj")
+                    || filename.ends_with(".sln")
+                    || filename.ends_with(".vbproj")
+            }
             Self::Ruby => filename == "Gemfile",
             Self::Kotlin => filename == "build.gradle.kts" || filename == "settings.gradle.kts",
             Self::Cpp => filename == "CMakeLists.txt" || filename == "compile_commands.json",
@@ -91,6 +98,7 @@ impl LanguageKind {
         Language {
             kind: self,
             evidence,
+            additional_configs: Vec::new(),
         }
     }
 }
@@ -171,6 +179,7 @@ mod tests {
     fn test_manifest_detection_csharp() {
         assert!(LanguageKind::CSharp.matches_manifest("MyApp.csproj"));
         assert!(LanguageKind::CSharp.matches_manifest("Solution.sln"));
+        assert!(LanguageKind::CSharp.matches_manifest("Legacy.vbproj"));
         assert!(!LanguageKind::CSharp.matches_manifest("pom.xml"));
     }
 

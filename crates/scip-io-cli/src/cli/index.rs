@@ -7,6 +7,10 @@ use anyhow::{Context, Result, bail};
 use console::style;
 use futures_util::stream::{self, StreamExt};
 
+use scip_io_core::config_discovery::{
+    discover_additional_config_roots, discover_additional_configs,
+    supported_additional_config_languages,
+};
 use scip_io_core::detect::{
     Language, LanguageScanOptions, discover_project_roots, scan_languages_with_options,
 };
@@ -24,6 +28,7 @@ struct IndexerTask {
     entry: &'static IndexerEntry,
     binary_path: PathBuf,
     project_root: PathBuf,
+    additional_configs: Vec<PathBuf>,
     /// Additional detected languages whose indexing is handled by the same
     /// tool invocation (e.g. `javascript` is covered by a single
     /// `scip-typescript` run when `tsconfig.json` has `allowJs: true`).
@@ -90,6 +95,7 @@ pub async fn run(args: IndexArgs) -> Result<()> {
                 entry,
                 binary_path,
                 project_root: project.root.clone(),
+                additional_configs: lang.additional_configs.clone(),
                 covers: Vec::new(),
             });
         }
@@ -128,11 +134,12 @@ pub async fn run(args: IndexArgs) -> Result<()> {
                 let covers = task.covers.clone();
                 let outcome = tokio::time::timeout(
                     dur,
-                    runner::run_indexer(
+                    runner::run_indexer_with_configs(
                         &task.binary_path,
                         task.entry,
                         &task.project_root,
                         &task.lang,
+                        &task.additional_configs,
                     ),
                 )
                 .await;
@@ -299,7 +306,12 @@ pub async fn run(args: IndexArgs) -> Result<()> {
 /// Resolve which project roots the index command should operate on.
 fn resolve_project_roots(args: &IndexArgs, base_path: &Path) -> Result<Vec<PathBuf>> {
     if args.all_roots {
-        let roots = discover_project_roots(base_path)?;
+        let mut roots = discover_project_roots(base_path)?;
+        if args.include_additional_configs && has_allowed_additional_config_language(args) {
+            roots.extend(discover_additional_config_roots(base_path)?);
+            roots.sort();
+            roots.dedup();
+        }
         if roots.is_empty() {
             bail!(
                 "No language config roots found under {}",
@@ -366,12 +378,71 @@ fn detect_languages_for_roots(
                     })
                     .collect()
             };
+            let languages = add_additional_configs_if_requested(args, root, languages)?;
             Ok(ProjectLanguages {
                 root: root.clone(),
                 languages,
             })
         })
         .collect()
+}
+
+fn add_additional_configs_if_requested(
+    args: &IndexArgs,
+    root: &Path,
+    mut languages: Vec<Language>,
+) -> Result<Vec<Language>> {
+    if !args.include_additional_configs {
+        return Ok(languages);
+    }
+
+    for language in &mut languages {
+        language.additional_configs = discover_additional_configs(root, language.kind)?;
+    }
+    add_languages_from_additional_configs(args, root, &mut languages)?;
+
+    Ok(languages)
+}
+
+fn add_languages_from_additional_configs(
+    args: &IndexArgs,
+    root: &Path,
+    languages: &mut Vec<Language>,
+) -> Result<()> {
+    for &kind in supported_additional_config_languages() {
+        if !language_filter_allows(args, kind) {
+            continue;
+        }
+        if languages.iter().any(|language| language.kind == kind) {
+            continue;
+        }
+
+        let configs = discover_additional_configs(root, kind)?;
+        if let Some(first_config) = configs.first() {
+            let evidence = display_project_root(first_config, root);
+            languages.push(Language {
+                kind,
+                evidence,
+                additional_configs: configs,
+            });
+        }
+    }
+
+    Ok(())
+}
+
+fn has_allowed_additional_config_language(args: &IndexArgs) -> bool {
+    supported_additional_config_languages()
+        .iter()
+        .any(|&kind| language_filter_allows(args, kind))
+}
+
+fn language_filter_allows(args: &IndexArgs, kind: scip_io_core::LanguageKind) -> bool {
+    args.lang.is_empty()
+        || args
+            .lang
+            .iter()
+            .any(|name| name.eq_ignore_ascii_case(kind.name()))
 }
 
 fn print_index_plan(projects: &[ProjectLanguages], base_path: &Path) {
@@ -391,6 +462,20 @@ fn print_index_plan(projects: &[ProjectLanguages], base_path: &Path) {
                 .collect::<Vec<_>>()
                 .join(", ")
         );
+        for lang in &project.languages {
+            if !lang.additional_configs.is_empty() {
+                println!(
+                    "      {} {} config(s): {}",
+                    style("+").dim(),
+                    lang.name(),
+                    lang.additional_configs
+                        .iter()
+                        .map(|path| display_project_root(path, &project.root))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+            }
+        }
     }
 }
 
@@ -443,8 +528,15 @@ fn run_dry_run(args: &IndexArgs, projects: &[ProjectLanguages], is_json: bool) -
                         "indexer": indexer.map(|e| &e.indexer_name),
                         "installed": indexer.map(|e| e.is_installed()).unwrap_or(false),
                         "command": indexer.map(|e| {
-                            format!("{} {}", e.binary_name, e.default_args.join(" "))
+                            format!(
+                                "{} {}",
+                                e.binary_name,
+                                dry_run_command_args(e, &project.root, lang).join(" ")
+                            )
                         }),
+                        "configs": lang.additional_configs.iter().map(|path| {
+                            display_project_root(path, &project.root)
+                        }).collect::<Vec<_>>(),
                     })
                 })
             })
@@ -469,8 +561,18 @@ fn run_dry_run(args: &IndexArgs, projects: &[ProjectLanguages], is_json: bool) -
                     println!(
                         "      command: {} {}",
                         e.binary_name,
-                        e.default_args.join(" ")
+                        dry_run_command_args(e, &project.root, lang).join(" ")
                     );
+                    if !lang.additional_configs.is_empty() {
+                        println!(
+                            "      configs: {}",
+                            lang.additional_configs
+                                .iter()
+                                .map(|path| display_project_root(path, &project.root))
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        );
+                    }
                 }
             }
         }
@@ -487,6 +589,20 @@ fn run_dry_run(args: &IndexArgs, projects: &[ProjectLanguages], is_json: bool) -
         }
     }
     Ok(())
+}
+
+fn dry_run_command_args(entry: &IndexerEntry, project_root: &Path, lang: &Language) -> Vec<String> {
+    let output_file = PathBuf::from(format!("{}.scip", lang.name()));
+    let display_configs = lang
+        .additional_configs
+        .iter()
+        .map(|path| PathBuf::from(display_project_root(path, project_root)))
+        .collect::<Vec<_>>();
+
+    runner::build_indexer_args(entry, &output_file, &display_configs)
+        .into_iter()
+        .map(|arg| arg.to_string_lossy().to_string())
+        .collect()
 }
 
 /// Group tasks by their `indexer_name` and project root, then collapse each
@@ -541,7 +657,12 @@ fn dedupe_tasks_by_indexer(tasks: Vec<IndexerTask>, is_json: bool) -> Vec<Indexe
                 );
             }
             primary.covers.push(extra.lang.name().to_string());
+            primary
+                .additional_configs
+                .extend(extra.additional_configs.into_iter());
         }
+        primary.additional_configs.sort();
+        primary.additional_configs.dedup();
         out.push(primary);
     }
 
@@ -567,6 +688,7 @@ mod tests {
             dry_run: true,
             roots: Vec::new(),
             all_roots: false,
+            include_additional_configs: false,
         }
     }
 
@@ -633,5 +755,66 @@ mod tests {
             .expect("api project");
         assert_eq!(api_project.languages.len(), 1);
         assert_eq!(api_project.languages[0].kind, LanguageKind::Rust);
+    }
+
+    #[test]
+    fn include_additional_configs_adds_supported_config_files_to_project() {
+        let (_dir, root) = fixture(&[
+            "tsconfig.json",
+            "tsconfig.scripts.json",
+            "tsconfig.test.json",
+            "src/index.ts",
+        ]);
+        let mut args = base_args();
+        args.include_additional_configs = true;
+
+        let projects = detect_languages_for_roots(&args, std::slice::from_ref(&root)).unwrap();
+
+        let project = &projects[0];
+        assert_eq!(project.languages.len(), 1);
+        assert_eq!(
+            project.languages[0].additional_configs,
+            vec![
+                root.join("tsconfig.json"),
+                root.join("tsconfig.scripts.json"),
+                root.join("tsconfig.test.json")
+            ]
+        );
+    }
+
+    #[test]
+    fn all_roots_include_additional_configs_discovers_config_only_roots() {
+        let (_dir, root) = fixture(&["tools/tsconfig.scripts.json"]);
+        let mut args = base_args();
+        args.all_roots = true;
+        args.include_additional_configs = true;
+
+        let roots = resolve_project_roots(&args, &root).unwrap();
+        let projects = detect_languages_for_roots(&args, &roots).unwrap();
+
+        assert_eq!(roots, vec![root.join("tools")]);
+        assert_eq!(projects[0].languages.len(), 1);
+        assert_eq!(projects[0].languages[0].kind, LanguageKind::TypeScript);
+        assert_eq!(
+            projects[0].languages[0].additional_configs,
+            vec![root.join("tools").join("tsconfig.scripts.json")]
+        );
+    }
+
+    #[test]
+    fn all_roots_include_additional_configs_respects_language_filter() {
+        let (_dir, root) = fixture(&["tools/tsconfig.scripts.json", "crates/app/Cargo.toml"]);
+        let mut args = base_args();
+        args.all_roots = true;
+        args.include_additional_configs = true;
+        args.lang = vec!["rust".to_string()];
+
+        let roots = resolve_project_roots(&args, &root).unwrap();
+        let projects = detect_languages_for_roots(&args, &roots).unwrap();
+
+        assert_eq!(roots, vec![root.join("crates/app")]);
+        assert_eq!(projects.len(), 1);
+        assert_eq!(projects[0].languages.len(), 1);
+        assert_eq!(projects[0].languages[0].kind, LanguageKind::Rust);
     }
 }

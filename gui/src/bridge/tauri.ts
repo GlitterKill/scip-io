@@ -48,8 +48,13 @@ export async function detectLanguages(path: string): Promise<LanguageInfo[]> {
   return invoke('detect_languages', { path });
 }
 
-export async function startIndexing(path: string, languages: string[], output: string): Promise<void> {
-  return invoke('start_indexing', { path, languages, output });
+export async function startIndexing(
+  path: string,
+  languages: string[],
+  output: string,
+  includeAdditionalConfigs: boolean
+): Promise<void> {
+  return invoke('start_indexing', { path, languages, output, includeAdditionalConfigs });
 }
 
 export async function cancelIndexing(): Promise<void> {

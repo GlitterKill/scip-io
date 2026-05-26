@@ -112,6 +112,10 @@ pub struct IndexArgs {
     /// Discover and index all sub-project roots in a monorepo
     #[arg(long, conflicts_with = "roots")]
     pub all_roots: bool,
+
+    /// Include extra language config files supported by each indexer
+    #[arg(long)]
+    pub include_additional_configs: bool,
 }
 
 #[derive(Parser)]

@@ -31,7 +31,7 @@ pub fn scan_languages_with_options(
     root: &Path,
     options: LanguageScanOptions,
 ) -> Result<Vec<Language>> {
-    let mut detected = Vec::new();
+    let mut detected: Vec<Language> = Vec::new();
     let mut seen = HashSet::new();
 
     for entry in walker(root, options) {
@@ -50,6 +50,13 @@ pub fn scan_languages_with_options(
 
         for lang in Language::ALL {
             if seen.contains(lang) {
+                if lang.matches_manifest(&file_name)
+                    && let Some(existing) =
+                        detected.iter_mut().find(|detected| detected.kind == *lang)
+                    && is_better_evidence(&relative, &existing.evidence)
+                {
+                    existing.evidence = relative.clone();
+                }
                 continue;
             }
             if lang.matches_manifest(&file_name) {
@@ -61,6 +68,16 @@ pub fn scan_languages_with_options(
 
     detected.sort_by_key(|l| l.name());
     Ok(detected)
+}
+
+fn is_better_evidence(candidate: &str, current: &str) -> bool {
+    let candidate_depth = path_depth(candidate);
+    let current_depth = path_depth(current);
+    candidate_depth < current_depth || (candidate_depth == current_depth && candidate < current)
+}
+
+fn path_depth(path: &str) -> usize {
+    path.split(['/', '\\']).count().saturating_sub(1)
 }
 
 /// Discover manifest-bearing project roots below `root`.
@@ -258,6 +275,21 @@ mod tests {
         let langs = scan_languages(&project).unwrap();
         let rust = langs.iter().find(|l| l.kind == LanguageKind::Rust).unwrap();
         assert_eq!(rust.evidence(), "Cargo.toml");
+    }
+
+    #[test]
+    fn test_evidence_prefers_shallow_manifest() {
+        let (_dir, project) = create_fixture_project(&[
+            "nested/tsconfig.json",
+            "tsconfig.json",
+            "z-not-a-manifest.md",
+        ]);
+        let langs = scan_languages(&project).unwrap();
+        let typescript = langs
+            .iter()
+            .find(|l| l.kind == LanguageKind::TypeScript)
+            .unwrap();
+        assert_eq!(typescript.evidence(), "tsconfig.json");
     }
 
     #[test]

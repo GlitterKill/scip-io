@@ -13,6 +13,9 @@ pub struct ProjectConfig {
     /// Override output path
     pub output: Option<PathBuf>,
 
+    /// Include supported secondary config files during indexing
+    pub include_additional_configs: Option<bool>,
+
     /// Per-language indexer overrides
     #[serde(default)]
     pub indexer: std::collections::HashMap<String, IndexerOverride>,
@@ -100,6 +103,7 @@ mod tests {
         let config = ProjectConfig::load(dir.path()).unwrap();
         assert!(config.languages.is_empty());
         assert!(config.output.is_none());
+        assert!(config.include_additional_configs.is_none());
         assert!(config.indexer.is_empty());
         assert!(config.settings.is_none());
         assert!(config.projects.is_empty());
@@ -112,11 +116,13 @@ mod tests {
         let config_content = r#"
             languages = ["typescript", "python"]
             output = "build/index.scip"
+            include_additional_configs = true
         "#;
         fs::write(dir.path().join(".scip-io.toml"), config_content).unwrap();
         let config = ProjectConfig::load(dir.path()).unwrap();
         assert_eq!(config.languages, vec!["typescript", "python"]);
         assert_eq!(config.output.unwrap(), PathBuf::from("build/index.scip"));
+        assert_eq!(config.include_additional_configs, Some(true));
     }
 
     #[test]
@@ -244,6 +250,7 @@ mod tests {
         let config = ProjectConfig::load(dir.path()).unwrap();
         assert!(config.languages.is_empty());
         assert!(config.output.is_none());
+        assert!(config.include_additional_configs.is_none());
         assert!(config.indexer.is_empty());
     }
 
@@ -252,6 +259,7 @@ mod tests {
         let config = ProjectConfig::default();
         assert!(config.languages.is_empty());
         assert!(config.output.is_none());
+        assert!(config.include_additional_configs.is_none());
         assert!(config.indexer.is_empty());
         assert!(config.settings.is_none());
         assert!(config.projects.is_empty());

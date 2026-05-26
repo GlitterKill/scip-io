@@ -1,4 +1,5 @@
 pub mod config;
+pub mod config_discovery;
 pub mod detect;
 pub mod indexer;
 pub mod merge;
