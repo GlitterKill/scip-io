@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.4] - 2026-05-26
+
 ### Added
 
 - Added GUI install/uninstall actions for each registered SCIP indexer, with
@@ -42,6 +44,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   outputs and combined `index.scip` files preserve language information.
   Validation now warns when input indexes still contain documents without
   language metadata.
+- Fixed Linux/macOS CI coverage for the Windows-only `scip-python` npm bundle
+  repair by asserting that existing installs remain unchanged on non-Windows
+  platforms while Windows still verifies the compatibility patch.
 
 ## [0.1.1] - 2026-04-06
 
@@ -94,5 +99,7 @@ Initial release.
 - **One-line install scripts** for the CLI on Linux/macOS (`install.sh`) and
   Windows (`install.ps1`).
 
-[Unreleased]: https://github.com/GlitterKill/scip-io/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/GlitterKill/scip-io/compare/v0.1.4...HEAD
+[0.1.4]: https://github.com/GlitterKill/scip-io/compare/v0.1.3...v0.1.4
+[0.1.1]: https://github.com/GlitterKill/scip-io/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/GlitterKill/scip-io/releases/tag/v0.1.0
