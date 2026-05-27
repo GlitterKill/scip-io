@@ -5,7 +5,7 @@ use anyhow::{Context, Result};
 
 use crate::detect::Language;
 use crate::indexer::IndexerEntry;
-use crate::scip_language::normalize_scip_file_languages;
+use crate::scip_language::{normalize_scip_file_languages, relativize_scip_file_document_paths};
 
 /// Run an indexer binary against a project root and return the output .scip path.
 pub async fn run_indexer(
@@ -78,6 +78,14 @@ pub async fn run_indexer_with_configs(
             "filled missing SCIP document languages"
         );
     }
+    let updated_paths = relativize_scip_file_document_paths(&output_file, project_root)?;
+    if updated_paths > 0 {
+        tracing::info!(
+            path = %output_file.display(),
+            docs = updated_paths,
+            "relativized SCIP document paths"
+        );
+    }
 
     Ok(output_file)
 }
@@ -104,10 +112,13 @@ pub fn build_indexer_args(
         }
     }
 
+    let project_root = output_file
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty());
     args.extend(
         config_paths
             .iter()
-            .map(|path| path.as_os_str().to_os_string()),
+            .map(|path| config_path_arg(path, project_root)),
     );
 
     // Config-driven indexers need an explicit destination because the default
@@ -120,6 +131,14 @@ pub fn build_indexer_args(
     }
 
     args
+}
+
+fn config_path_arg(path: &Path, project_root: Option<&Path>) -> OsString {
+    project_root
+        .and_then(|root| path.strip_prefix(root).ok())
+        .unwrap_or(path)
+        .as_os_str()
+        .to_os_string()
 }
 
 #[cfg(test)]
@@ -167,6 +186,30 @@ mod tests {
                 "tsconfig.test.json",
                 "--output",
                 "typescript.scip",
+            ]
+        );
+    }
+
+    #[test]
+    fn build_indexer_args_uses_relative_config_paths_under_output_root() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/project");
+        let args = build_indexer_args(
+            &entry(&["index"]),
+            &root.join("typescript.scip"),
+            &[
+                root.join("tsconfig.json"),
+                root.join("tsconfig.scripts.json"),
+            ],
+        );
+
+        assert_eq!(
+            strings(args),
+            vec![
+                "index",
+                "tsconfig.json",
+                "tsconfig.scripts.json",
+                "--output",
+                root.join("typescript.scip").to_string_lossy().as_ref(),
             ]
         );
     }
