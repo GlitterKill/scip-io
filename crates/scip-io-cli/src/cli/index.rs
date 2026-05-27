@@ -657,9 +657,7 @@ fn dedupe_tasks_by_indexer(tasks: Vec<IndexerTask>, is_json: bool) -> Vec<Indexe
                 );
             }
             primary.covers.push(extra.lang.name().to_string());
-            primary
-                .additional_configs
-                .extend(extra.additional_configs.into_iter());
+            primary.additional_configs.extend(extra.additional_configs);
         }
         primary.additional_configs.sort();
         primary.additional_configs.dedup();
