@@ -15,6 +15,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   root-level `tsconfig.json` and `tsconfig.*.json` files for
   `scip-typescript` and `.sln`, `.csproj`, or `.vbproj` files for
   `scip-dotnet`.
+- Added automatic memory-bounded `scip-python` sharding for large Python
+  projects. Repositories with more than 750 `.py`, `.pyi`, or `.pyw` files are
+  indexed through sequential `--target-only` shards and merged back into the
+  expected `python.scip` output without requiring `NODE_OPTIONS` heap tuning.
+
+### Fixed
+
+- Compacted SCIP outputs after indexer runs and final merge/copy operations so
+  duplicate documents, duplicate occurrences, and duplicate document symbols do
+  not reach downstream consumers.
 
 ## [0.1.4] - 2026-05-26
 

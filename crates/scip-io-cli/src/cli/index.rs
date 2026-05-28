@@ -17,7 +17,7 @@ use scip_io_core::detect::{
 use scip_io_core::indexer::registry::REGISTRY;
 use scip_io_core::indexer::{IndexerEntry, runner};
 use scip_io_core::merge::merge_scip_files;
-use scip_io_core::scip_language::prefix_scip_file_document_paths;
+use scip_io_core::scip_language::{compact_scip_file, prefix_scip_file_document_paths};
 
 use super::IndexArgs;
 use super::progress_handler::CliProgressHandler;
@@ -150,6 +150,7 @@ pub async fn run(args: IndexArgs) -> Result<()> {
                             &task.project_root,
                             &base_path,
                         )
+                        .and_then(|_| compact_scip_file(&output).map(|_| ()))
                         .map(|_| output);
                         IndexerResult {
                             lang_name,
@@ -238,6 +239,7 @@ pub async fn run(args: IndexArgs) -> Result<()> {
             );
         }
         merge_scip_files(&scip_outputs, &args.output)?;
+        compact_scip_file(&args.output)?;
         if !is_json {
             println!(
                 "{} Merged index written to {}",
@@ -247,6 +249,7 @@ pub async fn run(args: IndexArgs) -> Result<()> {
         }
     } else if scip_outputs.len() == 1 && !args.no_merge {
         std::fs::copy(&scip_outputs[0], &args.output)?;
+        compact_scip_file(&args.output)?;
         if !is_json {
             println!(
                 "\n{} Index written to {}",

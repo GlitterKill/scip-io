@@ -5,7 +5,7 @@ use anyhow::{Context, Result};
 use protobuf::Message;
 use scip::types::{Document, Index, Metadata, ToolInfo};
 
-use crate::scip_language::fill_missing_document_languages;
+use crate::scip_language::{compact_index, fill_missing_document_languages};
 
 /// Merge multiple SCIP index files into a single output file.
 pub fn merge_scip_files(inputs: &[impl AsRef<Path>], output: &Path) -> Result<()> {
@@ -60,6 +60,15 @@ pub fn merge_scip_files(inputs: &[impl AsRef<Path>], output: &Path) -> Result<()
     let mut documents: Vec<Document> = doc_map.into_values().collect();
     documents.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
     merged.documents = documents;
+    let compaction = compact_index(&mut merged);
+    if compaction.changed() {
+        tracing::info!(
+            duplicate_documents = compaction.duplicate_documents,
+            duplicate_occurrences = compaction.duplicate_occurrences,
+            duplicate_symbols = compaction.duplicate_symbols,
+            "compacted duplicate SCIP facts before writing merged index"
+        );
+    }
 
     // Write output
     let bytes = merged

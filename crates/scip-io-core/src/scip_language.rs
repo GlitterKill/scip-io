@@ -1,8 +1,29 @@
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::hash::{Hash, Hasher};
 use std::path::Path;
 
 use anyhow::{Context, Result};
 use protobuf::Message;
-use scip::types::Index;
+use scip::types::{Document, Index, Occurrence};
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ScipCompactionStats {
+    pub documents_before: usize,
+    pub documents_after: usize,
+    pub normalized_paths: usize,
+    pub duplicate_documents: usize,
+    pub duplicate_occurrences: usize,
+    pub duplicate_symbols: usize,
+}
+
+impl ScipCompactionStats {
+    pub fn changed(self) -> bool {
+        self.normalized_paths > 0
+            || self.duplicate_documents > 0
+            || self.duplicate_occurrences > 0
+            || self.duplicate_symbols > 0
+    }
+}
 
 /// Return SCIP's canonical language name when the input is one SCIP-IO supports.
 pub fn normalize_language_name(raw: &str) -> Option<&'static str> {
@@ -93,6 +114,179 @@ pub fn normalize_scip_file_languages(
     std::fs::write(path, bytes).with_context(|| format!("Failed to write {}", path.display()))?;
 
     Ok(updated)
+}
+
+/// Compact a SCIP index in memory by merging duplicate document paths and
+/// removing repeated occurrence and symbol facts inside each final document.
+pub fn compact_index(index: &mut Index) -> ScipCompactionStats {
+    let documents_before = index.documents.len();
+    let mut stats = ScipCompactionStats {
+        documents_before,
+        ..Default::default()
+    };
+
+    let mut documents_by_path = BTreeMap::<String, Document>::new();
+    for mut document in std::mem::take(&mut index.documents) {
+        let normalized_path = normalize_path_component(&document.relative_path);
+        if !normalized_path.is_empty() && normalized_path != document.relative_path {
+            document.relative_path = normalized_path.clone();
+            stats.normalized_paths += 1;
+        }
+
+        compact_document_facts(&mut document, &mut stats);
+
+        let key = document.relative_path.clone();
+        if let Some(existing) = documents_by_path.get_mut(&key) {
+            stats.duplicate_documents += 1;
+            merge_compacted_document(existing, document, &mut stats);
+        } else {
+            documents_by_path.insert(key, document);
+        }
+    }
+
+    index.documents = documents_by_path.into_values().collect();
+    stats.documents_after = index.documents.len();
+    stats
+}
+
+/// Compact a SCIP file in place after an indexer or merge writes it.
+pub fn compact_scip_file(path: &Path) -> Result<ScipCompactionStats> {
+    let bytes =
+        std::fs::read(path).with_context(|| format!("Failed to read {}", path.display()))?;
+    let mut index = Index::parse_from_bytes(&bytes)
+        .with_context(|| format!("Failed to parse SCIP index from {}", path.display()))?;
+
+    let stats = compact_index(&mut index);
+    if !stats.changed() {
+        return Ok(stats);
+    }
+
+    let bytes = index
+        .write_to_bytes()
+        .context("Failed to serialize compacted SCIP index")?;
+    std::fs::write(path, bytes).with_context(|| format!("Failed to write {}", path.display()))?;
+
+    Ok(stats)
+}
+
+fn compact_document_facts(document: &mut Document, stats: &mut ScipCompactionStats) {
+    let mut occurrence_fingerprints = HashMap::<u64, Vec<usize>>::new();
+    let mut compacted_occurrences = Vec::with_capacity(document.occurrences.len());
+    for occurrence in std::mem::take(&mut document.occurrences) {
+        if !push_unique_occurrence(
+            &mut compacted_occurrences,
+            &mut occurrence_fingerprints,
+            occurrence,
+        ) {
+            stats.duplicate_occurrences += 1;
+        }
+    }
+    document.occurrences = compacted_occurrences;
+
+    let mut symbol_ids = HashSet::<String>::new();
+    let mut compacted_symbols = Vec::with_capacity(document.symbols.len());
+    for symbol in std::mem::take(&mut document.symbols) {
+        if symbol_ids.insert(symbol.symbol.clone()) {
+            compacted_symbols.push(symbol);
+        } else {
+            stats.duplicate_symbols += 1;
+        }
+    }
+    document.symbols = compacted_symbols;
+}
+
+fn merge_compacted_document(
+    target: &mut Document,
+    source: Document,
+    stats: &mut ScipCompactionStats,
+) {
+    let target_language = target.language.trim();
+    let source_language = source.language.trim();
+    if target_language.is_empty() && !source_language.is_empty() {
+        target.language = source_language.to_string();
+    } else if !source_language.is_empty() && target_language != source_language {
+        tracing::warn!(
+            path = %target.relative_path,
+            target = %target.language,
+            source = %source.language,
+            "conflicting SCIP document languages during compaction; keeping first document language"
+        );
+    }
+
+    let mut occurrence_fingerprints = occurrence_fingerprints(&target.occurrences);
+    for occurrence in source.occurrences {
+        if !push_unique_occurrence(
+            &mut target.occurrences,
+            &mut occurrence_fingerprints,
+            occurrence,
+        ) {
+            stats.duplicate_occurrences += 1;
+        }
+    }
+
+    let mut symbol_ids = target
+        .symbols
+        .iter()
+        .map(|symbol| symbol.symbol.clone())
+        .collect::<HashSet<_>>();
+    for symbol in source.symbols {
+        if symbol_ids.insert(symbol.symbol.clone()) {
+            target.symbols.push(symbol);
+        } else {
+            stats.duplicate_symbols += 1;
+        }
+    }
+}
+
+fn occurrence_fingerprints(occurrences: &[Occurrence]) -> HashMap<u64, Vec<usize>> {
+    let mut fingerprints = HashMap::<u64, Vec<usize>>::new();
+    for (index, occurrence) in occurrences.iter().enumerate() {
+        fingerprints
+            .entry(occurrence_fingerprint(occurrence))
+            .or_default()
+            .push(index);
+    }
+    fingerprints
+}
+
+fn push_unique_occurrence(
+    occurrences: &mut Vec<Occurrence>,
+    fingerprints: &mut HashMap<u64, Vec<usize>>,
+    occurrence: Occurrence,
+) -> bool {
+    let fingerprint = occurrence_fingerprint(&occurrence);
+    if fingerprints.get(&fingerprint).is_some_and(|indices| {
+        indices
+            .iter()
+            .any(|&index| occurrences[index] == occurrence)
+    }) {
+        return false;
+    }
+
+    let index = occurrences.len();
+    occurrences.push(occurrence);
+    fingerprints.entry(fingerprint).or_default().push(index);
+    true
+}
+
+fn occurrence_fingerprint(occurrence: &Occurrence) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+
+    occurrence.range.hash(&mut hasher);
+    occurrence.symbol.hash(&mut hasher);
+    occurrence.symbol_roles.hash(&mut hasher);
+    occurrence.override_documentation.hash(&mut hasher);
+    occurrence.syntax_kind.value().hash(&mut hasher);
+    occurrence.enclosing_range.hash(&mut hasher);
+    occurrence.diagnostics.len().hash(&mut hasher);
+    for diagnostic in &occurrence.diagnostics {
+        match diagnostic.write_to_bytes() {
+            Ok(bytes) => bytes.hash(&mut hasher),
+            Err(_) => format!("{diagnostic:?}").hash(&mut hasher),
+        }
+    }
+
+    hasher.finish()
 }
 
 /// Prefix every document path in a SCIP file in place.
@@ -203,7 +397,7 @@ fn relativize_document_path(raw_path: &str, project_root: &str) -> Option<String
     None
 }
 
-fn normalize_path_component(path: &str) -> String {
+pub(crate) fn normalize_path_component(path: &str) -> String {
     path.replace('\\', "/")
         .trim_matches('/')
         .split('/')
@@ -238,7 +432,7 @@ fn looks_absolute_path(path: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use scip::types::Document;
+    use scip::types::{Document, Occurrence, SymbolInformation};
     use tempfile::NamedTempFile;
 
     #[test]
@@ -336,6 +530,27 @@ mod tests {
     }
 
     #[test]
+    fn does_not_prefix_already_root_relative_scip_document_paths() -> Result<()> {
+        let mut index = Index::new();
+        let mut doc = Document::new();
+        doc.relative_path = "services/api/src/main.rs".into();
+        index.documents.push(doc);
+
+        let file = NamedTempFile::new()?;
+        std::fs::write(file.path(), index.write_to_bytes()?)?;
+
+        let updated = prefix_scip_file_document_paths(file.path(), "services/api")?;
+        let normalized = Index::parse_from_bytes(&std::fs::read(file.path())?)?;
+
+        assert_eq!(updated, 0);
+        assert_eq!(
+            normalized.documents[0].relative_path,
+            "services/api/src/main.rs"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn relativizes_absolute_scip_document_paths_in_place() -> Result<()> {
         let mut index = Index::new();
         let mut extended = Document::new();
@@ -371,6 +586,93 @@ mod tests {
             normalized.documents[2].relative_path,
             "src/indexer/adapter/BaseAdapter.ts"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn compacts_duplicate_documents_occurrences_and_symbols() {
+        let mut index = Index::new();
+
+        let mut occurrence = Occurrence::new();
+        occurrence.range = vec![1, 2, 1, 6];
+        occurrence.symbol = "local 1".into();
+
+        let mut symbol = SymbolInformation::new();
+        symbol.symbol = "local 1".into();
+        symbol.display_name = "value".into();
+
+        let mut first = Document::new();
+        first.relative_path = "src\\module.py".into();
+        first.language = "python".into();
+        first.occurrences.push(occurrence.clone());
+        first.occurrences.push(occurrence.clone());
+        first.symbols.push(symbol.clone());
+        first.symbols.push(symbol.clone());
+
+        let mut second = Document::new();
+        second.relative_path = "src/module.py".into();
+        second.occurrences.push(occurrence);
+        second.symbols.push(symbol);
+
+        index.documents.push(first);
+        index.documents.push(second);
+
+        let stats = compact_index(&mut index);
+
+        assert_eq!(stats.documents_before, 2);
+        assert_eq!(stats.documents_after, 1);
+        assert_eq!(stats.duplicate_documents, 1);
+        assert_eq!(stats.duplicate_occurrences, 2);
+        assert_eq!(stats.duplicate_symbols, 2);
+        assert_eq!(index.documents[0].relative_path, "src/module.py");
+        assert_eq!(index.documents[0].language, "python");
+        assert_eq!(index.documents[0].occurrences.len(), 1);
+        assert_eq!(index.documents[0].symbols.len(), 1);
+    }
+
+    #[test]
+    fn compacts_scip_file_in_place() -> Result<()> {
+        let mut index = Index::new();
+
+        let mut first = Document::new();
+        first.relative_path = "src/lib.py".into();
+        index.documents.push(first);
+
+        let mut second = Document::new();
+        second.relative_path = "./src/lib.py".into();
+        index.documents.push(second);
+
+        let file = NamedTempFile::new()?;
+        std::fs::write(file.path(), index.write_to_bytes()?)?;
+
+        let stats = compact_scip_file(file.path())?;
+        let compacted = Index::parse_from_bytes(&std::fs::read(file.path())?)?;
+
+        assert_eq!(stats.duplicate_documents, 1);
+        assert_eq!(compacted.documents.len(), 1);
+        assert_eq!(compacted.documents[0].relative_path, "src/lib.py");
+
+        Ok(())
+    }
+
+    #[test]
+    fn compact_scip_file_persists_path_normalization_without_duplicates() -> Result<()> {
+        let mut index = Index::new();
+
+        let mut doc = Document::new();
+        doc.relative_path = ".\\src\\lib.py".into();
+        index.documents.push(doc);
+
+        let file = NamedTempFile::new()?;
+        std::fs::write(file.path(), index.write_to_bytes()?)?;
+
+        let stats = compact_scip_file(file.path())?;
+        let compacted = Index::parse_from_bytes(&std::fs::read(file.path())?)?;
+
+        assert_eq!(stats.normalized_paths, 1);
+        assert_eq!(stats.duplicate_documents, 0);
+        assert_eq!(compacted.documents[0].relative_path, "src/lib.py");
+
         Ok(())
     }
 }

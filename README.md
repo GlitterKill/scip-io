@@ -172,9 +172,25 @@ when a newer compatible version is available.
 On Windows, SCIP-IO also repairs managed `scip-python` npm installs affected
 by the upstream `path.sep` regex crash before running the indexer.
 
+### Large Python projects
+
+`scip-python` runs on Node.js and can exceed the default V8 heap on large
+repositories. SCIP-IO now handles that automatically: when a Python project has
+more than 750 `.py`, `.pyi`, or `.pyw` files, it runs `scip-python` sequentially
+over bounded `--target-only` shards, prefixes shard-relative document paths back
+to the repository root, and merges the shard outputs into the same `python.scip`
+callers already expect.
+
+If a shard still reports a heap out-of-memory failure, SCIP-IO recursively
+splits that shard and retries smaller targets. A terminal shard failure still
+fails Python indexing instead of leaving a misleading partial `python.scip`.
+Setting `NODE_OPTIONS=--max-old-space-size=...` is no longer the recommended
+path for large Python indexes; the bounded shard runner keeps peak memory lower
+for machines with less RAM.
+
 ### Merge
 
-Merging is deterministic: same inputs always produce a byte-identical `index.scip`, regardless of which order indexers finished. Overlapping documents (e.g. generated files touched by more than one indexer) are combined rather than duplicated.
+Merging is deterministic: same inputs always produce a byte-identical `index.scip`, regardless of which order indexers finished. Overlapping documents (e.g. generated files touched by more than one indexer) are combined rather than duplicated. SCIP-IO also compacts every indexer output and final merged or copied output so duplicate `Document.relative_path` entries, duplicate occurrences, and duplicate document symbols do not reach downstream consumers.
 
 ```mermaid
 flowchart LR

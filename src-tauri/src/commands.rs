@@ -433,6 +433,8 @@ pub async fn start_indexing(
         });
         scip_io_core::merge::merge_scip_files(&outputs, &output_path)
             .map_err(|e| format!("Merge failed: {}", e))?;
+        scip_io_core::scip_language::compact_scip_file(&output_path)
+            .map_err(|e| format!("SCIP compaction failed: {}", e))?;
 
         let size = std::fs::metadata(&output_path)
             .map(|m| m.len())
@@ -446,7 +448,10 @@ pub async fn start_indexing(
             },
         });
     } else if outputs.len() == 1 {
-        let _ = std::fs::copy(&outputs[0], &output_path);
+        std::fs::copy(&outputs[0], &output_path)
+            .map_err(|e| format!("Failed to write final index: {}", e))?;
+        scip_io_core::scip_language::compact_scip_file(&output_path)
+            .map_err(|e| format!("SCIP compaction failed: {}", e))?;
     }
 
     // Read final stats from the output SCIP file
