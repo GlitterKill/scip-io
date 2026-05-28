@@ -822,6 +822,9 @@ fs.writeFileSync(args[outputIndex + 1], Buffer.from("{fixture_hex}", "hex"));
         let lang = Language {
             kind: LanguageKind::Python,
             evidence: "test".into(),
+            evidence_kind: "project_config".into(),
+            indexer_ready: true,
+            readiness_message: None,
             additional_configs: Vec::new(),
         };
         let output = run_python_indexer_with_file_limit(
@@ -904,6 +907,9 @@ fs.writeFileSync(args[outputIndex + 1], Buffer.from(fixtures[target], "hex"));
         let lang = Language {
             kind: LanguageKind::Python,
             evidence: "test".into(),
+            evidence_kind: "project_config".into(),
+            indexer_ready: true,
+            readiness_message: None,
             additional_configs: Vec::new(),
         };
         let output = run_python_indexer_with_file_limit(

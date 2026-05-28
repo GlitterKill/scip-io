@@ -58,7 +58,14 @@ export interface IndexingResult {
 export interface AppState {
   screen: Screen;
   projectPath: string;
-  languages: Array<{ name: string; evidence: string; selected: boolean }>;
+  languages: Array<{
+    name: string;
+    evidence: string;
+    evidenceKind: string;
+    indexerReady: boolean;
+    readinessMessage: string | null;
+    selected: boolean;
+  }>;
   indexers: Array<{
     name: string;
     language: string;

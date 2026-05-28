@@ -2,7 +2,7 @@ use scip_io_core::config::ProjectConfig;
 use scip_io_core::config_discovery::{
     discover_additional_configs, supported_additional_config_languages,
 };
-use scip_io_core::detect::{Language, scan_languages};
+use scip_io_core::detect::{DetectionEvidenceKind, Language, scan_languages};
 use scip_io_core::indexer::registry::REGISTRY;
 use scip_io_core::indexer::version::version_is_newer;
 use scip_io_core::indexer::{IndexerEntry, install_dir, is_managed_install_path};
@@ -19,6 +19,9 @@ pub struct LanguageInfo {
     pub name: String,
     pub kind: String,
     pub evidence: String,
+    pub evidence_kind: String,
+    pub indexer_ready: bool,
+    pub readiness_message: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -240,6 +243,9 @@ pub async fn detect_languages(path: String) -> Result<Vec<LanguageInfo>, String>
             name: l.kind.name().to_string(),
             kind: format!("{:?}", l.kind),
             evidence: l.evidence.clone(),
+            evidence_kind: l.evidence_kind.clone(),
+            indexer_ready: l.indexer_ready,
+            readiness_message: l.readiness_message.clone(),
         })
         .collect())
 }
@@ -773,11 +779,12 @@ fn apply_additional_configs(
 
         let configs = discover_additional_configs(root, kind).map_err(|e| e.to_string())?;
         if let Some(first_config) = configs.first() {
-            languages.push(Language {
-                kind,
-                evidence: display_relative_path(first_config, root),
-                additional_configs: configs,
-            });
+            let mut language = kind.with_detected_evidence(
+                display_relative_path(first_config, root),
+                DetectionEvidenceKind::ProjectConfig,
+            );
+            language.additional_configs = configs;
+            languages.push(language);
         }
     }
 

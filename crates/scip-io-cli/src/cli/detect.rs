@@ -16,7 +16,8 @@ pub async fn run(args: DetectArgs) -> Result<()> {
     let languages = scan_languages_with_options(
         &path,
         LanguageScanOptions {
-            max_depth: args.depth.or(Some(3)),
+            max_depth: args.depth,
+            ..Default::default()
         },
     )?;
 
@@ -50,12 +51,22 @@ pub async fn run(args: DetectArgs) -> Result<()> {
             );
 
             for lang in &languages {
+                let readiness = if lang.indexer_ready {
+                    "ready"
+                } else {
+                    "needs setup"
+                };
                 println!(
-                    "  {} {} (found {})",
+                    "  {} {} (found {}; {}; {})",
                     style("*").dim(),
                     lang.name(),
-                    lang.evidence()
+                    lang.evidence(),
+                    lang.evidence_kind,
+                    readiness
                 );
+                if let Some(message) = &lang.readiness_message {
+                    println!("      {} {}", style("!").yellow(), message);
+                }
             }
         }
     }

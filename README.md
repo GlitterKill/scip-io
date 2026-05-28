@@ -18,7 +18,7 @@
 
 **SCIP-IO** is a polyglot [SCIP](https://sourcegraph.com/docs/code-search/code-navigation/scip) index orchestrator written in Rust. It takes the pain out of generating precise code-intelligence indexes for multi-language projects by doing the whole pipeline for you:
 
-1. **Detects** every language in your project from manifest files.
+1. **Detects** every supported language in your project from project config files, build files, and source files.
 2. **Installs** the latest compatible SCIP indexer binary for each language (downloading from GitHub releases, npm, `dotnet tool`, Coursier, or reusing what's already on your `PATH`).
 3. **Runs** each indexer against your project with sensible defaults.
 4. **Merges** every per-language `.scip` file into a single deterministic `index.scip`.
@@ -40,19 +40,19 @@ scip-io index
 
 SCIP-IO currently orchestrates **11 languages** across **9 different indexers**:
 
-| Language     | Indexer           | Install Method        | Detected From                         |
-|--------------|-------------------|-----------------------|---------------------------------------|
-| TypeScript   | `scip-typescript` | npm                   | `tsconfig.json`                       |
-| JavaScript   | `scip-typescript` | npm                   | `package.json`                        |
-| Python       | `scip-python`     | npm                   | `pyproject.toml`, `setup.py`, `setup.cfg`, `requirements.txt`, `Pipfile` |
-| Rust         | `rust-analyzer`   | GitHub release (gz/zip) | `Cargo.toml`                        |
-| Go           | `scip-go`         | GitHub release (tar.gz) | `go.mod`                            |
-| Java         | `scip-java`       | Coursier launcher     | `pom.xml`, `build.gradle`             |
-| Scala        | `scip-java`       | Coursier launcher     | `build.sbt`                           |
-| Kotlin       | via `scip-java`   | compiler plugin       | `build.gradle.kts`, `settings.gradle.kts` |
-| C#           | `scip-dotnet`     | `dotnet tool`         | `*.csproj`, `*.sln`                   |
-| Ruby         | `scip-ruby`       | GitHub release        | `Gemfile`                             |
-| C / C++      | `scip-clang`      | GitHub release        | `CMakeLists.txt`, `compile_commands.json` |
+| Language     | Indexer           | Install Method        | Detection Evidence                    | Indexer Readiness |
+|--------------|-------------------|-----------------------|---------------------------------------|-------------------|
+| TypeScript   | `scip-typescript` | npm                   | `*.ts`, `*.tsx`, `tsconfig.json`, `tsconfig.*.json` | Ready |
+| JavaScript   | `scip-typescript` | npm                   | `*.js`, `*.jsx`, `*.mjs`, `*.cjs`, `package.json` | Ready |
+| Python       | `scip-python`     | npm                   | `*.py`, `*.pyw`, `pyproject.toml`, `setup.py`, `setup.cfg`, `requirements.txt`, `Pipfile` | Ready |
+| Rust         | `rust-analyzer`   | GitHub release (gz/zip) | `*.rs`, `Cargo.toml`, `rust-project.json` | `Cargo.toml` or `rust-project.json` preferred |
+| Go           | `scip-go`         | GitHub release (tar.gz) | `*.go`, `go.mod`                    | Ready |
+| Java         | `scip-java`       | Coursier launcher     | `*.java`, `pom.xml`, `build.gradle`   | Ready |
+| Scala        | `scip-java`       | Coursier launcher     | `*.scala`, `*.sbt`, `build.sbt`       | Ready |
+| Kotlin       | via `scip-java`   | compiler plugin       | `*.kt`, `*.kts`, `build.gradle.kts`, `settings.gradle.kts` | Ready |
+| C#           | `scip-dotnet`     | `dotnet tool`         | `*.cs`, `*.csproj`, `*.sln`, `*.vbproj` | Ready |
+| Ruby         | `scip-ruby`       | GitHub release        | `*.rb`, `Gemfile`                     | Ready |
+| C / C++      | `scip-clang`      | GitHub release        | `*.c`, `*.h`, `*.cc`, `*.hh`, `*.cpp`, `*.hpp`, `*.cxx`, `*.hxx`, `*.S`, `Makefile*`, `Kbuild*`, `Kconfig*`, `CMakeLists.txt`, `compile_commands.json` | `compile_commands.json` required |
 
 SCIP-IO will also pick up any of these binaries already on your system `PATH` before downloading a fresh copy.
 
@@ -103,17 +103,20 @@ flowchart TB
 
 ### Language detection
 
-Detection is **manifest-driven**, not extension-based. Walking every `.ts` or `.py` file in a monorepo is slow and noisy; SCIP-IO looks for the files that unambiguously declare a language project:
+Detection is **evidence-driven**. SCIP-IO reports supported languages from
+project config files, build files, and source files, then separately reports
+whether the default indexer has the setup it normally needs:
 
 ```mermaid
 flowchart TD
-    Start([Start]) --> Walk[Walk project tree<br/>default max depth 3]
+    Start([Start]) --> Walk[Walk project tree<br/>all non-ignored descendants]
     Walk --> Skip{Hidden or<br/>ignored dir?<br/>.git, node_modules,<br/>target, vendor, venv}
     Skip -- Yes --> Walk
-    Skip -- No --> Match{Matches a<br/>manifest pattern?}
+    Skip -- No --> Match{Matches supported<br/>config, build, or source evidence?}
     Match -- No --> Walk
     Match -- Yes --> Record[Record language<br/>+ evidence path]
-    Record --> Walk
+    Record --> Ready[Attach indexer<br/>readiness]
+    Ready --> Walk
     Walk --> Done([Dedupe + sort])
 
     style Start fill:#0a0e1b,stroke:#00ffcc,color:#00ffcc
@@ -307,10 +310,10 @@ scip-io detect --depth 5
 **Example output:**
 
 ```
-Detected 3 languages:
-  rust        — Cargo.toml
-  typescript  — gui/tsconfig.json
-  javascript  — gui/package.json
+v Detected: rust, typescript, javascript
+  * rust (found Cargo.toml; project_config; ready)
+  * typescript (found gui/tsconfig.json; project_config; ready)
+  * javascript (found gui/package.json; project_config; ready)
 ```
 
 **Options:**
@@ -319,7 +322,7 @@ Detected 3 languages:
 |-------------------|----------------------------------------------|
 | `-p, --path`      | Project root (defaults to current directory) |
 | `-f, --format`    | `text` (default) or `json`                   |
-| `-d, --depth`     | Max directory depth to scan (default `3`)    |
+| `-d, --depth`     | Optional max directory depth to scan         |
 
 ### `scip-io index`
 
@@ -368,13 +371,13 @@ scip-io index --parallel 4 --timeout 600
 | `-f, --format`    | `text` or `json` progress output                                      |
 | `--dry-run`       | Print the plan without running anything                               |
 | `--roots`         | Comma-separated sub-project roots to index; relative paths resolve from `--path` |
-| `--all-roots`     | Auto-discover every manifest-bearing project root under `--path`, skipping ignored dirs |
+| `--all-roots`     | Auto-discover every manifest/config-bearing project root under `--path`, skipping ignored dirs |
 | `--include-additional-configs` | Include supported secondary config files in each indexer run |
 
 `--roots` and `--all-roots` index each selected project root separately and
 merge the generated `.scip` files into the requested output unless `--no-merge`
-is set. `--all-roots` scans all non-ignored descendants for known manifest
-files, so use `--roots` when you want an explicit subset.
+is set. `--all-roots` scans all non-ignored descendants for known project
+config files, so use `--roots` when you want an explicit subset.
 
 By default, SCIP-IO indexes the primary project config for a root. Use
 `--include-additional-configs` when a repository keeps support scripts, test

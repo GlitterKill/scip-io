@@ -1,24 +1,22 @@
 pub mod languages;
 
-pub use languages::Language;
+pub use languages::{DetectionEvidenceKind, Language};
 
 use anyhow::Result;
-use std::collections::{BTreeSet, HashSet};
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
-/// Options that control manifest-based language scanning.
-#[derive(Debug, Clone, Copy)]
+/// Options that control supported-language scanning.
+#[derive(Debug, Clone, Default)]
 pub struct LanguageScanOptions {
-    /// Maximum `walkdir` depth to scan. `None` scans all non-ignored
-    /// descendants, while `Some(3)` preserves the original default behavior.
+    /// Maximum `walkdir` depth to scan. `None` scans all non-ignored descendants.
     pub max_depth: Option<usize>,
-}
-
-impl Default for LanguageScanOptions {
-    fn default() -> Self {
-        Self { max_depth: Some(3) }
-    }
+    /// Descendant roots that should be skipped while scanning this root.
+    ///
+    /// This lets `index --all-roots` scan each discovered root deeply without
+    /// letting a parent root absorb languages from nested sub-projects.
+    pub excluded_roots: Vec<PathBuf>,
 }
 
 /// Scan a project root and return all detected languages.
@@ -32,9 +30,8 @@ pub fn scan_languages_with_options(
     options: LanguageScanOptions,
 ) -> Result<Vec<Language>> {
     let mut detected: Vec<Language> = Vec::new();
-    let mut seen = HashSet::new();
 
-    for entry in walker(root, options) {
+    for entry in walker(root, &options) {
         let entry = entry?;
         if !entry.file_type().is_file() {
             continue;
@@ -49,19 +46,15 @@ pub fn scan_languages_with_options(
             .into_owned();
 
         for lang in Language::ALL {
-            if seen.contains(lang) {
-                if lang.matches_manifest(&file_name)
-                    && let Some(existing) =
-                        detected.iter_mut().find(|detected| detected.kind == *lang)
-                    && is_better_evidence(&relative, &existing.evidence)
+            if let Some(evidence_kind) = lang.detect_evidence(&file_name) {
+                if let Some(existing) = detected.iter_mut().find(|detected| detected.kind == *lang)
                 {
-                    existing.evidence = relative.clone();
+                    if is_better_evidence(evidence_kind, &relative, existing) {
+                        *existing = lang.with_detected_evidence(relative.clone(), evidence_kind);
+                    }
+                } else {
+                    detected.push(lang.with_detected_evidence(relative.clone(), evidence_kind));
                 }
-                continue;
-            }
-            if lang.matches_manifest(&file_name) {
-                seen.insert(*lang);
-                detected.push(lang.with_evidence(relative.clone()));
             }
         }
     }
@@ -70,10 +63,30 @@ pub fn scan_languages_with_options(
     Ok(detected)
 }
 
-fn is_better_evidence(candidate: &str, current: &str) -> bool {
+fn is_better_evidence(
+    candidate_kind: DetectionEvidenceKind,
+    candidate: &str,
+    current: &Language,
+) -> bool {
+    let candidate_priority = evidence_priority(candidate_kind.as_str());
+    let current_priority = evidence_priority(&current.evidence_kind);
+    if candidate_priority != current_priority {
+        return candidate_priority > current_priority;
+    }
+
     let candidate_depth = path_depth(candidate);
-    let current_depth = path_depth(current);
-    candidate_depth < current_depth || (candidate_depth == current_depth && candidate < current)
+    let current_depth = path_depth(&current.evidence);
+    candidate_depth < current_depth
+        || (candidate_depth == current_depth && candidate < current.evidence.as_str())
+}
+
+fn evidence_priority(kind: &str) -> u8 {
+    match kind {
+        "project_config" => 3,
+        "build_file" => 2,
+        "source_file" => 1,
+        _ => 0,
+    }
 }
 
 fn path_depth(path: &str) -> usize {
@@ -85,7 +98,13 @@ fn path_depth(path: &str) -> usize {
 /// This intentionally returns directories containing known language manifests,
 /// not every directory with source files. Ignored directories are skipped.
 pub fn discover_project_roots(root: &Path) -> Result<Vec<PathBuf>> {
-    discover_project_roots_with_options(root, LanguageScanOptions { max_depth: None })
+    discover_project_roots_with_options(
+        root,
+        LanguageScanOptions {
+            max_depth: None,
+            ..Default::default()
+        },
+    )
 }
 
 /// Discover project roots with explicit scan options.
@@ -95,7 +114,7 @@ pub fn discover_project_roots_with_options(
 ) -> Result<Vec<PathBuf>> {
     let mut roots = BTreeSet::new();
 
-    for entry in walker(root, options) {
+    for entry in walker(root, &options) {
         let entry = entry?;
         if !entry.file_type().is_file() {
             continue;
@@ -114,16 +133,23 @@ pub fn discover_project_roots_with_options(
 
 fn walker(
     root: &Path,
-    options: LanguageScanOptions,
+    options: &LanguageScanOptions,
 ) -> impl Iterator<Item = walkdir::Result<walkdir::DirEntry>> {
     let walker = WalkDir::new(root);
     let walker = match options.max_depth {
         Some(depth) => walker.max_depth(depth),
         None => walker,
     };
+    let excluded_roots = options.excluded_roots.clone();
     walker
         .into_iter()
-        .filter_entry(|e| !is_hidden_or_ignored(e))
+        .filter_entry(move |e| !is_hidden_or_ignored(e) && !is_excluded_root(e, &excluded_roots))
+}
+
+fn is_excluded_root(entry: &walkdir::DirEntry, excluded_roots: &[PathBuf]) -> bool {
+    excluded_roots
+        .iter()
+        .any(|excluded_root| entry.path().starts_with(excluded_root))
 }
 
 fn is_language_manifest(file_name: &str) -> bool {
@@ -204,6 +230,148 @@ mod tests {
         let (_dir, project) = create_fixture_project(&[]);
         let langs = scan_languages(&project).unwrap();
         assert!(langs.is_empty());
+    }
+
+    #[test]
+    fn detects_every_supported_language_from_source_files() {
+        let (_dir, project) = create_fixture_project(&[
+            "web/app.ts",
+            "web/app.js",
+            "scripts/tool.py",
+            "kernel/lib.rs",
+            "cmd/main.go",
+            "src/App.java",
+            "src/Program.cs",
+            "lib/task.rb",
+            "app/Main.kt",
+            "native/driver.c",
+            "scala/App.scala",
+        ]);
+
+        let langs = scan_languages_with_options(
+            &project,
+            LanguageScanOptions {
+                max_depth: None,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let names: Vec<&str> = langs.iter().map(|lang| lang.name()).collect();
+
+        for expected in [
+            "csharp",
+            "cpp",
+            "go",
+            "java",
+            "javascript",
+            "kotlin",
+            "python",
+            "ruby",
+            "rust",
+            "scala",
+            "typescript",
+        ] {
+            assert!(names.contains(&expected), "missing {expected}: {names:?}");
+        }
+    }
+
+    #[test]
+    fn rust_source_without_project_config_is_detected_but_not_ready() {
+        let (_dir, project) = create_fixture_project(&["rust/kernel/lib.rs"]);
+
+        let langs = scan_languages_with_options(
+            &project,
+            LanguageScanOptions {
+                max_depth: None,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let rust = langs
+            .iter()
+            .find(|lang| lang.kind == LanguageKind::Rust)
+            .expect("Rust should be detected from .rs sources");
+
+        assert_eq!(rust.evidence_kind, "source_file");
+        assert!(!rust.indexer_ready);
+        assert!(
+            rust.readiness_message
+                .as_deref()
+                .unwrap_or_default()
+                .contains("Cargo.toml or rust-project.json")
+        );
+    }
+
+    #[test]
+    fn rust_project_file_is_detected_as_ready() {
+        let (_dir, project) = create_fixture_project(&["rust-project.json", "rust/kernel/lib.rs"]);
+
+        let langs = scan_languages(&project).unwrap();
+        let rust = langs
+            .iter()
+            .find(|lang| lang.kind == LanguageKind::Rust)
+            .expect("Rust should be detected from rust-project.json");
+
+        assert_eq!(rust.evidence, "rust-project.json");
+        assert_eq!(rust.evidence_kind, "project_config");
+        assert!(rust.indexer_ready);
+    }
+
+    #[test]
+    fn linux_style_cpp_sources_are_detected_but_need_compile_database() {
+        let (_dir, project) = create_fixture_project(&[
+            "Makefile",
+            "Kbuild",
+            "Kconfig",
+            "drivers/net/device.c",
+            "include/linux/device.h",
+        ]);
+
+        let langs = scan_languages(&project).unwrap();
+        let cpp = langs
+            .iter()
+            .find(|lang| lang.kind == LanguageKind::Cpp)
+            .expect("C/C++ should be detected from Kbuild and source files");
+
+        assert_eq!(cpp.evidence_kind, "build_file");
+        assert!(!cpp.indexer_ready);
+        assert!(
+            cpp.readiness_message
+                .as_deref()
+                .unwrap_or_default()
+                .contains("compile_commands.json")
+        );
+    }
+
+    #[test]
+    fn cpp_compile_database_is_detected_as_ready() {
+        let (_dir, project) = create_fixture_project(&["compile_commands.json", "src/main.c"]);
+
+        let langs = scan_languages(&project).unwrap();
+        let cpp = langs
+            .iter()
+            .find(|lang| lang.kind == LanguageKind::Cpp)
+            .expect("C/C++ should be detected from compile_commands.json");
+
+        assert_eq!(cpp.evidence, "compile_commands.json");
+        assert_eq!(cpp.evidence_kind, "project_config");
+        assert!(cpp.indexer_ready);
+    }
+
+    #[test]
+    fn nested_cpp_compile_database_is_detected_as_ready() {
+        let (_dir, project) =
+            create_fixture_project(&["build/compile_commands.json", "src/main.c"]);
+
+        let langs = scan_languages(&project).unwrap();
+        let cpp = langs
+            .iter()
+            .find(|lang| lang.kind == LanguageKind::Cpp)
+            .expect("C/C++ should be detected from nested compile_commands.json");
+
+        assert_eq!(cpp.evidence, "build\\compile_commands.json");
+        assert_eq!(cpp.evidence_kind, "project_config");
+        assert!(cpp.indexer_ready);
     }
 
     #[test]
@@ -294,7 +462,7 @@ mod tests {
 
     #[test]
     fn test_nested_manifest_detected() {
-        // max_depth is 3, so depth-2 should work
+        // The default scan is unbounded so nested project config files are visible.
         let (_dir, project) = create_fixture_project(&["sub/Cargo.toml"]);
         let langs = scan_languages(&project).unwrap();
         assert!(langs.iter().any(|l| l.kind == LanguageKind::Rust));
@@ -304,14 +472,24 @@ mod tests {
     fn scan_languages_with_options_respects_depth() {
         let (_dir, project) = create_fixture_project(&["services/api/Cargo.toml"]);
 
-        let shallow =
-            scan_languages_with_options(&project, LanguageScanOptions { max_depth: Some(2) })
-                .unwrap();
+        let shallow = scan_languages_with_options(
+            &project,
+            LanguageScanOptions {
+                max_depth: Some(2),
+                ..Default::default()
+            },
+        )
+        .unwrap();
         assert!(shallow.is_empty());
 
-        let deep =
-            scan_languages_with_options(&project, LanguageScanOptions { max_depth: Some(3) })
-                .unwrap();
+        let deep = scan_languages_with_options(
+            &project,
+            LanguageScanOptions {
+                max_depth: Some(3),
+                ..Default::default()
+            },
+        )
+        .unwrap();
         assert!(deep.iter().any(|l| l.kind == LanguageKind::Rust));
     }
 

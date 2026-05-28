@@ -12,7 +12,8 @@ use scip_io_core::config_discovery::{
     supported_additional_config_languages,
 };
 use scip_io_core::detect::{
-    Language, LanguageScanOptions, discover_project_roots, scan_languages_with_options,
+    DetectionEvidenceKind, Language, LanguageScanOptions, discover_project_roots,
+    scan_languages_with_options,
 };
 use scip_io_core::indexer::registry::REGISTRY;
 use scip_io_core::indexer::{IndexerEntry, runner};
@@ -363,10 +364,20 @@ fn detect_languages_for_roots(
     project_roots
         .iter()
         .map(|root| {
+            let excluded_roots = if args.all_roots {
+                project_roots
+                    .iter()
+                    .filter(|candidate| *candidate != root && candidate.starts_with(root))
+                    .cloned()
+                    .collect()
+            } else {
+                Vec::new()
+            };
             let detected = scan_languages_with_options(
                 root,
                 LanguageScanOptions {
-                    max_depth: if args.all_roots { Some(1) } else { Some(3) },
+                    max_depth: None,
+                    excluded_roots,
                 },
             )?;
             let languages = if args.lang.is_empty() {
@@ -423,11 +434,10 @@ fn add_languages_from_additional_configs(
         let configs = discover_additional_configs(root, kind)?;
         if let Some(first_config) = configs.first() {
             let evidence = display_project_root(first_config, root);
-            languages.push(Language {
-                kind,
-                evidence,
-                additional_configs: configs,
-            });
+            let mut language =
+                kind.with_detected_evidence(evidence, DetectionEvidenceKind::ProjectConfig);
+            language.additional_configs = configs;
+            languages.push(language);
         }
     }
 
@@ -780,6 +790,22 @@ mod tests {
                 root.join("tsconfig.scripts.json"),
                 root.join("tsconfig.test.json")
             ]
+        );
+    }
+
+    #[test]
+    fn index_detection_scans_nested_source_evidence_without_default_depth_cap() {
+        let (_dir, root) = fixture(&["deep/a/b/c/d/lib.rs"]);
+        let args = base_args();
+
+        let projects = detect_languages_for_roots(&args, std::slice::from_ref(&root)).unwrap();
+
+        assert_eq!(projects.len(), 1);
+        assert_eq!(projects[0].languages.len(), 1);
+        assert_eq!(projects[0].languages[0].kind, LanguageKind::Rust);
+        assert_eq!(
+            projects[0].languages[0].evidence,
+            "deep\\a\\b\\c\\d\\lib.rs"
         );
     }
 

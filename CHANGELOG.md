@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Expanded language detection beyond manifest files. SCIP-IO now detects every
+  supported language from source files, project config files, and build files,
+  including Linux-style C/C++ evidence such as `Makefile`, `Kbuild`, and
+  `Kconfig`, plus Rust `.rs` files without `Cargo.toml`.
+- Added detector readiness metadata so the CLI and GUI can report when a
+  detected language still needs indexer-specific setup such as
+  `compile_commands.json` for `scip-clang` or `Cargo.toml`/`rust-project.json`
+  for `rust-analyzer`.
 - Added opt-in additional config discovery for indexing. The CLI now supports
   `index --include-additional-configs`, and the GUI exposes the same behavior
   with an Extra configs option. Supported multi-config inputs currently include
@@ -38,9 +46,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added CLI `install`, `uninstall`, and `update` commands. `update` reports
   installed indexer versions, opens an interactive terminal picker by default,
   and supports non-interactive `--lang` and `--all` update paths.
-- Wired CLI monorepo scan controls: `detect --depth` now controls manifest
-  scan depth, `index --roots` indexes explicit sub-project roots, and
-  `index --all-roots` discovers manifest-bearing project roots under the
+- Wired CLI monorepo scan controls: `detect --depth` now controls language
+  evidence scan depth, `index --roots` indexes explicit sub-project roots, and
+  `index --all-roots` discovers manifest/config-bearing project roots under the
   selected path.
 - Managed indexer installs now resolve the latest compatible version at install
   time and record installed-version metadata for later update checks.
@@ -106,8 +114,8 @@ Initial release.
 - **Multi-method indexer installation** — GitHub binary, gzipped binary,
   tarball, zip, Coursier launcher script, npm package, `dotnet tool`, plus
   system `PATH` detection for pre-installed tools.
-- **Manifest-driven language detection** that ignores `node_modules`,
-  `target`, `vendor`, `venv`, and other noise directories.
+- **Language detection** that ignores `node_modules`, `target`, `vendor`,
+  `venv`, and other noise directories.
 - **Deterministic SCIP merge** that combines per-language `.scip` files into
   a single `index.scip`, with document de-duplication.
 - **SCIP index validation** reporting document, symbol, occurrence, and

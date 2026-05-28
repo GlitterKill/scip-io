@@ -192,12 +192,13 @@ function renderLanguagesSection(container: HTMLElement): void {
 
     state.languages.forEach((lang, index) => {
       const chip = document.createElement('div');
-      chip.className = `chip${lang.selected ? ' chip--selected' : ''} animate-fade-in stagger-${Math.min(index + 1, 8)}`;
+      chip.className = `chip${lang.selected ? ' chip--selected' : ''}${lang.indexerReady ? '' : ' chip--warning'} animate-fade-in stagger-${Math.min(index + 1, 8)}`;
       chip.innerHTML = `
         <span class="chip__checkbox"></span>
         <span class="chip__label">${escapeHtml(lang.name)}</span>
+        ${lang.indexerReady ? '' : '<span class="chip__status">setup</span>'}
       `;
-      chip.title = lang.evidence;
+      chip.title = formatLanguageEvidenceTitle(lang);
       chip.addEventListener('click', () => {
         const langs = store.getState().languages.map((l) =>
           l.name === lang.name ? { ...l, selected: !l.selected } : l
@@ -427,10 +428,16 @@ async function handleDetect() {
     const languages = result.map((lang) => ({
       name: lang.name,
       evidence: lang.evidence,
+      evidenceKind: lang.evidence_kind,
+      indexerReady: lang.indexer_ready,
+      readinessMessage: lang.readiness_message,
       selected: true,
     }));
     store.setState({ languages });
     addLog('success', `Detected ${languages.length} language(s): ${languages.map((l) => l.name).join(', ')}`);
+    languages
+      .filter((lang) => !lang.indexerReady && lang.readinessMessage)
+      .forEach((lang) => addLog('warning', `${lang.name}: ${lang.readinessMessage}`));
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     addLog('error', `Detection failed: ${message}`);
@@ -438,9 +445,9 @@ async function handleDetect() {
     if (!store.getState().languages.length) {
       store.setState({
         languages: [
-          { name: 'TypeScript', evidence: 'tsconfig.json, package.json', selected: true },
-          { name: 'Rust', evidence: 'Cargo.toml', selected: true },
-          { name: 'Go', evidence: 'go.mod', selected: false },
+          { name: 'TypeScript', evidence: 'tsconfig.json, package.json', evidenceKind: 'project_config', indexerReady: true, readinessMessage: null, selected: true },
+          { name: 'Rust', evidence: 'Cargo.toml', evidenceKind: 'project_config', indexerReady: true, readinessMessage: null, selected: true },
+          { name: 'Go', evidence: 'go.mod', evidenceKind: 'project_config', indexerReady: true, readinessMessage: null, selected: false },
         ],
       });
     }
@@ -577,6 +584,10 @@ async function handleIndexAll() {
     return;
   }
 
+  state.languages
+    .filter((lang) => lang.selected && !lang.indexerReady && lang.readinessMessage)
+    .forEach((lang) => addLog('warning', `${lang.name}: ${lang.readinessMessage}`));
+
   store.setState({
     isIndexing: true,
     screen: 'indexing',
@@ -620,4 +631,11 @@ function escapeHtml(str: string): string {
   const div = document.createElement('div');
   div.textContent = str;
   return div.innerHTML;
+}
+
+function formatLanguageEvidenceTitle(
+  lang: ReturnType<typeof store.getState>['languages'][number]
+): string {
+  const title = `${lang.evidenceKind}: ${lang.evidence}`;
+  return lang.readinessMessage ? `${title}\n${lang.readinessMessage}` : title;
 }

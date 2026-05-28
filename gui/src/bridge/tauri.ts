@@ -5,6 +5,9 @@ export interface LanguageInfo {
   name: string;
   kind: string;
   evidence: string;
+  evidence_kind: string;
+  indexer_ready: boolean;
+  readiness_message: string | null;
 }
 
 export interface IndexerStatusInfo {

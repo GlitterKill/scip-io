@@ -857,6 +857,16 @@
   color: var(--accent-cyan);
 }
 
+.chip--warning {
+  border-color: var(--color-warning);
+}
+
+.chip--selected.chip--warning {
+  background: var(--color-warning-dim);
+  border-color: var(--color-warning);
+  color: var(--color-warning);
+}
+
 /* Chip checkbox (hidden native, custom visual) */
 .chip__checkbox {
   width: 12px;
@@ -897,6 +907,11 @@
 /* Chip label */
 .chip__label {
   white-space: nowrap;
+}
+
+.chip__status {
+  font-size: var(--font-size-xs);
+  color: var(--color-warning);
 }
 
 /* Chip group: flex-wrap container for multiple chips */
