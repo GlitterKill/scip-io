@@ -17,11 +17,23 @@ export interface IndexerStatusInfo {
   binary_name: string;
   github_repo: string;
   installed: boolean;
+  native_supported: boolean;
+  native_installed: boolean;
+  native_unsupported_reason: string | null;
+  backend_support: string[];
+  selected_backend: string;
+  backend_available: boolean;
   installable: boolean;
   managed: boolean;
   installed_path: string | null;
   action_indexer: string;
   covered_by: string | null;
+  toolchain_required: string | null;
+  toolchain_available: boolean | null;
+  toolchain_source: string | null;
+  toolchain_home: string | null;
+  toolchain_executable: string | null;
+  toolchain_message: string | null;
 }
 
 export interface UpdateInfo {
@@ -64,8 +76,8 @@ export async function cancelIndexing(): Promise<void> {
   return invoke('cancel_indexing');
 }
 
-export async function getIndexerStatus(): Promise<IndexerStatusInfo[]> {
-  return invoke('get_indexer_status');
+export async function getIndexerStatus(path?: string): Promise<IndexerStatusInfo[]> {
+  return invoke('get_indexer_status', { path: path || null });
 }
 
 export async function installIndexer(indexer: string): Promise<IndexerStatusInfo> {

@@ -13,75 +13,148 @@ use crate::progress::{ProgressEvent, ProgressHandler};
 // Platform helpers
 // ---------------------------------------------------------------------------
 
+#[cfg(test)]
 fn platform_os() -> &'static str {
-    if cfg!(target_os = "linux") {
-        "linux"
-    } else if cfg!(target_os = "macos") {
-        "darwin"
-    } else if cfg!(target_os = "windows") {
-        "windows"
-    } else {
-        "unknown"
-    }
+    IndexerAssetPlatform::Host.os()
 }
 
-fn platform_ext() -> &'static str {
-    if cfg!(target_os = "windows") {
-        ".exe"
-    } else {
-        ""
-    }
-}
-
+#[cfg(test)]
 fn platform_arch() -> &'static str {
-    if cfg!(target_arch = "x86_64") {
-        "x86_64"
-    } else if cfg!(target_arch = "aarch64") {
-        "aarch64"
-    } else {
-        "unknown"
-    }
+    IndexerAssetPlatform::Host.arch()
 }
 
 /// Goreleaser-style arch names (used by scip-go).
+#[cfg(test)]
 fn goreleaser_arch() -> &'static str {
-    if cfg!(target_arch = "x86_64") {
-        "amd64"
-    } else if cfg!(target_arch = "aarch64") {
-        "arm64"
-    } else {
-        "unknown"
-    }
+    IndexerAssetPlatform::Host.goreleaser_arch()
 }
 
 /// Rust target triple for the current platform.
+#[cfg(test)]
 fn target_triple() -> &'static str {
-    if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
-        "x86_64-unknown-linux-gnu"
-    } else if cfg!(all(target_os = "linux", target_arch = "aarch64")) {
-        "aarch64-unknown-linux-gnu"
-    } else if cfg!(all(target_os = "macos", target_arch = "x86_64")) {
-        "x86_64-apple-darwin"
-    } else if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
-        "aarch64-apple-darwin"
-    } else if cfg!(all(target_os = "windows", target_arch = "x86_64")) {
-        "x86_64-pc-windows-msvc"
-    } else if cfg!(all(target_os = "windows", target_arch = "aarch64")) {
-        "aarch64-pc-windows-msvc"
-    } else {
-        "unknown-unknown-unknown"
+    IndexerAssetPlatform::Host.target_triple()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IndexerAssetPlatform {
+    Host,
+    LinuxX86_64,
+    LinuxAarch64,
+}
+
+impl IndexerAssetPlatform {
+    fn os(self) -> &'static str {
+        match self {
+            Self::LinuxX86_64 | Self::LinuxAarch64 => "linux",
+            Self::Host if cfg!(target_os = "linux") => "linux",
+            Self::Host if cfg!(target_os = "macos") => "darwin",
+            Self::Host if cfg!(target_os = "windows") => "windows",
+            Self::Host => "unknown",
+        }
+    }
+
+    fn ext(self) -> &'static str {
+        match self {
+            Self::Host if cfg!(target_os = "windows") => ".exe",
+            _ => "",
+        }
+    }
+
+    fn arch(self) -> &'static str {
+        match self {
+            Self::LinuxX86_64 => "x86_64",
+            Self::LinuxAarch64 => "aarch64",
+            Self::Host if cfg!(target_arch = "x86_64") => "x86_64",
+            Self::Host if cfg!(target_arch = "aarch64") => "aarch64",
+            Self::Host => "unknown",
+        }
+    }
+
+    fn goreleaser_arch(self) -> &'static str {
+        match self {
+            Self::LinuxX86_64 => "amd64",
+            Self::LinuxAarch64 => "arm64",
+            Self::Host if cfg!(target_arch = "x86_64") => "amd64",
+            Self::Host if cfg!(target_arch = "aarch64") => "arm64",
+            Self::Host => "unknown",
+        }
+    }
+
+    fn target_triple(self) -> &'static str {
+        match self {
+            Self::LinuxX86_64 => "x86_64-unknown-linux-gnu",
+            Self::LinuxAarch64 => "aarch64-unknown-linux-gnu",
+            Self::Host if cfg!(all(target_os = "linux", target_arch = "x86_64")) => {
+                "x86_64-unknown-linux-gnu"
+            }
+            Self::Host if cfg!(all(target_os = "linux", target_arch = "aarch64")) => {
+                "aarch64-unknown-linux-gnu"
+            }
+            Self::Host if cfg!(all(target_os = "macos", target_arch = "x86_64")) => {
+                "x86_64-apple-darwin"
+            }
+            Self::Host if cfg!(all(target_os = "macos", target_arch = "aarch64")) => {
+                "aarch64-apple-darwin"
+            }
+            Self::Host if cfg!(all(target_os = "windows", target_arch = "x86_64")) => {
+                "x86_64-pc-windows-msvc"
+            }
+            Self::Host if cfg!(all(target_os = "windows", target_arch = "aarch64")) => {
+                "aarch64-pc-windows-msvc"
+            }
+            Self::Host => "unknown-unknown-unknown",
+        }
     }
 }
 
+impl std::fmt::Display for IndexerAssetPlatform {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Host => write!(f, "host"),
+            Self::LinuxX86_64 => write!(f, "linux-x86_64"),
+            Self::LinuxAarch64 => write!(f, "linux-aarch64"),
+        }
+    }
+}
+
+fn platform_os_for(platform: IndexerAssetPlatform) -> &'static str {
+    platform.os()
+}
+
+fn platform_ext_for(platform: IndexerAssetPlatform) -> &'static str {
+    platform.ext()
+}
+
+fn platform_arch_for(platform: IndexerAssetPlatform) -> &'static str {
+    platform.arch()
+}
+
+fn goreleaser_arch_for(platform: IndexerAssetPlatform) -> &'static str {
+    platform.goreleaser_arch()
+}
+
+fn target_triple_for(platform: IndexerAssetPlatform) -> &'static str {
+    platform.target_triple()
+}
+
 /// Resolve placeholders in an asset pattern string.
+#[cfg(test)]
 fn resolve_pattern(pattern: &str, version: &str) -> String {
+    resolve_pattern_for_platform(pattern, version, IndexerAssetPlatform::Host)
+}
+
+fn resolve_pattern_for_platform(
+    pattern: &str,
+    version: &str,
+    platform: IndexerAssetPlatform,
+) -> String {
     pattern
         .replace("{version}", version)
-        .replace("{os}", platform_os())
-        .replace("{arch}", platform_arch())
-        .replace("{target_triple}", target_triple())
-        .replace("{goreleaser_arch}", goreleaser_arch())
-        .replace("{ext}", platform_ext())
+        .replace("{os}", platform_os_for(platform))
+        .replace("{arch}", platform_arch_for(platform))
+        .replace("{target_triple}", target_triple_for(platform))
+        .replace("{goreleaser_arch}", goreleaser_arch_for(platform))
+        .replace("{ext}", platform_ext_for(platform))
 }
 
 /// Build the full GitHub release download URL.
@@ -187,13 +260,29 @@ async fn github_release_by_tag(github_repo: &str, tag: &str) -> Result<GitHubRel
 }
 
 async fn latest_compatible_github_release_tag(entry: &IndexerEntry) -> Result<String> {
-    let releases = github_releases(&entry.github_repo).await?;
-    first_compatible_github_release_tag(entry, &releases)
+    latest_compatible_github_release_tag_for_platform(entry, IndexerAssetPlatform::Host).await
 }
 
+async fn latest_compatible_github_release_tag_for_platform(
+    entry: &IndexerEntry,
+    platform: IndexerAssetPlatform,
+) -> Result<String> {
+    let releases = github_releases(&entry.github_repo).await?;
+    first_compatible_github_release_tag_for_platform(entry, &releases, platform)
+}
+
+#[cfg(test)]
 fn first_compatible_github_release_tag(
     entry: &IndexerEntry,
     releases: &[GitHubRelease],
+) -> Result<String> {
+    first_compatible_github_release_tag_for_platform(entry, releases, IndexerAssetPlatform::Host)
+}
+
+fn first_compatible_github_release_tag_for_platform(
+    entry: &IndexerEntry,
+    releases: &[GitHubRelease],
+    platform: IndexerAssetPlatform,
 ) -> Result<String> {
     for release in releases {
         let tag = release.tag_name.trim();
@@ -201,7 +290,7 @@ fn first_compatible_github_release_tag(
             continue;
         }
 
-        let expected_assets = expected_github_assets(entry, tag)?;
+        let expected_assets = expected_github_assets_for_platform(entry, tag, platform)?;
         if expected_assets.is_empty() {
             continue;
         }
@@ -215,8 +304,9 @@ fn first_compatible_github_release_tag(
     }
 
     bail!(
-        "No compatible {} release found for this platform",
-        entry.indexer_name
+        "No compatible {} release found for {}",
+        entry.indexer_name,
+        platform
     )
 }
 
@@ -228,24 +318,29 @@ fn is_moving_release_tag(tag: &str) -> bool {
     )
 }
 
-fn expected_github_assets(entry: &IndexerEntry, version: &str) -> Result<Vec<String>> {
+pub fn expected_github_assets_for_platform(
+    entry: &IndexerEntry,
+    version: &str,
+    platform: IndexerAssetPlatform,
+) -> Result<Vec<String>> {
     match &entry.install_method {
         InstallMethod::GitHubBinary { asset_pattern }
         | InstallMethod::GitHubGz { asset_pattern }
         | InstallMethod::GitHubTarGz { asset_pattern, .. }
-        | InstallMethod::GitHubZip { asset_pattern, .. } => {
-            Ok(pattern_asset_candidates(asset_pattern, version))
-        }
+        | InstallMethod::GitHubZip { asset_pattern, .. } => Ok(
+            pattern_asset_candidates_for_platform(asset_pattern, version, platform),
+        ),
         InstallMethod::GitHubLauncher {
             unix_asset,
             windows_asset,
-        } => Ok(pattern_asset_candidates(
-            if cfg!(windows) {
+        } => Ok(pattern_asset_candidates_for_platform(
+            if platform == IndexerAssetPlatform::Host && cfg!(windows) {
                 windows_asset
             } else {
                 unix_asset
             },
             version,
+            platform,
         )),
         InstallMethod::Npm { .. } | InstallMethod::DotnetTool { .. } => Ok(Vec::new()),
         InstallMethod::CoveredBy {
@@ -285,9 +380,17 @@ fn version_pattern_candidates(version: &str) -> Vec<String> {
 }
 
 fn pattern_asset_candidates(pattern: &str, version: &str) -> Vec<String> {
+    pattern_asset_candidates_for_platform(pattern, version, IndexerAssetPlatform::Host)
+}
+
+fn pattern_asset_candidates_for_platform(
+    pattern: &str,
+    version: &str,
+    platform: IndexerAssetPlatform,
+) -> Vec<String> {
     let mut assets = Vec::new();
     for candidate in version_pattern_candidates(version) {
-        let asset = resolve_pattern(pattern, &candidate);
+        let asset = resolve_pattern_for_platform(pattern, &candidate, platform);
         if !assets.contains(&asset) {
             assets.push(asset);
         }
@@ -346,6 +449,52 @@ pub async fn resolve_latest_compatible_version(entry: &IndexerEntry) -> Result<S
         | InstallMethod::GitHubTarGz { .. }
         | InstallMethod::GitHubZip { .. }
         | InstallMethod::GitHubLauncher { .. } => latest_compatible_github_release_tag(entry).await,
+        InstallMethod::CoveredBy {
+            indexer_name,
+            reason,
+        } => {
+            bail!(
+                "Indexer '{}' is covered by '{}': {}",
+                entry.indexer_name,
+                indexer_name,
+                reason
+            )
+        }
+        InstallMethod::Unsupported { reason } => {
+            bail!(
+                "Indexer '{}' cannot be automatically installed: {}",
+                entry.indexer_name,
+                reason
+            )
+        }
+    }
+}
+
+pub async fn resolve_latest_compatible_version_for_platform(
+    entry: &IndexerEntry,
+    platform: IndexerAssetPlatform,
+) -> Result<String> {
+    match &entry.install_method {
+        InstallMethod::Npm { package } if platform == IndexerAssetPlatform::Host => {
+            latest_npm_package_version(package).await
+        }
+        InstallMethod::DotnetTool { .. } if platform == IndexerAssetPlatform::Host => Ok(
+            normalize_version(&latest_github_release_tag(&entry.github_repo).await?),
+        ),
+        InstallMethod::GitHubBinary { .. }
+        | InstallMethod::GitHubGz { .. }
+        | InstallMethod::GitHubTarGz { .. }
+        | InstallMethod::GitHubZip { .. }
+        | InstallMethod::GitHubLauncher { .. } => {
+            latest_compatible_github_release_tag_for_platform(entry, platform).await
+        }
+        InstallMethod::Npm { .. } | InstallMethod::DotnetTool { .. } => {
+            bail!(
+                "{} does not expose downloadable {} assets",
+                entry.indexer_name,
+                platform
+            )
+        }
         InstallMethod::CoveredBy {
             indexer_name,
             reason,
@@ -440,6 +589,11 @@ fn extract_tar_gz(
     let mut archive = tar::Archive::new(decoder);
 
     let target = binary_path_in_archive.unwrap_or(binary_name);
+    let windows_binary_name = if cfg!(windows) && !binary_name.ends_with(".exe") {
+        Some(format!("{binary_name}.exe"))
+    } else {
+        None
+    };
 
     for entry in archive.entries()? {
         let mut entry = entry?;
@@ -447,10 +601,24 @@ fn extract_tar_gz(
         let path_str = path.to_string_lossy();
 
         // Match either the exact path or just the filename component
-        let matches = path_str == target || path.file_name().is_some_and(|f| f == binary_name);
+        let matches = path_str == target
+            || windows_binary_name
+                .as_deref()
+                .is_some_and(|windows_name| path_str == windows_name)
+            || path.file_name().is_some_and(|file_name| {
+                file_name == binary_name
+                    || windows_binary_name
+                        .as_deref()
+                        .is_some_and(|windows_name| file_name == windows_name)
+            });
 
         if matches {
-            let dest = dest_dir.join(binary_name);
+            let dest_name = if cfg!(windows) && !binary_name.ends_with(".exe") {
+                format!("{binary_name}.exe")
+            } else {
+                binary_name.to_owned()
+            };
+            let dest = dest_dir.join(dest_name);
             let mut out = std::fs::File::create(&dest)?;
             io::copy(&mut entry, &mut out)?;
             return Ok(dest);
@@ -550,6 +718,51 @@ async fn install_github_binary(
     set_executable(&tmp)?;
     std::fs::rename(&tmp, &dest)?;
 
+    Ok(dest)
+}
+
+pub async fn download_github_binary_for_platform(
+    entry: &IndexerEntry,
+    version: &str,
+    platform: IndexerAssetPlatform,
+    dest_dir: &Path,
+    progress: &dyn ProgressHandler,
+) -> Result<PathBuf> {
+    let asset_pattern = match &entry.install_method {
+        InstallMethod::GitHubBinary { asset_pattern } => asset_pattern,
+        InstallMethod::GitHubLauncher {
+            unix_asset,
+            windows_asset,
+        } => {
+            if platform == IndexerAssetPlatform::Host && cfg!(windows) {
+                windows_asset
+            } else {
+                unix_asset
+            }
+        }
+        _ => {
+            bail!(
+                "{} does not expose a direct GitHub release asset for backend execution",
+                entry.indexer_name
+            );
+        }
+    };
+
+    let asset = select_github_release_asset(
+        &entry.github_repo,
+        version,
+        pattern_asset_candidates_for_platform(asset_pattern, version, platform),
+    )
+    .await?;
+    let url = github_release_url(&entry.github_repo, version, &asset);
+
+    std::fs::create_dir_all(dest_dir)
+        .with_context(|| format!("Cannot create {}", dest_dir.display()))?;
+    let dest = dest_dir.join(&entry.binary_name);
+    let tmp = dest.with_extension("tmp");
+    download_to_file(&url, &tmp, &entry.indexer_name, progress).await?;
+    set_executable(&tmp)?;
+    std::fs::rename(&tmp, &dest)?;
     Ok(dest)
 }
 
@@ -664,6 +877,10 @@ async fn install_github_launcher(
     windows_asset: &str,
     progress: &dyn ProgressHandler,
 ) -> Result<PathBuf> {
+    if cfg!(windows) {
+        return install_windows_github_launcher(entry, unix_asset, windows_asset, progress).await;
+    }
+
     let pattern = if cfg!(windows) {
         windows_asset
     } else {
@@ -691,6 +908,51 @@ async fn install_github_launcher(
     std::fs::rename(&tmp, &dest)?;
 
     Ok(dest)
+}
+
+async fn install_windows_github_launcher(
+    entry: &IndexerEntry,
+    companion_asset_pattern: &str,
+    launcher_asset_pattern: &str,
+    progress: &dyn ProgressHandler,
+) -> Result<PathBuf> {
+    let launcher_asset = select_github_release_asset(
+        &entry.github_repo,
+        &entry.version,
+        pattern_asset_candidates(launcher_asset_pattern, &entry.version),
+    )
+    .await?;
+    let companion_asset = select_github_release_asset(
+        &entry.github_repo,
+        &entry.version,
+        pattern_asset_candidates(companion_asset_pattern, &entry.version),
+    )
+    .await?;
+
+    let dir = install_dir();
+    let launcher_dest = dir.join(format!("{}.bat", entry.binary_name));
+    let companion_dest = dir.join(&entry.binary_name);
+    let launcher_tmp = launcher_dest.with_extension("bat.launcher.tmp");
+    let companion_tmp = companion_dest.with_extension("launcher-payload.tmp");
+
+    let launcher_url = github_release_url(&entry.github_repo, &entry.version, &launcher_asset);
+    let companion_url = github_release_url(&entry.github_repo, &entry.version, &companion_asset);
+
+    download_to_file(
+        &companion_url,
+        &companion_tmp,
+        &entry.indexer_name,
+        progress,
+    )
+    .await?;
+    download_to_file(&launcher_url, &launcher_tmp, &entry.indexer_name, progress).await?;
+    set_executable(&launcher_tmp)?;
+    set_executable(&companion_tmp)?;
+
+    std::fs::rename(&companion_tmp, &companion_dest)?;
+    std::fs::rename(&launcher_tmp, &launcher_dest)?;
+
+    Ok(launcher_dest)
 }
 
 async fn install_npm(
@@ -928,6 +1190,7 @@ pub async fn install_indexer(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::indexer::backend::BackendCapabilities;
     use std::io::Write;
 
     fn entry_with_method(binary_name: &str, install_method: InstallMethod) -> IndexerEntry {
@@ -940,6 +1203,7 @@ mod tests {
             default_args: Vec::new(),
             output_file: "index.scip".to_string(),
             install_method,
+            backend_capabilities: BackendCapabilities::native(),
         }
     }
 
@@ -1109,6 +1373,40 @@ mod tests {
     }
 
     #[test]
+    fn linux_asset_resolution_uses_linux_platform_even_on_windows_hosts() -> Result<()> {
+        let ruby = entry_with_method(
+            "scip-ruby",
+            InstallMethod::GitHubBinary {
+                asset_pattern: "scip-ruby-{arch}-{os}".to_string(),
+            },
+        );
+        let clang = entry_with_method(
+            "scip-clang",
+            InstallMethod::GitHubBinary {
+                asset_pattern: "scip-clang-{arch}-{os}".to_string(),
+            },
+        );
+
+        assert_eq!(
+            expected_github_assets_for_platform(
+                &ruby,
+                "scip-ruby-v0.4.7",
+                IndexerAssetPlatform::LinuxX86_64
+            )?,
+            vec!["scip-ruby-x86_64-linux"]
+        );
+        assert_eq!(
+            expected_github_assets_for_platform(
+                &clang,
+                "v0.4.0",
+                IndexerAssetPlatform::LinuxX86_64
+            )?,
+            vec!["scip-clang-x86_64-linux"]
+        );
+        Ok(())
+    }
+
+    #[test]
     fn test_extract_gz_roundtrip() {
         use flate2::Compression;
         use flate2::write::GzEncoder;
@@ -1158,7 +1456,12 @@ mod tests {
 
         // Extract
         let result = extract_tar_gz(&archive_path, &dest_dir, "my-tool", None).unwrap();
-        assert_eq!(result, dest_dir.join("my-tool"));
+        let expected = if cfg!(windows) {
+            dest_dir.join("my-tool.exe")
+        } else {
+            dest_dir.join("my-tool")
+        };
+        assert_eq!(result, expected);
         assert_eq!(std::fs::read(&result).unwrap(), data);
     }
 
@@ -1189,6 +1492,37 @@ mod tests {
 
         // Extract by filename match
         let result = extract_tar_gz(&archive_path, &dest_dir, "my-tool", None).unwrap();
+        assert_eq!(std::fs::read(&result).unwrap(), data);
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn test_extract_tar_gz_matches_windows_exe_name() {
+        use flate2::Compression;
+        use flate2::write::GzEncoder;
+
+        let dir = tempfile::tempdir().unwrap();
+        let archive_path = dir.path().join("test.tar.gz");
+        let dest_dir = dir.path().join("out");
+        std::fs::create_dir_all(&dest_dir).unwrap();
+
+        let data = b"windows binary";
+        let gz_file = std::fs::File::create(&archive_path).unwrap();
+        let encoder = GzEncoder::new(gz_file, Compression::fast());
+        let mut tar_builder = tar::Builder::new(encoder);
+
+        let mut header = tar::Header::new_gnu();
+        header.set_size(data.len() as u64);
+        header.set_mode(0o755);
+        header.set_cksum();
+        tar_builder
+            .append_data(&mut header, "my-tool.exe", &data[..])
+            .unwrap();
+        let encoder = tar_builder.into_inner().unwrap();
+        encoder.finish().unwrap();
+
+        let result = extract_tar_gz(&archive_path, &dest_dir, "my-tool", None).unwrap();
+        assert_eq!(result, dest_dir.join("my-tool.exe"));
         assert_eq!(std::fs::read(&result).unwrap(), data);
     }
 
@@ -1312,6 +1646,7 @@ mod tests {
             install_method: InstallMethod::Npm {
                 package: "@sourcegraph/scip-python".to_string(),
             },
+            backend_capabilities: BackendCapabilities::native(),
         };
 
         repair_existing_indexer_from(&entry, &install_root).unwrap();

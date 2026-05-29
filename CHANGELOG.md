@@ -25,14 +25,95 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `scip-dotnet`.
 - Added automatic memory-bounded `scip-python` sharding for large Python
   projects. Repositories with more than 750 `.py`, `.pyi`, or `.pyw` files are
-  indexed through sequential `--target-only` shards and merged back into the
+  indexed through bounded `--target-only` shards and merged back into the
   expected `python.scip` output without requiring `NODE_OPTIONS` heap tuning.
+- Reduced `scip-python` shard startup overhead by using larger initial shard
+  targets while preserving recursive OOM splitting as the memory-safety
+  fallback.
+- Added conservative parallel execution for small `scip-python` shards,
+  per-shard timing logs, and local heap-limit split hints so repeat runs can
+  pre-split targets that previously exceeded the Node heap.
+- Packed loose Python files inside oversized directories into bounded file
+  batches to avoid excessive one-file `scip-python` invocations in flat trees.
+- Added protected temp-output execution for every indexer. The shared CLI/GUI
+  runner now captures stdout/stderr, kills child processes on cancellation,
+  normalizes and validates output before publishing `<language>.scip`, and logs
+  elapsed time, output size, document, symbol, occurrence, compaction, retry,
+  and shard telemetry.
+- Added capability-gated cross-language sharding infrastructure. TypeScript,
+  JavaScript, and C# can retry memory failures with safe project/config
+  argument shards, C/C++ can chunk large `compile_commands.json` inputs, and
+  Go/Rust/JVM/Ruby retain protected single-run behavior unless a safe upstream
+  shard boundary is available.
+- Sharded large project/config argument lists up front to avoid Windows command
+  line length failures when repositories expose hundreds or thousands of
+  `.csproj`/`.vbproj`/`.sln` or `tsconfig*` inputs.
+- Added WSL/Docker execution backends for Windows users of `scip-ruby` and
+  `scip-clang`. Native Windows installs remain marked unsupported because
+  upstream publishes Linux/macOS assets only, but indexing can now prepare the
+  Linux binary, translate backend paths, and publish normal `.scip` output
+  through the protected runner.
+- Added CLI/GUI status fields for native support, backend support, selected
+  backend, and backend availability so Ruby/C/C++ Windows users see why native
+  install is unavailable and which fallback can run.
+- Added toolchain preflight and runtime environment injection for `scip-go` and
+  `scip-java`. SCIP-IO now discovers Go and JDK/JVM installs from project
+  config, environment variables, PATH, and common install locations, then
+  injects PATH/JAVA_HOME only into child indexer processes.
+- Added config-aware status reporting for selected execution backends and
+  toolchain readiness in both the CLI and GUI.
+- Added per-indexer argument overrides to the shared CLI/GUI runner path, so
+  `.scip-io.toml` can supply complete commands for build-tool-specific JVM
+  indexing cases such as custom Gradle targets or external SemanticDB
+  targetroots.
 
 ### Fixed
 
 - Compacted SCIP outputs after indexer runs and final merge/copy operations so
   duplicate documents, duplicate occurrences, and duplicate document symbols do
   not reach downstream consumers.
+- Extended validation to fail on duplicate occurrence facts and duplicate
+  document symbols, not just duplicate document paths.
+- Repaired empty `Document.relative_path` values from `scip-python`
+  single-file shards by mapping them back to the shard's repo-relative file
+  path before merge compaction.
+- Prevented failed non-Python indexers from replacing a previous successful
+  `<language>.scip` with partial or invalid output.
+- Fixed managed `.tar.gz` extraction on Windows for release archives that ship
+  an `.exe` binary, including `scip-go`.
+- Added C/C++ Linux-backend preflight checks that reject Windows drive-letter,
+  Visual Studio, `cl.exe`, and `clang-cl.exe` compile commands before invoking
+  `scip-clang` through WSL or Docker.
+- Made WSL backend probing, path translation, permission fixups, and execution
+  respect the configured `wsl_distro`.
+- Corrected the managed `scip-ruby` release tag and invocation so SCIP-IO uses
+  the upstream `--index-file <output> .` form instead of a nonexistent `index`
+  subcommand.
+- Corrected `scip-go` invocation so `index` is not passed as a package pattern,
+  preventing large Go repos from producing an empty SCIP index.
+- Added deterministic local Ruby gem metadata for app-only projects without a
+  `.gemspec`, allowing `scip-ruby` to index applications as well as gems.
+- Normalized extended Windows paths before WSL path translation and Docker
+  bind mounts so project roots such as `\\?\F:\...` become backend-compatible
+  paths.
+- Allowed default-output indexers such as `scip-clang` to copy/remove the
+  generated `index.scip` when Windows cannot rename it across drives.
+- Updated the default Docker backend image to `ubuntu:24.04` so upstream Linux
+  `scip-clang` binaries find a compatible glibc without custom image setup.
+- Tightened WSL availability detection so SCIP-IO requires a runnable
+  selected/default distro instead of treating `wsl.exe --status` as sufficient.
+- Status commands now report invalid `.scip-io.toml` errors instead of silently
+  falling back to default configuration.
+- Avoided inferring `JAVA_HOME` from PATH-only Java shims while still allowing
+  configured, environment, common-location, and macOS `.jdk/Contents/Home`
+  homes to be injected for `scip-java`.
+- Skipped generated `build`, `dist`, and `out` directories during language
+  detection so build artifacts cannot make a project look like it contains an
+  unrelated supported language.
+- Corrected document-language normalization to prefer known source-file
+  extensions over wrong non-empty indexer metadata, allowing mixed JVM outputs
+  to label Kotlin and Scala documents correctly when `scip-java` reports a
+  broader language.
 
 ## [0.1.4] - 2026-05-26
 

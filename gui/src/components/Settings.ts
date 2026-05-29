@@ -17,6 +17,9 @@ interface IndexerOverride {
   name: string;
   binaryPath: string;
   args: string;
+  backend: string;
+  dockerImage: string;
+  wslDistro: string;
   expanded: boolean;
 }
 
@@ -24,6 +27,9 @@ let overrides: IndexerOverride[] = KNOWN_INDEXERS.map((idx) => ({
   name: idx.name,
   binaryPath: '',
   args: '',
+  backend: '',
+  dockerImage: '',
+  wslDistro: '',
   expanded: false,
 }));
 let latestUpdateResults: UpdateInfo[] = [];
@@ -144,6 +150,24 @@ function renderGeneralSettings(): HTMLElement {
   `;
   grid.appendChild(cacheField);
 
+  const goHomeField = document.createElement('div');
+  goHomeField.className = 'form-field';
+  goHomeField.innerHTML = `
+    <label class="form-label">Go Home</label>
+    <input class="input" type="text" id="setting-go-home" value="${escapeAttr(settings.goHome)}" placeholder="C:\\Program Files\\Go" />
+    <span class="form-hint">Prepended to child PATH for scip-go</span>
+  `;
+  grid.appendChild(goHomeField);
+
+  const javaHomeField = document.createElement('div');
+  javaHomeField.className = 'form-field';
+  javaHomeField.innerHTML = `
+    <label class="form-label">Java Home</label>
+    <input class="input" type="text" id="setting-java-home" value="${escapeAttr(settings.javaHome)}" placeholder="C:\\Program Files\\Eclipse Adoptium\\jdk-21" />
+    <span class="form-hint">Sets JAVA_HOME for scip-java</span>
+  `;
+  grid.appendChild(javaHomeField);
+
   panel.appendChild(grid);
 
   // Event bindings after render
@@ -229,7 +253,7 @@ function createOverrideItem(
       <span class="text-xs text-muted">${escapeHtml(indexer.language)}</span>
     </div>
     <div class="flex items-center gap-sm">
-      ${override.binaryPath || override.args ? '<span class="badge badge--outdated"><span class="badge__dot"></span> Custom</span>' : '<span class="text-xs text-muted">Default</span>'}
+      ${override.binaryPath || override.args || override.backend ? '<span class="badge badge--outdated"><span class="badge__dot"></span> Custom</span>' : '<span class="text-xs text-muted">Default</span>'}
       <svg class="override-chevron transition-transform" width="12" height="12" viewBox="0 0 12 12" style="transform: rotate(${override.expanded ? '180' : '0'}deg);">
         <path d="M2 4l4 4 4-4" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round"/>
       </svg>
@@ -267,16 +291,38 @@ function createOverrideItem(
         <input class="input" type="text" data-override-idx="${index}" data-field="args"
                value="${escapeAttr(override.args)}" placeholder="--verbose --threads 4" />
       </div>
+      <div class="form-field">
+        <label class="form-label">Backend</label>
+        <select class="input" data-override-idx="${index}" data-field="backend">
+          ${renderBackendOption('', 'Default', override.backend)}
+          ${renderBackendOption('auto', 'Auto', override.backend)}
+          ${renderBackendOption('native', 'Native', override.backend)}
+          ${renderBackendOption('wsl', 'WSL', override.backend)}
+          ${renderBackendOption('docker', 'Docker', override.backend)}
+          ${renderBackendOption('disabled', 'Disabled', override.backend)}
+        </select>
+      </div>
+      <div class="form-field">
+        <label class="form-label">Docker Image</label>
+        <input class="input" type="text" data-override-idx="${index}" data-field="dockerImage"
+               value="${escapeAttr(override.dockerImage)}" placeholder="my/scip-clang-runtime:latest" />
+      </div>
+      <div class="form-field">
+        <label class="form-label">WSL Distro</label>
+        <input class="input" type="text" data-override-idx="${index}" data-field="wslDistro"
+               value="${escapeAttr(override.wslDistro)}" placeholder="Ubuntu-24.04" />
+      </div>
     </div>
   `;
 
   // Bind input changes
-  details.querySelectorAll('input').forEach((input) => {
+  details.querySelectorAll('input, select').forEach((input) => {
     input.addEventListener('change', () => {
-      const idx = parseInt(input.getAttribute('data-override-idx') || '0', 10);
-      const field = input.getAttribute('data-field') as 'binaryPath' | 'args';
+      const control = input as HTMLInputElement | HTMLSelectElement;
+      const idx = parseInt(control.getAttribute('data-override-idx') || '0', 10);
+      const field = control.getAttribute('data-field') as 'binaryPath' | 'args' | 'backend' | 'dockerImage' | 'wslDistro';
       if (overrides[idx]) {
-        overrides[idx][field] = input.value;
+        overrides[idx][field] = control.value;
       }
     });
   });
@@ -284,6 +330,10 @@ function createOverrideItem(
   item.appendChild(details);
 
   return item;
+}
+
+function renderBackendOption(value: string, label: string, selected: string): string {
+  return `<option value="${value}" ${selected === value ? 'selected' : ''}>${label}</option>`;
 }
 
 // ----- Updates Section -----
@@ -355,19 +405,53 @@ async function loadConfig() {
     const config = await getConfig(store.getState().projectPath);
     if (config && typeof config === 'object') {
       const c = config as Record<string, unknown>;
+      const backendSettings =
+        c.settings && typeof c.settings === 'object' ? (c.settings as Record<string, unknown>) : {};
+      const toolchains =
+        c.toolchains && typeof c.toolchains === 'object' ? (c.toolchains as Record<string, unknown>) : {};
+      const goConfig =
+        toolchains.go && typeof toolchains.go === 'object' ? (toolchains.go as Record<string, unknown>) : {};
+      const javaConfig =
+        toolchains.java && typeof toolchains.java === 'object' ? (toolchains.java as Record<string, unknown>) : {};
       const current = store.getState().settings;
       store.setState({
         settings: {
-          parallel: typeof c.parallel === 'boolean' ? c.parallel : current.parallel,
-          timeout: typeof c.timeout === 'number' ? c.timeout : current.timeout,
+          parallel:
+            typeof backendSettings.parallel === 'number'
+              ? backendSettings.parallel > 1
+              : current.parallel,
+          timeout:
+            typeof backendSettings.timeout === 'number' ? backendSettings.timeout : current.timeout,
           outputFile: typeof c.output === 'string' ? c.output : current.outputFile,
-          cacheDir: typeof c.cache_dir === 'string' ? c.cache_dir : current.cacheDir,
+          cacheDir:
+            typeof backendSettings.cache_dir === 'string'
+              ? backendSettings.cache_dir
+              : current.cacheDir,
           includeAdditionalConfigs:
             typeof c.include_additional_configs === 'boolean'
               ? c.include_additional_configs
               : current.includeAdditionalConfigs,
+          goHome: typeof goConfig.home === 'string' ? goConfig.home : current.goHome,
+          javaHome: typeof javaConfig.home === 'string' ? javaConfig.home : current.javaHome,
         },
       });
+      if (c.indexer && typeof c.indexer === 'object') {
+        const indexerConfig = c.indexer as Record<string, Record<string, unknown>>;
+        overrides = overrides.map((override) => {
+          const saved = indexerConfig[override.name];
+          if (!saved || typeof saved !== 'object') {
+            return override;
+          }
+          return {
+            ...override,
+            binaryPath: typeof saved.binary === 'string' ? saved.binary : '',
+            args: Array.isArray(saved.args) ? saved.args.join(' ') : '',
+            backend: typeof saved.backend === 'string' ? saved.backend : '',
+            dockerImage: typeof saved.docker_image === 'string' ? saved.docker_image : '',
+            wslDistro: typeof saved.wsl_distro === 'string' ? saved.wsl_distro : '',
+          };
+        });
+      }
     }
   } catch {
     // Config not available; using defaults
@@ -379,6 +463,8 @@ async function handleSave() {
   const timeoutInput = document.getElementById('setting-timeout') as HTMLInputElement | null;
   const outputInput = document.getElementById('setting-output') as HTMLInputElement | null;
   const cacheInput = document.getElementById('setting-cache-dir') as HTMLInputElement | null;
+  const goHomeInput = document.getElementById('setting-go-home') as HTMLInputElement | null;
+  const javaHomeInput = document.getElementById('setting-java-home') as HTMLInputElement | null;
 
   const current = store.getState().settings;
   const settings = {
@@ -387,24 +473,39 @@ async function handleSave() {
     outputFile: outputInput ? outputInput.value || 'index.scip' : current.outputFile,
     cacheDir: cacheInput ? cacheInput.value : current.cacheDir,
     includeAdditionalConfigs: current.includeAdditionalConfigs,
+    goHome: goHomeInput ? goHomeInput.value : current.goHome,
+    javaHome: javaHomeInput ? javaHomeInput.value : current.javaHome,
   };
 
   store.setState({ settings });
 
   // Build config object for the backend
   const config = {
-    parallel: settings.parallel,
-    timeout: settings.timeout,
     output: settings.outputFile,
-    cache_dir: settings.cacheDir || undefined,
     include_additional_configs: settings.includeAdditionalConfigs,
-    overrides: overrides
-      .filter((o) => o.binaryPath || o.args)
-      .map((o) => ({
-        name: o.name,
-        binary_path: o.binaryPath || undefined,
-        extra_args: o.args ? o.args.split(' ').filter(Boolean) : undefined,
-      })),
+    settings: {
+      parallel: settings.parallel ? 4 : 1,
+      timeout: settings.timeout,
+      cache_dir: settings.cacheDir || undefined,
+    },
+    toolchains: {
+      go: settings.goHome ? { home: settings.goHome } : undefined,
+      java: settings.javaHome ? { home: settings.javaHome } : undefined,
+    },
+    indexer: Object.fromEntries(
+      overrides
+        .filter((o) => o.binaryPath || o.args || o.backend || o.dockerImage || o.wslDistro)
+        .map((o) => [
+          o.name,
+          {
+            binary: o.binaryPath || undefined,
+            args: o.args ? o.args.split(' ').filter(Boolean) : undefined,
+            backend: o.backend || undefined,
+            docker_image: o.dockerImage || undefined,
+            wsl_distro: o.wslDistro || undefined,
+          },
+        ])
+    ),
   };
 
   try {
@@ -426,6 +527,8 @@ function handleReset() {
       outputFile: 'index.scip',
       cacheDir: '',
       includeAdditionalConfigs: false,
+      goHome: '',
+      javaHome: '',
     },
   });
 
@@ -433,6 +536,9 @@ function handleReset() {
     name: idx.name,
     binaryPath: '',
     args: '',
+    backend: '',
+    dockerImage: '',
+    wslDistro: '',
     expanded: false,
   }));
 
@@ -440,12 +546,16 @@ function handleReset() {
   const timeoutInput = document.getElementById('setting-timeout') as HTMLInputElement | null;
   const outputInput = document.getElementById('setting-output') as HTMLInputElement | null;
   const cacheInput = document.getElementById('setting-cache-dir') as HTMLInputElement | null;
+  const goHomeInput = document.getElementById('setting-go-home') as HTMLInputElement | null;
+  const javaHomeInput = document.getElementById('setting-java-home') as HTMLInputElement | null;
   const parallelChip = document.getElementById('setting-parallel-chip');
   const extraConfigsChip = document.getElementById('setting-extra-configs-chip');
 
   if (timeoutInput) timeoutInput.value = '300';
   if (outputInput) outputInput.value = 'index.scip';
   if (cacheInput) cacheInput.value = '';
+  if (goHomeInput) goHomeInput.value = '';
+  if (javaHomeInput) javaHomeInput.value = '';
   if (parallelChip) parallelChip.classList.add('chip--selected');
   if (extraConfigsChip) extraConfigsChip.classList.remove('chip--selected');
 

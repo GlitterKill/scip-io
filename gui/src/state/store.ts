@@ -71,11 +71,23 @@ export interface AppState {
     language: string;
     version: string;
     installed: boolean;
+    nativeSupported: boolean;
+    nativeInstalled: boolean;
+    nativeUnsupportedReason: string | null;
+    backendSupport: string[];
+    selectedBackend: string;
+    backendAvailable: boolean;
     installable: boolean;
     managed: boolean;
     installedPath: string | null;
     actionIndexer: string;
     coveredBy: string | null;
+    toolchainRequired: string | null;
+    toolchainAvailable: boolean | null;
+    toolchainSource: string | null;
+    toolchainHome: string | null;
+    toolchainExecutable: string | null;
+    toolchainMessage: string | null;
   }>;
   isIndexing: boolean;
   indexerProgress: Map<string, IndexerProgress>;
@@ -89,6 +101,8 @@ export interface AppState {
     outputFile: string;
     cacheDir: string;
     includeAdditionalConfigs: boolean;
+    goHome: string;
+    javaHome: string;
   };
 }
 
@@ -109,6 +123,8 @@ export const store = new Store<AppState>({
     outputFile: 'index.scip',
     cacheDir: '',
     includeAdditionalConfigs: false,
+    goHome: '',
+    javaHome: '',
   },
 });
 

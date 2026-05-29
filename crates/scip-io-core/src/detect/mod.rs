@@ -163,6 +163,9 @@ fn is_hidden_or_ignored(entry: &walkdir::DirEntry) -> bool {
     name.starts_with('.')
         || name == "node_modules"
         || name == "target"
+        || name == "build"
+        || name == "dist"
+        || name == "out"
         || name == "vendor"
         || name == "__pycache__"
         || name == "venv"
@@ -359,9 +362,9 @@ mod tests {
     }
 
     #[test]
-    fn nested_cpp_compile_database_is_detected_as_ready() {
+    fn nested_cpp_compile_database_detects_cpp_but_parent_root_is_not_ready() {
         let (_dir, project) =
-            create_fixture_project(&["build/compile_commands.json", "src/main.c"]);
+            create_fixture_project(&["cmake-debug/compile_commands.json", "src/main.c"]);
 
         let langs = scan_languages(&project).unwrap();
         let cpp = langs
@@ -369,9 +372,15 @@ mod tests {
             .find(|lang| lang.kind == LanguageKind::Cpp)
             .expect("C/C++ should be detected from nested compile_commands.json");
 
-        assert_eq!(cpp.evidence, "build\\compile_commands.json");
+        assert_eq!(cpp.evidence, "cmake-debug\\compile_commands.json");
         assert_eq!(cpp.evidence_kind, "project_config");
-        assert!(cpp.indexer_ready);
+        assert!(!cpp.indexer_ready);
+        assert!(
+            cpp.readiness_message
+                .as_deref()
+                .unwrap_or_default()
+                .contains("nested compile database")
+        );
     }
 
     #[test]
@@ -384,6 +393,17 @@ mod tests {
     #[test]
     fn test_skips_target_dir() {
         let (_dir, project) = create_fixture_project(&["target/debug/Cargo.toml"]);
+        let langs = scan_languages(&project).unwrap();
+        assert!(langs.is_empty());
+    }
+
+    #[test]
+    fn test_skips_generated_build_dirs() {
+        let (_dir, project) = create_fixture_project(&[
+            "build/generated/source.s",
+            "dist/bundle/index.js",
+            "out/classes/App.java",
+        ]);
         let langs = scan_languages(&project).unwrap();
         assert!(langs.is_empty());
     }

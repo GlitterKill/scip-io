@@ -5,6 +5,7 @@ pub mod indexer;
 pub mod merge;
 pub mod progress;
 pub mod scip_language;
+pub mod toolchain;
 pub mod validate;
 
 // Re-export key types for convenience

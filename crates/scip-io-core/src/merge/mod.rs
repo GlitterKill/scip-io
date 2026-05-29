@@ -5,7 +5,29 @@ use anyhow::{Context, Result};
 use protobuf::Message;
 use scip::types::{Document, Index, Metadata, ToolInfo};
 
-use crate::scip_language::{compact_index, fill_missing_document_languages};
+use crate::scip_language::{
+    ScipPublishStats, compact_index, compact_validate_publish_scip_file,
+    fill_missing_document_languages,
+};
+
+/// Merge multiple SCIP index files into a staged file, validate it, and publish
+/// only after all postprocessing succeeds.
+pub fn merge_scip_files_atomically(
+    inputs: &[impl AsRef<Path>],
+    output: &Path,
+) -> Result<ScipPublishStats> {
+    let temp_dir = tempfile::Builder::new()
+        .prefix("scip-io-merge-")
+        .tempdir()
+        .context("Failed to create temporary directory for SCIP merge")?;
+    let staged = temp_dir.path().join(
+        output
+            .file_name()
+            .unwrap_or_else(|| std::ffi::OsStr::new("index.scip")),
+    );
+    merge_scip_files(inputs, &staged)?;
+    compact_validate_publish_scip_file(&staged, output)
+}
 
 /// Merge multiple SCIP index files into a single output file.
 pub fn merge_scip_files(inputs: &[impl AsRef<Path>], output: &Path) -> Result<()> {

@@ -1,7 +1,10 @@
 use std::sync::LazyLock;
 
 use crate::detect::Language;
+use crate::indexer::backend::BackendCapabilities;
 use crate::indexer::{IndexerEntry, InstallMethod};
+
+const WINDOWS_LINUX_BACKEND_REASON: &str = "Native Windows binaries are not published upstream; upstream publishes Linux/macOS assets only. Use WSL or Docker to run the Linux binary";
 
 /// Global registry of known SCIP indexers.
 pub static REGISTRY: LazyLock<Registry> = LazyLock::new(Registry::default_registry);
@@ -25,6 +28,7 @@ impl Registry {
                     install_method: InstallMethod::Npm {
                         package: "@sourcegraph/scip-typescript".into(),
                     },
+                    backend_capabilities: BackendCapabilities::native(),
                 },
                 IndexerEntry {
                     indexer_name: "scip-typescript".into(),
@@ -37,6 +41,7 @@ impl Registry {
                     install_method: InstallMethod::Npm {
                         package: "@sourcegraph/scip-typescript".into(),
                     },
+                    backend_capabilities: BackendCapabilities::native(),
                 },
                 IndexerEntry {
                     indexer_name: "scip-python".into(),
@@ -49,6 +54,7 @@ impl Registry {
                     install_method: InstallMethod::Npm {
                         package: "@sourcegraph/scip-python".into(),
                     },
+                    backend_capabilities: BackendCapabilities::native(),
                 },
                 IndexerEntry {
                     indexer_name: "rust-analyzer".into(),
@@ -68,6 +74,7 @@ impl Registry {
                             asset_pattern: "rust-analyzer-{target_triple}.gz".into(),
                         }
                     },
+                    backend_capabilities: BackendCapabilities::native(),
                 },
                 IndexerEntry {
                     indexer_name: "scip-go".into(),
@@ -75,12 +82,13 @@ impl Registry {
                     github_repo: "sourcegraph/scip-go".into(),
                     binary_name: "scip-go".into(),
                     version: "v0.1.26".into(),
-                    default_args: vec!["index".into(), "--output".into(), "index.scip".into()],
+                    default_args: vec!["--output".into(), "index.scip".into()],
                     output_file: "index.scip".into(),
                     install_method: InstallMethod::GitHubTarGz {
                         asset_pattern: "scip-go_{version}_{os}_{goreleaser_arch}.tar.gz".into(),
                         binary_path_in_archive: None,
                     },
+                    backend_capabilities: BackendCapabilities::native(),
                 },
                 IndexerEntry {
                     indexer_name: "scip-java".into(),
@@ -94,6 +102,7 @@ impl Registry {
                         unix_asset: "scip-java-{version}".into(),
                         windows_asset: "scip-java-{version}.bat".into(),
                     },
+                    backend_capabilities: BackendCapabilities::wsl_optional(),
                 },
                 IndexerEntry {
                     indexer_name: "scip-java".into(),
@@ -107,6 +116,7 @@ impl Registry {
                         unix_asset: "scip-java-{version}".into(),
                         windows_asset: "scip-java-{version}.bat".into(),
                     },
+                    backend_capabilities: BackendCapabilities::wsl_optional(),
                 },
                 IndexerEntry {
                     indexer_name: "scip-dotnet".into(),
@@ -119,18 +129,22 @@ impl Registry {
                     install_method: InstallMethod::DotnetTool {
                         package: "scip-dotnet".into(),
                     },
+                    backend_capabilities: BackendCapabilities::native(),
                 },
                 IndexerEntry {
                     indexer_name: "scip-ruby".into(),
                     language: "ruby".into(),
                     github_repo: "sourcegraph/scip-ruby".into(),
                     binary_name: "scip-ruby".into(),
-                    version: "v0.4.7".into(),
-                    default_args: vec!["index".into()],
+                    version: "scip-ruby-v0.4.7".into(),
+                    default_args: vec!["--index-file".into(), "index.scip".into(), ".".into()],
                     output_file: "index.scip".into(),
                     install_method: InstallMethod::GitHubBinary {
                         asset_pattern: "scip-ruby-{arch}-{os}".into(),
                     },
+                    backend_capabilities: BackendCapabilities::windows_linux_backends(
+                        WINDOWS_LINUX_BACKEND_REASON,
+                    ),
                 },
                 IndexerEntry {
                     indexer_name: "scip-kotlin".into(),
@@ -145,6 +159,7 @@ impl Registry {
                         reason: "Kotlin indexing is provided by scip-java's Gradle Kotlin support"
                             .into(),
                     },
+                    backend_capabilities: BackendCapabilities::native(),
                 },
                 IndexerEntry {
                     indexer_name: "scip-clang".into(),
@@ -157,6 +172,9 @@ impl Registry {
                     install_method: InstallMethod::GitHubBinary {
                         asset_pattern: "scip-clang-{arch}-{os}".into(),
                     },
+                    backend_capabilities: BackendCapabilities::windows_linux_backends(
+                        WINDOWS_LINUX_BACKEND_REASON,
+                    ),
                 },
             ],
         }
@@ -228,6 +246,55 @@ mod tests {
     }
 
     #[test]
+    fn windows_linux_backend_capabilities_mark_ruby_and_clang_as_linux_backend_only() {
+        let registry = &*REGISTRY;
+        for indexer in ["scip-ruby", "scip-clang"] {
+            let entry = registry
+                .all()
+                .iter()
+                .find(|entry| entry.indexer_name == indexer)
+                .expect("registered indexer");
+
+            if cfg!(windows) {
+                assert!(!entry.native_supported_on_current_platform());
+                assert!(
+                    entry
+                        .windows_native_unsupported_reason()
+                        .expect("unsupported reason")
+                        .contains("upstream publishes Linux/macOS assets only")
+                );
+            } else {
+                assert!(entry.native_supported_on_current_platform());
+                assert!(entry.windows_native_unsupported_reason().is_none());
+            }
+            assert!(entry.backend_capabilities.supports_wsl);
+            assert!(entry.backend_capabilities.supports_docker);
+        }
+    }
+
+    #[test]
+    fn scip_java_can_be_forced_through_wsl_backend_on_windows() {
+        let registry = &*REGISTRY;
+        let java = registry
+            .all()
+            .iter()
+            .find(|entry| entry.indexer_name == "scip-java" && entry.language == "java")
+            .expect("java entry");
+        let scala = registry
+            .all()
+            .iter()
+            .find(|entry| entry.indexer_name == "scip-java" && entry.language == "scala")
+            .expect("scala entry");
+
+        for entry in [java, scala] {
+            assert!(entry.native_supported_on_current_platform());
+            assert!(entry.backend_capabilities.supports_wsl);
+            assert!(!entry.backend_capabilities.supports_docker);
+            assert!(entry.windows_native_unsupported_reason().is_none());
+        }
+    }
+
+    #[test]
     fn test_registry_all_returns_correct_count() {
         let registry = &*REGISTRY;
         let all = registry.all();
@@ -284,6 +351,16 @@ mod tests {
         let entry = registry.get(&lang).unwrap();
         assert_eq!(entry.indexer_name, "scip-python");
         assert!(matches!(entry.install_method, InstallMethod::Npm { .. }));
+    }
+
+    #[test]
+    fn test_registry_go_entry_uses_flags_not_subcommand() {
+        let registry = &*REGISTRY;
+        let lang = LanguageKind::Go.with_evidence(String::new());
+        let entry = registry.get(&lang).unwrap();
+
+        assert_eq!(entry.indexer_name, "scip-go");
+        assert_eq!(entry.default_args, vec!["--output", "index.scip"]);
     }
 
     #[test]
