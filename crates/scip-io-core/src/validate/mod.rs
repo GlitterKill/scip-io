@@ -69,6 +69,55 @@ pub fn validate_scip_file(path: &Path) -> Result<ValidationResult> {
         }
     }
 
+    // Check for duplicate facts inside each document. Duplicate occurrence or
+    // symbol rows are structurally valid SCIP, but they break downstream graph
+    // materializers that key facts by document path plus symbol identity.
+    for doc in &index.documents {
+        let doc_path = if doc.relative_path.is_empty() {
+            "<empty relative_path>"
+        } else {
+            &doc.relative_path
+        };
+
+        let mut seen_occurrences = HashSet::new();
+        for occurrence in &doc.occurrences {
+            match occurrence.write_to_bytes() {
+                Ok(key) => {
+                    if !seen_occurrences.insert(key) {
+                        errors.push(ValidationError {
+                            kind: "duplicate_occurrence".to_string(),
+                            message: format!("Duplicate occurrence fact in document: {doc_path}"),
+                        });
+                        break;
+                    }
+                }
+                Err(e) => {
+                    errors.push(ValidationError {
+                        kind: "occurrence_serialize_error".to_string(),
+                        message: format!(
+                            "Failed to serialize occurrence while validating {doc_path}: {e}"
+                        ),
+                    });
+                    break;
+                }
+            }
+        }
+
+        let mut seen_symbols = HashSet::new();
+        for symbol in &doc.symbols {
+            if !seen_symbols.insert(symbol.symbol.clone()) {
+                errors.push(ValidationError {
+                    kind: "duplicate_symbol".to_string(),
+                    message: format!(
+                        "Duplicate document symbol '{}' in document: {doc_path}",
+                        symbol.symbol
+                    ),
+                });
+                break;
+            }
+        }
+    }
+
     // Check for empty relative paths
     for doc in &index.documents {
         if doc.relative_path.is_empty() {
@@ -207,6 +256,41 @@ mod tests {
         let result = validate_scip_file(file.path()).unwrap();
         assert!(!result.valid);
         assert!(result.errors.iter().any(|e| e.kind == "duplicate_path"));
+    }
+
+    #[test]
+    fn test_validate_duplicate_document_facts() {
+        let mut index = scip::types::Index::new();
+        let mut doc = scip::types::Document::new();
+        doc.relative_path = "src/main.rs".to_string();
+        doc.language = "rust".to_string();
+
+        let mut occurrence = scip::types::Occurrence::new();
+        occurrence.symbol = "local 0".to_string();
+        occurrence.range = vec![0, 0, 0, 4];
+        doc.occurrences.push(occurrence.clone());
+        doc.occurrences.push(occurrence);
+
+        let mut symbol = scip::types::SymbolInformation::new();
+        symbol.symbol = "scip local 0".to_string();
+        doc.symbols.push(symbol.clone());
+        doc.symbols.push(symbol);
+
+        index.documents.push(doc);
+
+        let bytes = index.write_to_bytes().unwrap();
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(&bytes).unwrap();
+        let result = validate_scip_file(file.path()).unwrap();
+
+        assert!(!result.valid);
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| e.kind == "duplicate_occurrence")
+        );
+        assert!(result.errors.iter().any(|e| e.kind == "duplicate_symbol"));
     }
 
     #[test]

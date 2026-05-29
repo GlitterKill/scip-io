@@ -1,4 +1,6 @@
+pub mod backend;
 pub mod install;
+pub mod planner;
 pub mod registry;
 pub mod runner;
 pub mod version;
@@ -8,6 +10,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 
+use crate::indexer::backend::BackendCapabilities;
 use crate::progress::{ProgressEvent, ProgressHandler};
 
 /// How to install a particular SCIP indexer.
@@ -65,6 +68,9 @@ pub struct IndexerEntry {
     pub output_file: String,
     /// How to install this indexer
     pub install_method: InstallMethod,
+    /// Non-native execution options exposed by this indexer on the current host.
+    #[serde(default)]
+    pub backend_capabilities: BackendCapabilities,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -93,6 +99,27 @@ impl IndexerEntry {
             self.install_method,
             InstallMethod::CoveredBy { .. } | InstallMethod::Unsupported { .. }
         )
+    }
+
+    /// Return whether the upstream indexer is supported as a native binary on
+    /// the current platform.
+    pub fn native_supported_on_current_platform(&self) -> bool {
+        !cfg!(windows)
+            || self
+                .backend_capabilities
+                .native_windows_unsupported_reason
+                .is_none()
+    }
+
+    /// Explain why native Windows execution is unsupported for this indexer.
+    pub fn windows_native_unsupported_reason(&self) -> Option<&str> {
+        if cfg!(windows) {
+            self.backend_capabilities
+                .native_windows_unsupported_reason
+                .as_deref()
+        } else {
+            None
+        }
     }
 
     /// Get the path to the installed binary, if present.
@@ -311,9 +338,12 @@ impl IndexerEntry {
     fn local_binary_candidates(&self, dir: &Path) -> Vec<PathBuf> {
         let mut candidates = Vec::new();
         if cfg!(windows) {
-            candidates.push(dir.join(format!("{}.exe", self.binary_name)));
-            candidates.push(dir.join(&self.binary_name));
             if matches!(self.install_method, InstallMethod::GitHubLauncher { .. }) {
+                candidates.push(dir.join(format!("{}.bat", self.binary_name)));
+                candidates.push(dir.join(&self.binary_name));
+            } else {
+                candidates.push(dir.join(format!("{}.exe", self.binary_name)));
+                candidates.push(dir.join(&self.binary_name));
                 candidates.push(dir.join(format!("{}.bat", self.binary_name)));
             }
         } else {
@@ -509,6 +539,7 @@ mod tests {
             default_args: Vec::new(),
             output_file: "index.scip".to_string(),
             install_method,
+            backend_capabilities: BackendCapabilities::native(),
         }
     }
 
@@ -750,13 +781,41 @@ mod tests {
             },
         );
         let launcher_path = managed_launcher_path(root, "scip-java");
+        let companion_path = root.join("scip-java");
         create_file(&launcher_path);
+        create_file(&companion_path);
 
         let removed = entry.uninstall_managed_from(root).unwrap();
 
         assert_eq!(removed.as_deref(), Some(launcher_path.as_path()));
         assert!(!launcher_path.exists());
+        assert!(!companion_path.exists());
         assert!(entry.installed_path_from(root, false).is_none());
+    }
+
+    #[test]
+    fn windows_launcher_prefers_batch_over_companion_payload() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let entry = entry_with_method(
+            "scip-java",
+            InstallMethod::GitHubLauncher {
+                unix_asset: "scip-java-{version}".to_string(),
+                windows_asset: "scip-java-{version}.bat".to_string(),
+            },
+        );
+        let launcher_path = root.join("scip-java.bat");
+        let companion_path = root.join("scip-java");
+        create_file(&launcher_path);
+        create_file(&companion_path);
+
+        let installed = entry.installed_path_from(root, false).unwrap();
+
+        if cfg!(windows) {
+            assert_eq!(installed, launcher_path);
+        } else {
+            assert_eq!(installed, companion_path);
+        }
     }
 
     #[test]

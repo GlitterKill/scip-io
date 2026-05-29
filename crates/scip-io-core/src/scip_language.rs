@@ -1,10 +1,13 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use protobuf::Message;
 use scip::types::{Document, Index, Occurrence};
+
+use crate::validate::{IndexStats, validate_scip_file};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ScipCompactionStats {
@@ -23,6 +26,12 @@ impl ScipCompactionStats {
             || self.duplicate_occurrences > 0
             || self.duplicate_symbols > 0
     }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ScipPublishStats {
+    pub index: IndexStats,
+    pub compaction: ScipCompactionStats,
 }
 
 /// Return SCIP's canonical language name when the input is one SCIP-IO supports.
@@ -66,8 +75,13 @@ pub fn infer_language_from_document_path(relative_path: &str) -> Option<&'static
     }
 }
 
-/// Fill only missing document language fields, preserving metadata from indexers
-/// that already provided a more precise value.
+/// Fill missing document language fields and canonicalize known aliases.
+///
+/// A known source-file extension is more specific than indexer-supplied
+/// language metadata. Some JVM-family indexers report every document as
+/// `java`, even when the path is Kotlin or Scala, so prefer path inference when
+/// it is available and preserve non-empty metadata only for paths we cannot
+/// classify confidently.
 pub fn fill_missing_document_languages(
     index: &mut Index,
     fallback_language: Option<&str>,
@@ -76,18 +90,27 @@ pub fn fill_missing_document_languages(
     let mut updated = 0;
 
     for doc in &mut index.documents {
-        if !doc.language.trim().is_empty() {
-            continue;
-        }
-
-        let Some(language) =
-            infer_language_from_document_path(&doc.relative_path).or(normalized_fallback)
-        else {
+        let raw_language = doc.language.trim();
+        let inferred_language = infer_language_from_document_path(&doc.relative_path);
+        let normalized_existing = normalize_language_name(raw_language);
+        let language = if let Some(language) = inferred_language {
+            language
+        } else if let Some(language) = normalized_existing {
+            language
+        } else if raw_language.is_empty() {
+            if let Some(language) = normalized_fallback {
+                language
+            } else {
+                continue;
+            }
+        } else {
             continue;
         };
 
-        doc.language = language.to_string();
-        updated += 1;
+        if doc.language != language {
+            doc.language = language.to_string();
+            updated += 1;
+        }
     }
 
     updated
@@ -167,6 +190,128 @@ pub fn compact_scip_file(path: &Path) -> Result<ScipCompactionStats> {
     std::fs::write(path, bytes).with_context(|| format!("Failed to write {}", path.display()))?;
 
     Ok(stats)
+}
+
+/// Compact and validate a staged SCIP file, then atomically publish it.
+///
+/// Callers use this for final per-language and merged outputs so a failed
+/// validation cannot replace the previous successful index.
+pub fn compact_validate_publish_scip_file(
+    staged: &Path,
+    destination: &Path,
+) -> Result<ScipPublishStats> {
+    let stats = compact_validate_scip_file(staged)?;
+    publish_scip_file_atomically(staged, destination)?;
+    Ok(stats)
+}
+
+/// Copy an existing SCIP file through the same final-output protection path.
+pub fn copy_scip_file_atomically(source: &Path, destination: &Path) -> Result<ScipPublishStats> {
+    let temp_dir = tempfile::Builder::new()
+        .prefix("scip-io-copy-")
+        .tempdir()
+        .context("Failed to create temporary directory for SCIP copy")?;
+    let staged = temp_dir.path().join(
+        destination
+            .file_name()
+            .unwrap_or_else(|| std::ffi::OsStr::new("index.scip")),
+    );
+    std::fs::copy(source, &staged).with_context(|| {
+        format!(
+            "Failed to stage {} for copy to {}",
+            source.display(),
+            destination.display()
+        )
+    })?;
+    compact_validate_publish_scip_file(&staged, destination)
+}
+
+pub fn compact_validate_scip_file(path: &Path) -> Result<ScipPublishStats> {
+    let compaction = compact_scip_file(path)?;
+    let validation = validate_scip_file(path)?;
+    if !validation.valid {
+        let errors = validation
+            .errors
+            .iter()
+            .map(|error| format!("{}: {}", error.kind, error.message))
+            .collect::<Vec<_>>()
+            .join("; ");
+        anyhow::bail!("Invalid SCIP output after compaction: {errors}");
+    }
+
+    Ok(ScipPublishStats {
+        index: validation.stats.unwrap_or_default(),
+        compaction,
+    })
+}
+
+pub fn publish_scip_file_atomically(source: &Path, destination: &Path) -> Result<()> {
+    let Some(parent) = destination.parent() else {
+        anyhow::bail!(
+            "Output destination has no parent: {}",
+            destination.display()
+        );
+    };
+    std::fs::create_dir_all(parent)
+        .with_context(|| format!("Failed to create {}", parent.display()))?;
+
+    let publish_temp = parent.join(unique_sidecar_name(destination, "tmp"));
+    std::fs::copy(source, &publish_temp).with_context(|| {
+        format!(
+            "Failed to stage {} for publishing to {}",
+            source.display(),
+            destination.display()
+        )
+    })?;
+
+    let backup = parent.join(unique_sidecar_name(destination, "backup"));
+    if destination.exists() {
+        std::fs::rename(destination, &backup).with_context(|| {
+            format!(
+                "Failed to move existing {} to {}",
+                destination.display(),
+                backup.display()
+            )
+        })?;
+    }
+
+    match std::fs::rename(&publish_temp, destination) {
+        Ok(()) => {
+            if backup.exists() {
+                std::fs::remove_file(&backup)
+                    .with_context(|| format!("Failed to remove {}", backup.display()))?;
+            }
+            Ok(())
+        }
+        Err(error) => {
+            if backup.exists() {
+                let _ = std::fs::rename(&backup, destination);
+            }
+            let _ = std::fs::remove_file(&publish_temp);
+            Err(error).with_context(|| {
+                format!(
+                    "Failed to publish {} to {}",
+                    source.display(),
+                    destination.display()
+                )
+            })
+        }
+    }
+}
+
+fn unique_sidecar_name(destination: &Path, suffix: &str) -> PathBuf {
+    let file_name = destination
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("index.scip");
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    PathBuf::from(format!(
+        ".{file_name}.{pid}.{timestamp}.{suffix}",
+        pid = std::process::id()
+    ))
 }
 
 fn compact_document_facts(document: &mut Document, stats: &mut ScipCompactionStats) {
@@ -332,6 +477,39 @@ pub fn prefix_scip_file_document_paths(path: &Path, prefix: &str) -> Result<usiz
     Ok(updated)
 }
 
+/// Rewrite empty document paths when an indexer reports facts for a known
+/// single-file target without naming the target in `Document.relative_path`.
+pub fn replace_empty_scip_document_paths(path: &Path, replacement: &str) -> Result<usize> {
+    let replacement = normalize_path_component(replacement);
+    if replacement.is_empty() {
+        return Ok(0);
+    }
+
+    let bytes =
+        std::fs::read(path).with_context(|| format!("Failed to read {}", path.display()))?;
+    let mut index = Index::parse_from_bytes(&bytes)
+        .with_context(|| format!("Failed to parse SCIP index from {}", path.display()))?;
+
+    let mut updated = 0;
+    for doc in &mut index.documents {
+        if doc.relative_path.is_empty() {
+            doc.relative_path = replacement.clone();
+            updated += 1;
+        }
+    }
+
+    if updated == 0 {
+        return Ok(0);
+    }
+
+    let bytes = index
+        .write_to_bytes()
+        .context("Failed to serialize empty-path-repaired SCIP index")?;
+    std::fs::write(path, bytes).with_context(|| format!("Failed to write {}", path.display()))?;
+
+    Ok(updated)
+}
+
 /// Rewrite absolute document paths under `project_root` back to repo-relative
 /// paths.
 ///
@@ -464,7 +642,7 @@ mod tests {
         missing.relative_path = "src/main.ts".into();
 
         let mut existing = Document::new();
-        existing.relative_path = "src/main.js".into();
+        existing.relative_path = "src/main.unknown".into();
         existing.language = "javascriptreact".into();
 
         index.documents.push(missing);
@@ -475,6 +653,40 @@ mod tests {
         assert_eq!(updated, 1);
         assert_eq!(index.documents[0].language, "typescript");
         assert_eq!(index.documents[1].language, "javascriptreact");
+    }
+
+    #[test]
+    fn canonicalizes_known_existing_language_aliases() {
+        let mut index = Index::new();
+        let mut doc = Document::new();
+        doc.relative_path = "src/Program.cs".into();
+        doc.language = "C#".into();
+        index.documents.push(doc);
+
+        let updated = fill_missing_document_languages(&mut index, None);
+
+        assert_eq!(updated, 1);
+        assert_eq!(index.documents[0].language, "csharp");
+    }
+
+    #[test]
+    fn path_extension_overrides_wrong_existing_language() {
+        let mut index = Index::new();
+        let mut kotlin = Document::new();
+        kotlin.relative_path = "src/main/kotlin/App.kt".into();
+        kotlin.language = "java".into();
+        index.documents.push(kotlin);
+
+        let mut scala = Document::new();
+        scala.relative_path = "src/main/scala/App.scala".into();
+        scala.language = "java".into();
+        index.documents.push(scala);
+
+        let updated = fill_missing_document_languages(&mut index, None);
+
+        assert_eq!(updated, 2);
+        assert_eq!(index.documents[0].language, "kotlin");
+        assert_eq!(index.documents[1].language, "scala");
     }
 
     #[test]
@@ -547,6 +759,25 @@ mod tests {
             normalized.documents[0].relative_path,
             "services/api/src/main.rs"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn replaces_empty_scip_document_paths_with_known_target_path() -> Result<()> {
+        let mut index = Index::new();
+        let mut doc = Document::new();
+        doc.language = "python".into();
+        index.documents.push(doc);
+
+        let file = NamedTempFile::new()?;
+        std::fs::write(file.path(), index.write_to_bytes()?)?;
+
+        let updated = replace_empty_scip_document_paths(file.path(), "pkg\\a.py")?;
+        let normalized = Index::parse_from_bytes(&std::fs::read(file.path())?)?;
+
+        assert_eq!(updated, 1);
+        assert_eq!(normalized.documents[0].relative_path, "pkg/a.py");
+        assert_eq!(normalized.documents[0].language, "python");
         Ok(())
     }
 

@@ -1,7 +1,7 @@
 use anyhow::Result;
 use console::style;
 
-use scip_io_core::merge::merge_scip_files;
+use scip_io_core::merge::merge_scip_files_atomically;
 use scip_io_core::validate::validate_scip_file;
 
 use super::MergeArgs;
@@ -13,7 +13,7 @@ pub async fn run(args: MergeArgs) -> Result<()> {
         args.inputs.len()
     );
 
-    merge_scip_files(&args.inputs, &args.output)?;
+    merge_scip_files_atomically(&args.inputs, &args.output)?;
 
     println!(
         "{} Merged index written to {}",

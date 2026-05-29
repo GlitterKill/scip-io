@@ -7,6 +7,7 @@ use anyhow::{Context, Result, bail};
 use console::style;
 use futures_util::stream::{self, StreamExt};
 
+use scip_io_core::config::ProjectConfig;
 use scip_io_core::config_discovery::{
     discover_additional_config_roots, discover_additional_configs,
     supported_additional_config_languages,
@@ -15,10 +16,14 @@ use scip_io_core::detect::{
     DetectionEvidenceKind, Language, LanguageScanOptions, discover_project_roots,
     scan_languages_with_options,
 };
+use scip_io_core::indexer::backend::{BackendPreference, ExecutionBackendKind};
 use scip_io_core::indexer::registry::REGISTRY;
 use scip_io_core::indexer::{IndexerEntry, runner};
-use scip_io_core::merge::merge_scip_files;
-use scip_io_core::scip_language::{compact_scip_file, prefix_scip_file_document_paths};
+use scip_io_core::merge::merge_scip_files_atomically;
+use scip_io_core::scip_language::{
+    compact_scip_file, copy_scip_file_atomically, prefix_scip_file_document_paths,
+};
+use scip_io_core::toolchain::toolchain_preflight_for_indexer;
 
 use super::IndexArgs;
 use super::progress_handler::CliProgressHandler;
@@ -27,9 +32,11 @@ use super::progress_handler::CliProgressHandler;
 struct IndexerTask {
     lang: Language,
     entry: &'static IndexerEntry,
-    binary_path: PathBuf,
+    binary_path: Option<PathBuf>,
     project_root: PathBuf,
     additional_configs: Vec<PathBuf>,
+    backend_preference: BackendPreference,
+    args_override: Option<Vec<String>>,
     /// Additional detected languages whose indexing is handled by the same
     /// tool invocation (e.g. `javascript` is covered by a single
     /// `scip-typescript` run when `tsconfig.json` has `allowJs: true`).
@@ -55,6 +62,7 @@ pub async fn run(args: IndexArgs) -> Result<()> {
         .clone()
         .unwrap_or_else(|| std::env::current_dir().unwrap());
     let path = path.canonicalize()?;
+    let config = ProjectConfig::load(&path)?;
 
     let project_roots = resolve_project_roots(&args, &path)?;
     let projects = detect_languages_for_roots(&args, &project_roots)?;
@@ -71,7 +79,7 @@ pub async fn run(args: IndexArgs) -> Result<()> {
 
     // Dry-run mode: show what would be done then exit
     if args.dry_run {
-        return run_dry_run(&args, &projects, is_json);
+        return run_dry_run(&args, &projects, is_json, &config);
     }
 
     if !is_json {
@@ -89,7 +97,14 @@ pub async fn run(args: IndexArgs) -> Result<()> {
                 .runnable_for(lang)
                 .with_context(|| format!("No indexer registered for {}", lang.name()))?;
 
-            let binary_path = entry.ensure_installed(progress.as_ref()).await?;
+            let backend_preference =
+                config.backend_preference_for(lang.name(), &entry.indexer_name);
+            let args_override = config.args_override_for(lang.name(), &entry.indexer_name);
+            let binary_path = if should_prepare_native_binary(entry, &backend_preference) {
+                Some(entry.ensure_installed(progress.as_ref()).await?)
+            } else {
+                None
+            };
 
             tasks.push(IndexerTask {
                 lang: lang.clone(),
@@ -97,6 +112,8 @@ pub async fn run(args: IndexArgs) -> Result<()> {
                 binary_path,
                 project_root: project.root.clone(),
                 additional_configs: lang.additional_configs.clone(),
+                backend_preference,
+                args_override,
                 covers: Vec::new(),
             });
         }
@@ -126,22 +143,27 @@ pub async fn run(args: IndexArgs) -> Result<()> {
     }
 
     let base_path_for_results = path.clone();
+    let toolchains_for_results = Arc::new(config.toolchains.clone());
     let results: Vec<IndexerResult> = stream::iter(tasks)
         .map(|task| {
             let dur = timeout_duration;
             let base_path = base_path_for_results.clone();
+            let toolchains = Arc::clone(&toolchains_for_results);
             async move {
                 let lang_name = task.lang.name().to_string();
                 let covers = task.covers.clone();
                 let outcome = tokio::time::timeout(
                     dur,
-                    runner::run_indexer_with_configs(
-                        &task.binary_path,
-                        task.entry,
-                        &task.project_root,
-                        &task.lang,
-                        &task.additional_configs,
-                    ),
+                    runner::run_indexer_with_request(runner::IndexerRunRequest {
+                        binary: task.binary_path.as_deref(),
+                        entry: task.entry,
+                        project_root: &task.project_root,
+                        lang: &task.lang,
+                        config_paths: &task.additional_configs,
+                        backend_preference: task.backend_preference.clone(),
+                        toolchains: &toolchains,
+                        args_override: task.args_override.as_deref(),
+                    }),
                 )
                 .await;
                 match outcome {
@@ -239,8 +261,7 @@ pub async fn run(args: IndexArgs) -> Result<()> {
                 scip_outputs.len()
             );
         }
-        merge_scip_files(&scip_outputs, &args.output)?;
-        compact_scip_file(&args.output)?;
+        merge_scip_files_atomically(&scip_outputs, &args.output)?;
         if !is_json {
             println!(
                 "{} Merged index written to {}",
@@ -249,8 +270,7 @@ pub async fn run(args: IndexArgs) -> Result<()> {
             );
         }
     } else if scip_outputs.len() == 1 && !args.no_merge {
-        std::fs::copy(&scip_outputs[0], &args.output)?;
-        compact_scip_file(&args.output)?;
+        copy_scip_file_atomically(&scip_outputs[0], &args.output)?;
         if !is_json {
             println!(
                 "\n{} Index written to {}",
@@ -527,24 +547,38 @@ fn prefix_output_paths_for_project_root(
 }
 
 /// Dry-run mode: show what would happen without executing anything.
-fn run_dry_run(args: &IndexArgs, projects: &[ProjectLanguages], is_json: bool) -> Result<()> {
+fn run_dry_run(
+    args: &IndexArgs,
+    projects: &[ProjectLanguages],
+    is_json: bool,
+    config: &ProjectConfig,
+) -> Result<()> {
     if is_json {
         let plan: Vec<serde_json::Value> = projects
             .iter()
             .flat_map(|project| {
                 project.languages.iter().map(|lang| {
                     let indexer = REGISTRY.runnable_for(lang);
+                    let backend = indexer
+                        .map(|entry| config.backend_preference_for(lang.name(), &entry.indexer_name));
+                    let toolchain = indexer
+                        .and_then(|entry| toolchain_preflight_for_indexer(entry, &config.toolchains));
                     serde_json::json!({
                         "root": project.root.display().to_string(),
                         "language": lang.name(),
                         "evidence": lang.evidence(),
                         "indexer": indexer.map(|e| &e.indexer_name),
                         "installed": indexer.map(|e| e.is_installed()).unwrap_or(false),
+                        "backend": backend.as_ref().map(|preference| format!("{:?}", preference.kind).to_ascii_lowercase()),
+                        "native_supported": indexer.map(|e| e.native_supported_on_current_platform()).unwrap_or(false),
+                        "toolchain_required": toolchain.as_ref().map(|status| status.kind.as_str()),
+                        "toolchain_available": toolchain.as_ref().map(|status| status.available),
+                        "toolchain_message": toolchain.as_ref().map(|status| status.message.as_str()),
                         "command": indexer.map(|e| {
                             format!(
                                 "{} {}",
                                 e.binary_name,
-                                dry_run_command_args(e, &project.root, lang).join(" ")
+                                dry_run_command_args(e, &project.root, lang, config).join(" ")
                             )
                         }),
                         "configs": lang.additional_configs.iter().map(|path| {
@@ -564,17 +598,46 @@ fn run_dry_run(args: &IndexArgs, projects: &[ProjectLanguages], is_json: bool) -
             println!("  {} {}", style("root").dim(), project.root.display());
             for lang in &project.languages {
                 let indexer = REGISTRY.runnable_for(lang);
+                let backend = indexer
+                    .map(|entry| config.backend_preference_for(lang.name(), &entry.indexer_name));
                 let status = match indexer {
+                    Some(e)
+                        if !e.native_supported_on_current_platform()
+                            && backend.as_ref().is_some_and(|preference| {
+                                preference.kind != ExecutionBackendKind::Native
+                            }) =>
+                    {
+                        format!(
+                            "{} (will use {})",
+                            e.indexer_name,
+                            backend_label(backend.as_ref())
+                        )
+                    }
                     Some(e) if e.is_installed() => format!("{} (installed)", e.indexer_name),
                     Some(e) => format!("{} (will download)", e.indexer_name),
                     None => "no indexer registered".to_string(),
                 };
                 println!("    {} {} -- {}", style(">").cyan(), lang.name(), status);
                 if let Some(e) = indexer {
+                    if let Some(toolchain) = toolchain_preflight_for_indexer(e, &config.toolchains)
+                    {
+                        println!(
+                            "      toolchain: {} ({})",
+                            toolchain.kind.display_name(),
+                            if toolchain.available {
+                                "ready"
+                            } else {
+                                "missing"
+                            }
+                        );
+                        if !toolchain.available {
+                            println!("      reason: {}", toolchain.message);
+                        }
+                    }
                     println!(
                         "      command: {} {}",
                         e.binary_name,
-                        dry_run_command_args(e, &project.root, lang).join(" ")
+                        dry_run_command_args(e, &project.root, lang, config).join(" ")
                     );
                     if !lang.additional_configs.is_empty() {
                         println!(
@@ -604,18 +667,55 @@ fn run_dry_run(args: &IndexArgs, projects: &[ProjectLanguages], is_json: bool) -
     Ok(())
 }
 
-fn dry_run_command_args(entry: &IndexerEntry, project_root: &Path, lang: &Language) -> Vec<String> {
+fn should_prepare_native_binary(entry: &IndexerEntry, preference: &BackendPreference) -> bool {
+    match preference.kind {
+        ExecutionBackendKind::Native => true,
+        ExecutionBackendKind::Auto => entry.native_supported_on_current_platform(),
+        ExecutionBackendKind::Wsl
+        | ExecutionBackendKind::Docker
+        | ExecutionBackendKind::Disabled => false,
+    }
+}
+
+fn backend_label(preference: Option<&BackendPreference>) -> String {
+    let Some(preference) = preference else {
+        return "auto backend".to_string();
+    };
+    match preference.kind {
+        ExecutionBackendKind::Auto => "auto backend".to_string(),
+        ExecutionBackendKind::Native => "native backend".to_string(),
+        ExecutionBackendKind::Wsl => "WSL backend".to_string(),
+        ExecutionBackendKind::Docker => "Docker backend".to_string(),
+        ExecutionBackendKind::Disabled => "disabled backend".to_string(),
+    }
+}
+
+fn dry_run_command_args(
+    entry: &IndexerEntry,
+    project_root: &Path,
+    lang: &Language,
+    config: &ProjectConfig,
+) -> Vec<String> {
     let output_file = PathBuf::from(format!("{}.scip", lang.name()));
     let display_configs = lang
         .additional_configs
         .iter()
         .map(|path| PathBuf::from(display_project_root(path, project_root)))
         .collect::<Vec<_>>();
+    let override_entry = config.args_override_for(lang.name(), &entry.indexer_name);
 
-    runner::build_indexer_args(entry, &output_file, &display_configs)
-        .into_iter()
-        .map(|arg| arg.to_string_lossy().to_string())
-        .collect()
+    match override_entry {
+        Some(default_args) => runner::build_indexer_args_with_defaults_for_display(
+            entry,
+            &output_file,
+            &display_configs,
+            &default_args,
+        ),
+        None => runner::build_indexer_args(entry, &output_file, &display_configs),
+    }
+    .into_iter()
+    .map(|arg| arg.to_string_lossy().to_string())
+    .collect()
 }
 
 /// Group tasks by their `indexer_name` and project root, then collapse each

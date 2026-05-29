@@ -3,10 +3,14 @@ use scip_io_core::config_discovery::{
     discover_additional_configs, supported_additional_config_languages,
 };
 use scip_io_core::detect::{DetectionEvidenceKind, Language, scan_languages};
+use scip_io_core::indexer::backend::{
+    BackendPreference, ExecutionBackendKind, backend_availability_for_entry_with_preference,
+};
 use scip_io_core::indexer::registry::REGISTRY;
 use scip_io_core::indexer::version::version_is_newer;
 use scip_io_core::indexer::{IndexerEntry, install_dir, is_managed_install_path};
 use scip_io_core::progress::{ProgressEvent, ProgressHandler};
+use scip_io_core::toolchain::toolchain_preflight_for_indexer;
 use scip_io_core::validate::validate_scip_file;
 use serde::Serialize;
 use std::collections::BTreeSet;
@@ -32,11 +36,23 @@ pub struct IndexerStatusInfo {
     pub binary_name: String,
     pub github_repo: String,
     pub installed: bool,
+    pub native_supported: bool,
+    pub native_installed: bool,
+    pub native_unsupported_reason: Option<String>,
+    pub backend_support: Vec<String>,
+    pub selected_backend: String,
+    pub backend_available: bool,
     pub installable: bool,
     pub managed: bool,
     pub installed_path: Option<String>,
     pub action_indexer: String,
     pub covered_by: Option<String>,
+    pub toolchain_required: Option<String>,
+    pub toolchain_available: Option<bool>,
+    pub toolchain_source: Option<String>,
+    pub toolchain_home: Option<String>,
+    pub toolchain_executable: Option<String>,
+    pub toolchain_message: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -262,6 +278,7 @@ pub async fn start_indexing(
 
     let root = PathBuf::from(&path);
     let handler = TauriProgressHandler { app: app.clone() };
+    let config = ProjectConfig::load(&root).map_err(|e| e.to_string())?;
 
     // Detect languages
     handler.on_event(ProgressEvent::DetectStart { path: root.clone() });
@@ -321,17 +338,28 @@ pub async fn start_indexing(
         // Preflight installation before any indexer process is invoked. This
         // lets first-run indexing install missing tools and still complete in
         // the same operation.
-        let binary = plan
-            .entry
-            .ensure_installed(&handler)
-            .await
-            .map_err(|e| format!("Indexer install failed: {}", e))?;
+        let backend_preference =
+            config.backend_preference_for(plan.primary.kind.name(), &plan.entry.indexer_name);
+        let args_override =
+            config.args_override_for(plan.primary.kind.name(), &plan.entry.indexer_name);
+        let binary = if should_prepare_native_binary(plan.entry, &backend_preference) {
+            Some(
+                plan.entry
+                    .ensure_installed(&handler)
+                    .await
+                    .map_err(|e| format!("Indexer install failed: {}", e))?,
+            )
+        } else {
+            None
+        };
 
         prepared_plans.push(PreparedIndexingPlan {
             primary: plan.primary,
             entry: plan.entry,
             covers: plan.covers,
             binary,
+            backend_preference,
+            args_override,
         });
     }
 
@@ -353,17 +381,32 @@ pub async fn start_indexing(
             language: lang.kind.name().to_string(),
             command: format!(
                 "{} {}",
-                plan.binary.display(),
-                display_indexer_args(entry, lang, &lang.additional_configs)
+                plan.binary
+                    .as_ref()
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_else(
+                        || format!("{:?}", plan.backend_preference.kind).to_ascii_lowercase()
+                    ),
+                display_indexer_args(
+                    entry,
+                    lang,
+                    &lang.additional_configs,
+                    plan.args_override.as_deref()
+                )
             ),
         });
 
-        match scip_io_core::indexer::runner::run_indexer_with_configs(
-            &plan.binary,
-            entry,
-            &root,
-            lang,
-            &lang.additional_configs,
+        match scip_io_core::indexer::runner::run_indexer_with_request(
+            scip_io_core::indexer::runner::IndexerRunRequest {
+                binary: plan.binary.as_deref(),
+                entry,
+                project_root: &root,
+                lang,
+                config_paths: &lang.additional_configs,
+                backend_preference: plan.backend_preference.clone(),
+                toolchains: &config.toolchains,
+                args_override: plan.args_override.as_deref(),
+            },
         )
         .await
         {
@@ -437,10 +480,9 @@ pub async fn start_indexing(
         handler.on_event(ProgressEvent::MergeStart {
             inputs: outputs.clone(),
         });
-        scip_io_core::merge::merge_scip_files(&outputs, &output_path)
-            .map_err(|e| format!("Merge failed: {}", e))?;
-        scip_io_core::scip_language::compact_scip_file(&output_path)
-            .map_err(|e| format!("SCIP compaction failed: {}", e))?;
+        let publish_stats =
+            scip_io_core::merge::merge_scip_files_atomically(&outputs, &output_path)
+                .map_err(|e| format!("Merge failed: {}", e))?;
 
         let size = std::fs::metadata(&output_path)
             .map(|m| m.len())
@@ -448,16 +490,14 @@ pub async fn start_indexing(
         handler.on_event(ProgressEvent::MergeComplete {
             output: output_path.clone(),
             stats: scip_io_core::progress::MergeStats {
-                documents: 0,
-                symbols: 0,
+                documents: publish_stats.index.documents,
+                symbols: publish_stats.index.symbols,
                 size_bytes: size,
             },
         });
     } else if outputs.len() == 1 {
-        std::fs::copy(&outputs[0], &output_path)
+        scip_io_core::scip_language::copy_scip_file_atomically(&outputs[0], &output_path)
             .map_err(|e| format!("Failed to write final index: {}", e))?;
-        scip_io_core::scip_language::compact_scip_file(&output_path)
-            .map_err(|e| format!("SCIP compaction failed: {}", e))?;
     }
 
     // Read final stats from the output SCIP file
@@ -494,13 +534,14 @@ pub async fn cancel_indexing() -> Result<(), String> {
 }
 
 #[tauri::command]
-pub async fn get_indexer_status() -> Result<Vec<IndexerStatusInfo>, String> {
+pub async fn get_indexer_status(path: Option<String>) -> Result<Vec<IndexerStatusInfo>, String> {
+    let config = load_config_for_optional_path(path.as_deref())?;
     let mut seen = BTreeSet::new();
     let mut statuses = Vec::new();
 
     for entry in REGISTRY.all() {
         if seen.insert(entry.indexer_name.clone()) {
-            statuses.push(indexer_status_for_entry(entry));
+            statuses.push(indexer_status_for_entry(entry, &config).await);
         }
     }
 
@@ -519,6 +560,15 @@ pub async fn install_indexer(app: AppHandle, indexer: String) -> Result<IndexerS
             entry.indexer_name
         ));
     }
+    if !action_entry.native_supported_on_current_platform() {
+        let reason = action_entry
+            .windows_native_unsupported_reason()
+            .unwrap_or("native binary is unavailable on this platform");
+        return Err(format!(
+            "{} has no native Windows install: {}. Indexing can use WSL or Docker when a backend is configured or available.",
+            action_entry.indexer_name, reason
+        ));
+    }
 
     let handler = TauriProgressHandler { app };
     action_entry
@@ -526,7 +576,7 @@ pub async fn install_indexer(app: AppHandle, indexer: String) -> Result<IndexerS
         .await
         .map_err(|e| e.to_string())?;
 
-    Ok(indexer_status_for_entry(entry))
+    Ok(indexer_status_for_entry(entry, &ProjectConfig::default()).await)
 }
 
 #[tauri::command]
@@ -542,7 +592,7 @@ pub async fn uninstall_indexer(indexer: String) -> Result<IndexerStatusInfo, Str
     action_entry
         .uninstall_managed()
         .map_err(|e| e.to_string())?;
-    Ok(indexer_status_for_entry(entry))
+    Ok(indexer_status_for_entry(entry, &ProjectConfig::default()).await)
 }
 
 #[tauri::command]
@@ -572,7 +622,7 @@ pub async fn update_indexer(
         .await
         .map_err(|e| e.to_string())?;
 
-    Ok(indexer_status_for_entry(entry))
+    Ok(indexer_status_for_entry(entry, &ProjectConfig::default()).await)
 }
 
 #[tauri::command]
@@ -684,7 +734,9 @@ struct PreparedIndexingPlan {
     primary: Language,
     entry: &'static IndexerEntry,
     covers: Vec<Language>,
-    binary: PathBuf,
+    binary: Option<PathBuf>,
+    backend_preference: BackendPreference,
+    args_override: Option<Vec<String>>,
 }
 
 /// Group selected languages by their indexer tool and collapse shared
@@ -750,13 +802,38 @@ fn display_indexer_args(
     entry: &IndexerEntry,
     language: &Language,
     additional_configs: &[PathBuf],
+    args_override: Option<&[String]>,
 ) -> String {
     let output_file = PathBuf::from(format!("{}.scip", language.kind.name()));
-    scip_io_core::indexer::runner::build_indexer_args(entry, &output_file, additional_configs)
-        .into_iter()
-        .map(|arg| arg.to_string_lossy().to_string())
-        .collect::<Vec<_>>()
-        .join(" ")
+    match args_override {
+        Some(default_args) => {
+            scip_io_core::indexer::runner::build_indexer_args_with_defaults_for_display(
+                entry,
+                &output_file,
+                additional_configs,
+                default_args,
+            )
+        }
+        None => scip_io_core::indexer::runner::build_indexer_args(
+            entry,
+            &output_file,
+            additional_configs,
+        ),
+    }
+    .into_iter()
+    .map(|arg| arg.to_string_lossy().to_string())
+    .collect::<Vec<_>>()
+    .join(" ")
+}
+
+fn should_prepare_native_binary(entry: &IndexerEntry, preference: &BackendPreference) -> bool {
+    match preference.kind {
+        ExecutionBackendKind::Native => true,
+        ExecutionBackendKind::Auto => entry.native_supported_on_current_platform(),
+        ExecutionBackendKind::Wsl
+        | ExecutionBackendKind::Docker
+        | ExecutionBackendKind::Disabled => false,
+    }
 }
 
 fn apply_additional_configs(
@@ -822,7 +899,34 @@ fn indexer_matches(entry: &IndexerEntry, identifier: &str) -> bool {
         || entry.language.eq_ignore_ascii_case(identifier)
 }
 
-fn indexer_status_for_entry(entry: &IndexerEntry) -> IndexerStatusInfo {
+fn backend_kind_label(kind: ExecutionBackendKind) -> &'static str {
+    match kind {
+        ExecutionBackendKind::Auto => "auto",
+        ExecutionBackendKind::Native => "native",
+        ExecutionBackendKind::Wsl => "wsl",
+        ExecutionBackendKind::Docker => "docker",
+        ExecutionBackendKind::Disabled => "disabled",
+    }
+}
+
+fn load_config_for_optional_path(path: Option<&str>) -> Result<ProjectConfig, String> {
+    let root = path
+        .map(PathBuf::from)
+        .or_else(|| std::env::current_dir().ok())
+        .ok_or_else(|| "Failed to resolve current directory".to_string())?;
+    ProjectConfig::load(&root).map_err(|error| {
+        format!(
+            "Failed to load project config from {}: {}",
+            root.join(".scip-io.toml").display(),
+            error
+        )
+    })
+}
+
+async fn indexer_status_for_entry(
+    entry: &IndexerEntry,
+    config: &ProjectConfig,
+) -> IndexerStatusInfo {
     let action_entry = REGISTRY.action_entry_for(entry).unwrap_or(entry);
     let languages = languages_for_status_entry(entry);
     let installed_path = action_entry.installed_path();
@@ -831,6 +935,11 @@ fn indexer_status_for_entry(entry: &IndexerEntry) -> IndexerStatusInfo {
         .is_some_and(is_managed_install_path);
     let covered_by = (action_entry.indexer_name != entry.indexer_name)
         .then_some(action_entry.indexer_name.clone());
+    let backend_preference =
+        config.backend_preference_for(entry.language_name(), &action_entry.indexer_name);
+    let backend_probes =
+        backend_availability_for_entry_with_preference(action_entry, &backend_preference).await;
+    let toolchain = toolchain_preflight_for_indexer(action_entry, &config.toolchains);
 
     IndexerStatusInfo {
         name: entry.indexer_name.clone(),
@@ -839,11 +948,41 @@ fn indexer_status_for_entry(entry: &IndexerEntry) -> IndexerStatusInfo {
         binary_name: action_entry.binary_name.clone(),
         github_repo: entry.github_repo.clone(),
         installed: installed_path.is_some(),
+        native_supported: action_entry.native_supported_on_current_platform(),
+        native_installed: installed_path.is_some()
+            && action_entry.native_supported_on_current_platform(),
+        native_unsupported_reason: action_entry
+            .windows_native_unsupported_reason()
+            .map(str::to_owned),
+        backend_support: action_entry
+            .backend_capabilities
+            .backend_names()
+            .into_iter()
+            .map(str::to_owned)
+            .collect(),
+        selected_backend: backend_kind_label(backend_preference.kind).to_string(),
+        backend_available: backend_probes.iter().any(|probe| probe.available),
         installable: action_entry.is_installable(),
         managed,
         installed_path: installed_path.map(|p| p.to_string_lossy().to_string()),
         action_indexer: action_entry.indexer_name.clone(),
         covered_by,
+        toolchain_required: toolchain
+            .as_ref()
+            .map(|status| status.kind.as_str().to_string()),
+        toolchain_available: toolchain.as_ref().map(|status| status.available),
+        toolchain_source: toolchain
+            .as_ref()
+            .map(|status| status.source.as_str().to_string()),
+        toolchain_home: toolchain
+            .as_ref()
+            .and_then(|status| status.home.as_ref())
+            .map(|path| path.to_string_lossy().to_string()),
+        toolchain_executable: toolchain
+            .as_ref()
+            .and_then(|status| status.executable.as_ref())
+            .map(|path| path.to_string_lossy().to_string()),
+        toolchain_message: toolchain.as_ref().map(|status| status.message.clone()),
     }
 }
 
@@ -910,7 +1049,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_indexer_status_returns_one_row_per_indexer_binary() {
-        let statuses = get_indexer_status().await.unwrap();
+        let statuses = get_indexer_status(None).await.unwrap();
         let unique_indexers = REGISTRY
             .all()
             .iter()
@@ -943,22 +1082,24 @@ mod tests {
         );
     }
 
-    #[test]
-    fn indexer_status_exposes_installability_for_dashboard_actions() {
+    #[tokio::test]
+    async fn indexer_status_exposes_installability_for_dashboard_actions() {
         let kotlin = find_indexer_entry("kotlin").unwrap();
         let python = find_indexer_entry("scip-python").unwrap();
+        let config = ProjectConfig::default();
 
-        assert!(indexer_status_for_entry(kotlin).installable);
-        assert!(indexer_status_for_entry(python).installable);
+        assert!(indexer_status_for_entry(kotlin, &config).await.installable);
+        assert!(indexer_status_for_entry(python, &config).await.installable);
     }
 
-    #[test]
-    fn indexer_status_exposes_kotlin_as_scip_java_proxy_action() {
+    #[tokio::test]
+    async fn indexer_status_exposes_kotlin_as_scip_java_proxy_action() {
         let kotlin = find_indexer_entry("kotlin").unwrap();
         let java = find_indexer_entry("scip-java").unwrap();
+        let config = ProjectConfig::default();
 
-        let kotlin_status = indexer_status_for_entry(kotlin);
-        let java_status = indexer_status_for_entry(java);
+        let kotlin_status = indexer_status_for_entry(kotlin, &config).await;
+        let java_status = indexer_status_for_entry(java, &config).await;
 
         assert_eq!(kotlin_status.name, "scip-kotlin");
         assert_eq!(kotlin_status.binary_name, "scip-java");
@@ -967,6 +1108,64 @@ mod tests {
         assert_eq!(kotlin_status.installed, java_status.installed);
         assert_eq!(kotlin_status.managed, java_status.managed);
         assert_eq!(kotlin_status.installed_path, java_status.installed_path);
+    }
+
+    #[tokio::test]
+    async fn indexer_status_exposes_linux_backend_support() {
+        let ruby = find_indexer_entry("scip-ruby").unwrap();
+        let status = indexer_status_for_entry(ruby, &Default::default()).await;
+
+        if cfg!(windows) {
+            assert!(!status.native_supported);
+            assert!(status.native_unsupported_reason.is_some());
+        }
+        assert!(status.backend_support.contains(&"wsl".to_string()));
+        assert!(status.backend_support.contains(&"docker".to_string()));
+        assert_eq!(status.selected_backend, "auto");
+    }
+
+    #[tokio::test]
+    async fn indexer_status_reports_selected_backend_from_project_config() {
+        let ruby = find_indexer_entry("scip-ruby").unwrap();
+        let mut config = ProjectConfig::default();
+        config.indexer.insert(
+            "ruby".to_string(),
+            scip_io_core::config::IndexerOverride {
+                backend: Some(ExecutionBackendKind::Docker),
+                docker_image: Some("ghcr.io/example/scip-ruby:latest".to_string()),
+                ..Default::default()
+            },
+        );
+
+        let status = indexer_status_for_entry(ruby, &config).await;
+
+        assert_eq!(status.selected_backend, "docker");
+    }
+
+    #[tokio::test]
+    async fn get_indexer_status_returns_config_error_for_invalid_project_config() {
+        let temp = TempDir::new().unwrap();
+        fs::write(temp.path().join(".scip-io.toml"), "indexer = [").unwrap();
+
+        let error = get_indexer_status(Some(temp.path().to_string_lossy().to_string()))
+            .await
+            .unwrap_err();
+
+        assert!(error.contains("Failed to load project config"));
+    }
+
+    #[tokio::test]
+    async fn indexer_status_exposes_required_runtime_toolchains() {
+        let go = find_indexer_entry("scip-go").unwrap();
+        let java = find_indexer_entry("scip-java").unwrap();
+
+        let go_status = indexer_status_for_entry(go, &Default::default()).await;
+        let java_status = indexer_status_for_entry(java, &Default::default()).await;
+
+        assert_eq!(go_status.toolchain_required.as_deref(), Some("go"));
+        assert!(go_status.toolchain_message.is_some());
+        assert_eq!(java_status.toolchain_required.as_deref(), Some("java"));
+        assert!(java_status.toolchain_message.is_some());
     }
 
     #[test]

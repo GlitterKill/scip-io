@@ -51,8 +51,8 @@ SCIP-IO currently orchestrates **11 languages** across **9 different indexers**:
 | Scala        | `scip-java`       | Coursier launcher     | `*.scala`, `*.sbt`, `build.sbt`       | Ready |
 | Kotlin       | via `scip-java`   | compiler plugin       | `*.kt`, `*.kts`, `build.gradle.kts`, `settings.gradle.kts` | Ready |
 | C#           | `scip-dotnet`     | `dotnet tool`         | `*.cs`, `*.csproj`, `*.sln`, `*.vbproj` | Ready |
-| Ruby         | `scip-ruby`       | GitHub release        | `*.rb`, `Gemfile`                     | Ready |
-| C / C++      | `scip-clang`      | GitHub release        | `*.c`, `*.h`, `*.cc`, `*.hh`, `*.cpp`, `*.hpp`, `*.cxx`, `*.hxx`, `*.S`, `Makefile*`, `Kbuild*`, `Kconfig*`, `CMakeLists.txt`, `compile_commands.json` | `compile_commands.json` required |
+| Ruby         | `scip-ruby`       | GitHub release / WSL / Docker | `*.rb`, `Gemfile`             | Native Windows unsupported upstream; WSL/Docker backend on Windows |
+| C / C++      | `scip-clang`      | GitHub release / WSL / Docker | `*.c`, `*.h`, `*.cc`, `*.hh`, `*.cpp`, `*.hpp`, `*.cxx`, `*.hxx`, `*.S`, `Makefile*`, `Kbuild*`, `Kconfig*`, `CMakeLists.txt`, `compile_commands.json` | `compile_commands.json` required; native Windows unsupported upstream |
 
 SCIP-IO will also pick up any of these binaries already on your system `PATH` before downloading a fresh copy.
 
@@ -110,7 +110,7 @@ whether the default indexer has the setup it normally needs:
 ```mermaid
 flowchart TD
     Start([Start]) --> Walk[Walk project tree<br/>all non-ignored descendants]
-    Walk --> Skip{Hidden or<br/>ignored dir?<br/>.git, node_modules,<br/>target, vendor, venv}
+    Walk --> Skip{Hidden or<br/>ignored dir?<br/>.git, node_modules,<br/>target, build, dist,<br/>out, vendor, venv}
     Skip -- Yes --> Walk
     Skip -- No --> Match{Matches supported<br/>config, build, or source evidence?}
     Match -- No --> Walk
@@ -175,21 +175,100 @@ when a newer compatible version is available.
 On Windows, SCIP-IO also repairs managed `scip-python` npm installs affected
 by the upstream `path.sep` regex crash before running the indexer.
 
+### Windows Linux Backends
+
+Upstream `scip-ruby` and `scip-clang` do not publish compatible native Windows
+release assets. SCIP-IO keeps those native installs marked unsupported on
+Windows, but `scip-io index` can run the upstream Linux binaries through WSL or
+Docker and still publish normal `ruby.scip` or `cpp.scip` files through the same
+temp-output, compaction, validation, and atomic publish path.
+
+The automatic backend preference is WSL first, then Docker. You can pin a
+backend in `.scip-io.toml`:
+
+```toml
+[indexer.scip-ruby]
+backend = "wsl"
+wsl_distro = "Ubuntu-24.04"
+
+[indexer.scip-clang]
+backend = "docker"
+docker_image = "my/scip-clang-runtime:latest"
+```
+
+When no Docker image is configured, SCIP-IO uses `ubuntu:24.04` so upstream
+Linux indexer binaries have a recent enough glibc. Override `docker_image` when
+your project needs additional build tools, headers, or package managers inside
+the container.
+
+When `wsl_distro` is set, status probes, path translation, binary permission
+fixups, and indexer execution all run against that distribution instead of the
+default WSL distro. WSL is reported as available only when SCIP-IO can run a
+command inside the selected/default distro, so an installed WSL executable
+without a registered runnable distro is not treated as ready. Invalid
+`.scip-io.toml` now fails status/indexing commands with a config error rather
+than silently falling back to defaults.
+
+Ruby app projects do not always include a `.gemspec`. For those projects,
+SCIP-IO supplies deterministic local `--gem-metadata <project>@0.0.0` when
+running `scip-ruby`, so application repositories can produce `ruby.scip`
+without pretending to be packaged gems.
+
+C/C++ Linux backends require a Linux-compatible `compile_commands.json`.
+SCIP-IO rejects Visual Studio or drive-letter compile commands such as
+`C:\...`, `cl.exe`, or `clang-cl.exe` before invoking `scip-clang`; generate the
+compile database inside WSL/Docker or use a matching Docker image/toolchain.
+
+### Protected indexer execution
+
+Every language indexer now runs through the same protected core runner used by
+both the CLI and GUI. SCIP-IO writes each indexer result to a temporary file
+first, normalizes document languages and repo-relative paths, compacts duplicate
+documents, occurrences, and document symbols, validates the normalized SCIP, and
+only then publishes `<language>.scip`. Failed or cancelled processes are killed
+with the parent task, stdout/stderr are captured for diagnostics, and stale
+successful outputs are left in place instead of being replaced by partial data.
+
+Shard execution is capability-gated by upstream indexer contracts:
+
+- Python uses `scip-python --target-only` shards for large trees.
+- TypeScript/JavaScript and C# keep the fast single invocation by default, then
+  retry memory failures with safe `tsconfig*`, `.sln`, `.csproj`, or `.vbproj`
+  project-argument shards. Very large discovered config lists shard up front to
+  avoid Windows command-line length limits.
+- C/C++ can split large `compile_commands.json` files into command chunks,
+  because `scip-clang` is already compile-command scoped.
+- Go, Rust, Java, Scala, and Kotlin are planned around module/build roots only
+  when the upstream indexer can safely honor that boundary; otherwise they keep
+  the protected single-run behavior.
+- Ruby currently uses protected single-run behavior because `scip-ruby` does
+  not expose a safe shard boundary in SCIP-IO.
+
 ### Large Python projects
 
 `scip-python` runs on Node.js and can exceed the default V8 heap on large
 repositories. SCIP-IO now handles that automatically: when a Python project has
-more than 750 `.py`, `.pyi`, or `.pyw` files, it runs `scip-python` sequentially
-over bounded `--target-only` shards, prefixes shard-relative document paths back
-to the repository root, and merges the shard outputs into the same `python.scip`
-callers already expect.
+more than 750 `.py`, `.pyi`, or `.pyw` files, it runs `scip-python` over bounded
+`--target-only` shards, prefixes shard-relative document paths back to the
+repository root, and merges the shard outputs into the same `python.scip`
+callers already expect. Initial shard targets may contain up to 5,000 Python
+files to avoid excessive process startup overhead. Small shards run with
+conservative bounded parallelism, while large shards run alone to keep peak
+memory predictable. Loose files inside oversized directories are packed into
+file batches so flat directories do not become thousands of one-file indexer
+starts. If a large shard still hits a heap limit, SCIP-IO recursively splits it,
+records that target as a local hint, and pre-splits the same target on later
+runs instead of repeating the expensive failed attempt. Shard timing is logged
+so large-project runs expose which targets dominate wall time. If `scip-python`
+emits an empty document path for a single-file shard, SCIP-IO rewrites it to
+that shard's repo-relative file path before merging so unrelated file facts
+cannot collapse into one empty document.
 
-If a shard still reports a heap out-of-memory failure, SCIP-IO recursively
-splits that shard and retries smaller targets. A terminal shard failure still
-fails Python indexing instead of leaving a misleading partial `python.scip`.
-Setting `NODE_OPTIONS=--max-old-space-size=...` is no longer the recommended
-path for large Python indexes; the bounded shard runner keeps peak memory lower
-for machines with less RAM.
+A terminal shard failure still fails Python indexing instead of leaving a
+misleading partial `python.scip`. Setting
+`NODE_OPTIONS=--max-old-space-size=...` is no longer the recommended path for
+large Python indexes; the bounded shard runner keeps peak memory lower for
+machines with less RAM.
 
 ### Merge
 
@@ -272,10 +351,31 @@ The CLI binary is `scip-io`; the GUI bundles as `SCIP-IO` via Tauri.
 SCIP-IO downloads and manages indexer binaries, but some indexers need a language runtime installed on your system:
 
 - **Node.js** — for `scip-typescript` and `scip-python` (both npm packages)
-- **JVM** — for `scip-java` (Scala and Java indexing)
+- **Go** — for `scip-go`
+- **JDK/JVM** — for `scip-java` (Java, Scala, and Kotlin indexing)
 - **.NET SDK** — for `scip-dotnet` (C# indexing)
 
-Other indexers (`rust-analyzer`, `scip-go`, `scip-ruby`, `scip-clang`) ship as standalone binaries and don't need extra toolchains. Run `scip-io status` to see which indexers are ready.
+SCIP-IO does not modify your persistent user or system PATH. For native
+`scip-go` and `scip-java` runs, it probes project config, current environment,
+PATH, and common install locations, then injects the discovered `bin` directory
+into only the child indexer process. `JAVA_HOME` is injected only when SCIP-IO
+has a validated Java home; PATH shims such as `java.exe` without a real JDK
+home are used as executables without guessing `JAVA_HOME`. If auto-discovery
+misses a valid install, set project-local homes in `.scip-io.toml`:
+
+```toml
+[toolchains.go]
+home = "C:\\Program Files\\Go"
+
+[toolchains.java]
+home = "C:\\Program Files\\Eclipse Adoptium\\jdk-21"
+```
+
+Other indexers (`rust-analyzer` and the non-Windows builds of
+`scip-ruby`/`scip-clang`) ship as standalone binaries. On Windows,
+`scip-ruby` and `scip-clang` require WSL or Docker because upstream does not
+publish native Windows assets. Run `scip-io status --verbose` to see native,
+backend, and toolchain readiness.
 
 ## Getting Started
 
@@ -383,8 +483,11 @@ By default, SCIP-IO indexes the primary project config for a root. Use
 `--include-additional-configs` when a repository keeps support scripts, test
 targets, or secondary build surfaces in additional config files. For TypeScript,
 SCIP-IO passes root-level `tsconfig.json` and `tsconfig.*.json` files to
-`scip-typescript` in a single invocation, with `tsconfig.json` first. For .NET, SCIP-IO passes all
-discovered `.sln`, `.csproj`, and `.vbproj` files to `scip-dotnet`.
+`scip-typescript` in a single invocation, with `tsconfig.json` first. If that
+combined run fails with a memory signature, SCIP-IO retries those configs as
+sequential project-argument shards and merges the results. For .NET, SCIP-IO
+passes all discovered `.sln`, `.csproj`, and `.vbproj` files to `scip-dotnet`
+and uses the same safe retry behavior for memory failures.
 
 ### `scip-io status`
 
@@ -396,6 +499,10 @@ scip-io status --verbose
 scip-io status --format json
 scip-io status --check-updates
 ```
+
+`--verbose` and `--format json` include toolchain preflight details for
+indexers that need a runtime, including whether Go or Java was found, where it
+was found, and which config or environment source supplied it.
 
 **Example output:**
 
@@ -514,17 +621,30 @@ Drop a `.scip-io.toml` at the root of any project to override defaults:
 # .scip-io.toml
 output = "artifacts/index.scip"
 include_additional_configs = true
+languages = ["typescript", "python"]
+
+[settings]
 parallel = 4
 timeout = 600
 
-[indexers.typescript]
+[indexer.typescript]
 binary = "/usr/local/bin/scip-typescript"   # use a custom binary
 
-[indexers.rust]
+[indexer.rust]
 args = ["scip", ".", "--exclude", "vendor"]
+
+[indexer."scip-java"]
+# Override the complete indexer command when a JVM build needs custom Gradle,
+# SBT, or Maven targets. This applies to Java, Scala, and Kotlin because all
+# three are handled by scip-java.
+args = ["index", "--output", "index.scip", "--targetroot", "/tmp/scip-java-semanticdb", "--", "--no-parallel", "clean", "scipPrintDependencies", "scipCompileAll"]
 ```
 
-All config keys can be overridden on the command line.
+Indexer override tables can be keyed by SCIP-IO language name
+(`typescript`, `python`, `kotlin`) or by indexer name (`scip-typescript`,
+`scip-java`). CLI and GUI indexing both use the same config loader and runner,
+so backend, binary, version, and args overrides apply consistently in both
+surfaces.
 
 ---
 

@@ -244,6 +244,15 @@ impl LanguageKind {
                         .to_string(),
                 ),
             ),
+            Self::Cpp if evidence_has_parent_components(evidence) => (
+                false,
+                Some(
+                    "scip-clang indexes the selected project root with compile_commands.json; \
+                     a nested compile database proves C/C++ is present but does not make \
+                     the parent root directly index-ready."
+                        .to_string(),
+                ),
+            ),
             _ => (true, None),
         }
     }
@@ -255,6 +264,10 @@ fn is_tsconfig(filename: &str) -> bool {
 
 fn evidence_file_name(evidence: &str) -> &str {
     evidence.rsplit(['/', '\\']).next().unwrap_or(evidence)
+}
+
+fn evidence_has_parent_components(evidence: &str) -> bool {
+    evidence.contains('/') || evidence.contains('\\')
 }
 
 #[cfg(test)]

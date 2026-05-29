@@ -295,6 +295,24 @@ function renderIndexerTable(container: HTMLElement): void {
         coverageLine.textContent = `Covered by ${idx.coveredBy}`;
         tdName.appendChild(coverageLine);
       }
+      if (!idx.nativeSupported && idx.backendSupport.length > 0) {
+        const backendLine = document.createElement('div');
+        backendLine.className = 'text-xs text-muted mt-xs';
+        backendLine.textContent = `${idx.backendAvailable ? 'Can run' : 'Supports'} via ${idx.backendSupport.join(' or ').toUpperCase()}`;
+        tdName.appendChild(backendLine);
+      }
+      if (idx.toolchainRequired) {
+        const toolchainLine = document.createElement('div');
+        toolchainLine.className = `text-xs mt-xs ${idx.toolchainAvailable ? 'text-muted' : 'text-warning'}`;
+        const label = idx.toolchainRequired === 'java' ? 'Java' : 'Go';
+        toolchainLine.textContent = idx.toolchainAvailable
+          ? `${label} toolchain ready`
+          : `${label} toolchain missing`;
+        if (idx.toolchainMessage) {
+          toolchainLine.title = idx.toolchainMessage;
+        }
+        tdName.appendChild(toolchainLine);
+      }
       tr.appendChild(tdName);
 
       const tdLang = document.createElement('td');
@@ -412,6 +430,7 @@ function applyProjectPath(path: string) {
   if (input) input.value = path;
   addLog('info', `Project path set to: ${path}`);
   handleDetect();
+  handleFetchIndexers();
 }
 
 async function handleDetect() {
@@ -456,17 +475,29 @@ async function handleDetect() {
 
 async function handleFetchIndexers() {
   try {
-    const result = await getIndexerStatus();
+    const result = await getIndexerStatus(store.getState().projectPath);
     const indexers = result.map((idx) => ({
       name: idx.name,
       language: idx.language,
       version: idx.version,
       installed: idx.installed,
+      nativeSupported: idx.native_supported,
+      nativeInstalled: idx.native_installed,
+      nativeUnsupportedReason: idx.native_unsupported_reason,
+      backendSupport: idx.backend_support,
+      selectedBackend: idx.selected_backend,
+      backendAvailable: idx.backend_available,
       installable: idx.installable,
       managed: idx.managed,
       installedPath: idx.installed_path,
       actionIndexer: idx.action_indexer,
       coveredBy: idx.covered_by,
+      toolchainRequired: idx.toolchain_required,
+      toolchainAvailable: idx.toolchain_available,
+      toolchainSource: idx.toolchain_source,
+      toolchainHome: idx.toolchain_home,
+      toolchainExecutable: idx.toolchain_executable,
+      toolchainMessage: idx.toolchain_message,
     }));
     store.setState({ indexers });
   } catch (err) {
@@ -476,19 +507,55 @@ async function handleFetchIndexers() {
     if (!store.getState().indexers.length) {
       store.setState({
         indexers: [
-          { name: 'scip-typescript', language: 'typescript, javascript', version: '0.4.0', installed: true, installable: true, managed: true, installedPath: null, actionIndexer: 'scip-typescript', coveredBy: null },
-          { name: 'rust-analyzer', language: 'rust', version: '2026-03-30', installed: false, installable: true, managed: false, installedPath: null, actionIndexer: 'rust-analyzer', coveredBy: null },
-          { name: 'scip-go', language: 'go', version: 'v0.1.26', installed: false, installable: true, managed: false, installedPath: null, actionIndexer: 'scip-go', coveredBy: null },
-          { name: 'scip-java', language: 'java, scala', version: 'v0.12.3', installed: false, installable: true, managed: false, installedPath: null, actionIndexer: 'scip-java', coveredBy: null },
-          { name: 'scip-python', language: 'python', version: '0.6.6', installed: true, installable: true, managed: true, installedPath: null, actionIndexer: 'scip-python', coveredBy: null },
-          { name: 'scip-dotnet', language: 'csharp', version: '0.2.13', installed: false, installable: true, managed: false, installedPath: null, actionIndexer: 'scip-dotnet', coveredBy: null },
-          { name: 'scip-ruby', language: 'ruby', version: 'v0.4.7', installed: false, installable: true, managed: false, installedPath: null, actionIndexer: 'scip-ruby', coveredBy: null },
-          { name: 'scip-kotlin', language: 'kotlin', version: '0.6.0', installed: false, installable: true, managed: false, installedPath: null, actionIndexer: 'scip-java', coveredBy: 'scip-java' },
-          { name: 'scip-clang', language: 'cpp', version: 'v0.4.0', installed: false, installable: true, managed: false, installedPath: null, actionIndexer: 'scip-clang', coveredBy: null },
+          mockIndexer('scip-typescript', 'typescript, javascript', '0.4.0', true),
+          mockIndexer('rust-analyzer', 'rust', '2026-03-30', false),
+          mockIndexer('scip-go', 'go', 'v0.1.26', false),
+          mockIndexer('scip-java', 'java, scala', 'v0.12.3', false),
+          mockIndexer('scip-python', 'python', '0.6.6', true),
+          mockIndexer('scip-dotnet', 'csharp', '0.2.13', false),
+          {
+            ...mockIndexer('scip-ruby', 'ruby', 'v0.4.7', false),
+            nativeSupported: false,
+            nativeUnsupportedReason: 'Native Windows binary unavailable',
+            backendSupport: ['wsl', 'docker'],
+          },
+          { ...mockIndexer('scip-kotlin', 'kotlin', '0.6.0', false), actionIndexer: 'scip-java', coveredBy: 'scip-java' },
+          {
+            ...mockIndexer('scip-clang', 'cpp', 'v0.4.0', false),
+            nativeSupported: false,
+            nativeUnsupportedReason: 'Native Windows binary unavailable',
+            backendSupport: ['wsl', 'docker'],
+          },
         ],
       });
     }
   }
+}
+
+function mockIndexer(name: string, language: string, version: string, installed: boolean): IndexerRow {
+  return {
+    name,
+    language,
+    version,
+    installed,
+    nativeSupported: true,
+    nativeInstalled: installed,
+    nativeUnsupportedReason: null,
+    backendSupport: [],
+    selectedBackend: 'auto',
+    backendAvailable: false,
+    installable: true,
+    managed: installed,
+    installedPath: null,
+    actionIndexer: name,
+    coveredBy: null,
+    toolchainRequired: null,
+    toolchainAvailable: null,
+    toolchainSource: null,
+    toolchainHome: null,
+    toolchainExecutable: null,
+    toolchainMessage: null,
+  };
 }
 
 function renderIndexerActionButton(idx: IndexerRow): HTMLButtonElement {
@@ -515,6 +582,9 @@ function canRunIndexerAction(idx: IndexerRow): boolean {
   if (idx.installed) {
     return idx.managed;
   }
+  if (!idx.nativeSupported) {
+    return false;
+  }
   return idx.installable;
 }
 
@@ -524,6 +594,9 @@ function getIndexerActionTitle(idx: IndexerRow): string {
   }
   if (!idx.installed && !idx.installable) {
     return 'Automatic install is not supported for this indexer.';
+  }
+  if (!idx.installed && !idx.nativeSupported) {
+    return idx.nativeUnsupportedReason || `${idx.name} has no native Windows binary. Use WSL or Docker during indexing.`;
   }
   if (idx.coveredBy) {
     return idx.installed

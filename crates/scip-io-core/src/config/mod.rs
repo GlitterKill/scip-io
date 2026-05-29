@@ -3,6 +3,9 @@ use std::path::PathBuf;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
+use crate::indexer::backend::{BackendPreference, ExecutionBackendKind};
+use crate::toolchain::ToolchainsConfig;
+
 /// Per-project configuration, loaded from `.scip-io.toml` if present.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ProjectConfig {
@@ -23,6 +26,10 @@ pub struct ProjectConfig {
     /// Global settings (parallel, timeout, cache)
     pub settings: Option<Settings>,
 
+    /// Runtime toolchain homes used to build child-process environments.
+    #[serde(default, skip_serializing_if = "ToolchainsConfig::is_empty")]
+    pub toolchains: ToolchainsConfig,
+
     /// Monorepo sub-project entries
     #[serde(default)]
     pub projects: Vec<ProjectEntry>,
@@ -32,7 +39,7 @@ pub struct ProjectConfig {
 }
 
 /// Per-language overrides for indexer config.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct IndexerOverride {
     /// Custom binary path (skip download)
     pub binary: Option<PathBuf>,
@@ -42,6 +49,12 @@ pub struct IndexerOverride {
     pub version: Option<String>,
     /// Whether this indexer is enabled (default: true)
     pub enabled: Option<bool>,
+    /// Execution backend for Linux-only indexers on Windows.
+    pub backend: Option<ExecutionBackendKind>,
+    /// Docker image to use when `backend = "docker"`.
+    pub docker_image: Option<String>,
+    /// WSL distribution to use when `backend = "wsl"`.
+    pub wsl_distro: Option<String>,
 }
 
 /// Global settings for the orchestrator.
@@ -53,6 +66,8 @@ pub struct Settings {
     pub timeout: Option<u64>,
     /// Custom cache directory for downloaded binaries
     pub cache_dir: Option<PathBuf>,
+    /// Default execution backend for Linux-only indexers on Windows.
+    pub linux_indexer_backend: Option<ExecutionBackendKind>,
 }
 
 /// A sub-project entry for monorepo support.
@@ -89,6 +104,33 @@ impl ProjectConfig {
             Ok(Self::default())
         }
     }
+
+    pub fn backend_preference_for(&self, language: &str, indexer_name: &str) -> BackendPreference {
+        let global_backend = self
+            .settings
+            .as_ref()
+            .and_then(|settings| settings.linux_indexer_backend);
+        let override_config = self
+            .indexer
+            .get(language)
+            .or_else(|| self.indexer.get(indexer_name));
+
+        BackendPreference {
+            kind: override_config
+                .and_then(|config| config.backend)
+                .or(global_backend)
+                .unwrap_or_default(),
+            docker_image: override_config.and_then(|config| config.docker_image.clone()),
+            wsl_distro: override_config.and_then(|config| config.wsl_distro.clone()),
+        }
+    }
+
+    pub fn args_override_for(&self, language: &str, indexer_name: &str) -> Option<Vec<String>> {
+        self.indexer
+            .get(language)
+            .or_else(|| self.indexer.get(indexer_name))
+            .and_then(|config| config.args.clone())
+    }
 }
 
 #[cfg(test)]
@@ -106,6 +148,7 @@ mod tests {
         assert!(config.include_additional_configs.is_none());
         assert!(config.indexer.is_empty());
         assert!(config.settings.is_none());
+        assert!(config.toolchains.is_empty());
         assert!(config.projects.is_empty());
         assert!(config.merge.is_none());
     }
@@ -176,6 +219,7 @@ mod tests {
         assert_eq!(settings.parallel, Some(8));
         assert_eq!(settings.timeout, Some(1200));
         assert!(settings.cache_dir.is_none());
+        assert!(settings.linux_indexer_backend.is_none());
     }
 
     #[test]
@@ -191,6 +235,105 @@ mod tests {
         assert_eq!(
             settings.cache_dir.unwrap(),
             PathBuf::from("/tmp/scip-io-cache")
+        );
+    }
+
+    #[test]
+    fn config_backend_fields_parse_global_and_per_indexer_preferences() {
+        let dir = TempDir::new().unwrap();
+        let config_content = r#"
+            [settings]
+            linux_indexer_backend = "auto"
+
+            [indexer.ruby]
+            backend = "wsl"
+
+            [indexer.cpp]
+            backend = "docker"
+            docker_image = "my/scip-clang-runtime:latest"
+            wsl_distro = "Ubuntu-24.04"
+        "#;
+        fs::write(dir.path().join(".scip-io.toml"), config_content).unwrap();
+
+        let config = ProjectConfig::load(dir.path()).unwrap();
+
+        assert_eq!(
+            config.settings.as_ref().unwrap().linux_indexer_backend,
+            Some(ExecutionBackendKind::Auto)
+        );
+        let ruby = config.indexer.get("ruby").unwrap();
+        assert_eq!(ruby.backend, Some(ExecutionBackendKind::Wsl));
+        let cpp = config.indexer.get("cpp").unwrap();
+        assert_eq!(cpp.backend, Some(ExecutionBackendKind::Docker));
+        assert_eq!(
+            cpp.docker_image.as_deref(),
+            Some("my/scip-clang-runtime:latest")
+        );
+        assert_eq!(cpp.wsl_distro.as_deref(), Some("Ubuntu-24.04"));
+        assert_eq!(
+            config
+                .backend_preference_for("cpp", "scip-clang")
+                .docker_image
+                .as_deref(),
+            Some("my/scip-clang-runtime:latest")
+        );
+    }
+
+    #[test]
+    fn config_args_override_can_match_language_or_indexer_name() {
+        let dir = TempDir::new().unwrap();
+        let config_content = r#"
+            [indexer.scala]
+            args = ["index", "--", "-pl", "core", "-am"]
+
+            [indexer."scip-java"]
+            args = ["index", "--build-tool", "maven"]
+        "#;
+        fs::write(dir.path().join(".scip-io.toml"), config_content).unwrap();
+
+        let config = ProjectConfig::load(dir.path()).unwrap();
+
+        assert_eq!(
+            config.args_override_for("scala", "scip-java").unwrap(),
+            vec!["index", "--", "-pl", "core", "-am"]
+        );
+        assert_eq!(
+            config.args_override_for("java", "scip-java").unwrap(),
+            vec!["index", "--build-tool", "maven"]
+        );
+    }
+
+    #[test]
+    fn config_toolchain_homes_parse_for_runtime_env_injection() {
+        let dir = TempDir::new().unwrap();
+        let config_content = r#"
+            [toolchains.go]
+            home = "C:\\Program Files\\Go"
+
+            [toolchains.java]
+            home = "C:\\Program Files\\Eclipse Adoptium\\jdk-21"
+        "#;
+        fs::write(dir.path().join(".scip-io.toml"), config_content).unwrap();
+
+        let config = ProjectConfig::load(dir.path()).unwrap();
+
+        assert_eq!(
+            config
+                .toolchains
+                .go
+                .as_ref()
+                .and_then(|config| config.home.as_ref()),
+            Some(&PathBuf::from("C:\\Program Files\\Go"))
+        );
+        assert_eq!(
+            config
+                .toolchains
+                .java
+                .as_ref()
+                .and_then(|config| config.home.as_ref()),
+            Some(&PathBuf::from(
+                "C:\\Program Files\\Eclipse Adoptium\\jdk-21"
+            ))
         );
     }
 
@@ -252,6 +395,7 @@ mod tests {
         assert!(config.output.is_none());
         assert!(config.include_additional_configs.is_none());
         assert!(config.indexer.is_empty());
+        assert!(config.toolchains.is_empty());
     }
 
     #[test]
@@ -262,6 +406,7 @@ mod tests {
         assert!(config.include_additional_configs.is_none());
         assert!(config.indexer.is_empty());
         assert!(config.settings.is_none());
+        assert!(config.toolchains.is_empty());
         assert!(config.projects.is_empty());
         assert!(config.merge.is_none());
     }
