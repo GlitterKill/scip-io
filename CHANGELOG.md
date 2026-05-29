@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.5] - 2026-05-29
+
 ### Added
 
 - Expanded language detection beyond manifest files. SCIP-IO now detects every
@@ -207,7 +209,8 @@ Initial release.
 - **One-line install scripts** for the CLI on Linux/macOS (`install.sh`) and
   Windows (`install.ps1`).
 
-[Unreleased]: https://github.com/GlitterKill/scip-io/compare/v0.1.4...HEAD
+[Unreleased]: https://github.com/GlitterKill/scip-io/compare/v0.1.5...HEAD
+[0.1.5]: https://github.com/GlitterKill/scip-io/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/GlitterKill/scip-io/compare/v0.1.3...v0.1.4
 [0.1.1]: https://github.com/GlitterKill/scip-io/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/GlitterKill/scip-io/releases/tag/v0.1.0
