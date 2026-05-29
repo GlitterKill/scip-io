@@ -947,15 +947,14 @@ mod tests {
 
     #[tokio::test]
     async fn backend_command_builder_maps_wsl_paths_without_shell_concatenation() {
-        let temp = TempDir::new().unwrap();
         let project = Path::new(r"F:\Claude\projects\space repo");
-        let output_dir = temp.path();
+        let output_dir = PathBuf::from(r"C:\Users\alice\AppData\Local\Temp\scip-io");
         let temp_output = output_dir.join("ruby.scip");
         let request = BackendExecutionRequest {
             native_binary: None,
             entry: &entry("scip-ruby"),
             project_root: project,
-            temp_dir: output_dir,
+            temp_dir: &output_dir,
             output_name: "ruby.scip",
             args: vec![
                 OsString::from("index"),

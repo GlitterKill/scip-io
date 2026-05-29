@@ -197,6 +197,16 @@ mod tests {
         (dir, project)
     }
 
+    fn assert_relative_path_components(actual: &str, expected: &[&str]) {
+        // Evidence is rendered with native path separators; comparing parsed
+        // components keeps these assertions meaningful on Windows and Unix.
+        let actual = std::path::Path::new(actual)
+            .components()
+            .map(|component| component.as_os_str().to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(actual, expected);
+    }
+
     #[test]
     fn test_detect_typescript() {
         let (_dir, project) = create_fixture_project(&["tsconfig.json", "src/index.ts"]);
@@ -372,7 +382,7 @@ mod tests {
             .find(|lang| lang.kind == LanguageKind::Cpp)
             .expect("C/C++ should be detected from nested compile_commands.json");
 
-        assert_eq!(cpp.evidence, "cmake-debug\\compile_commands.json");
+        assert_relative_path_components(&cpp.evidence, &["cmake-debug", "compile_commands.json"]);
         assert_eq!(cpp.evidence_kind, "project_config");
         assert!(!cpp.indexer_ready);
         assert!(
