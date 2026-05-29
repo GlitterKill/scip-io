@@ -784,7 +784,7 @@ mod tests {
     use super::{IndexArgs, detect_languages_for_roots, resolve_project_roots};
     use scip_io_core::LanguageKind;
     use std::fs;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use tempfile::TempDir;
 
     fn base_args() -> IndexArgs {
@@ -903,9 +903,18 @@ mod tests {
         assert_eq!(projects.len(), 1);
         assert_eq!(projects[0].languages.len(), 1);
         assert_eq!(projects[0].languages[0].kind, LanguageKind::Rust);
+        // Evidence is rendered with native path separators; compare components
+        // so this regression guard is meaningful on Windows and Unix runners.
+        let evidence = Path::new(projects[0].languages[0].evidence.as_str());
+        let expected = Path::new("deep")
+            .join("a")
+            .join("b")
+            .join("c")
+            .join("d")
+            .join("lib.rs");
         assert_eq!(
-            projects[0].languages[0].evidence,
-            "deep\\a\\b\\c\\d\\lib.rs"
+            evidence.components().collect::<Vec<_>>(),
+            expected.components().collect::<Vec<_>>()
         );
     }
 
