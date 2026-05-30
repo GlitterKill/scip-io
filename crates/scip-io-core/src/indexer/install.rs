@@ -7,6 +7,7 @@ use serde::Deserialize;
 
 use crate::indexer::version::normalize_version;
 use crate::indexer::{IndexerEntry, InstallMethod, install_dir, npm_package_dir};
+use crate::process::hidden_tokio_command;
 use crate::progress::{ProgressEvent, ProgressHandler};
 
 // ---------------------------------------------------------------------------
@@ -421,7 +422,7 @@ async fn select_github_release_asset(
 async fn latest_npm_package_version(package: &str) -> Result<String> {
     let npm = which::which("npm")
         .context("npm not found on PATH. Install Node.js to use this indexer, or install the indexer manually.")?;
-    let output = tokio::process::Command::new(&npm)
+    let output = hidden_tokio_command(&npm)
         .args(["view", package, "version", "--silent"])
         .output()
         .await
@@ -970,7 +971,7 @@ async fn install_npm(
     let pkg_spec = format!("{}@{}", package, entry.version);
     tracing::info!(%pkg_spec, "installing via npm");
 
-    let status = tokio::process::Command::new(&npm)
+    let status = hidden_tokio_command(&npm)
         .args(["install", "--prefix"])
         .arg(&prefix_dir)
         .arg(&pkg_spec)
@@ -1061,7 +1062,7 @@ async fn install_dotnet_tool(
 
     tracing::info!(package, version = %entry.version, "installing via dotnet tool");
 
-    let status = tokio::process::Command::new(&dotnet)
+    let status = hidden_tokio_command(&dotnet)
         .args(["tool", "install", "--tool-path"])
         .arg(&tool_dir)
         .arg(package)

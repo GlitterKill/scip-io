@@ -9,9 +9,10 @@ use crate::indexer::install::{
     IndexerAssetPlatform, download_github_binary_for_platform, expected_github_assets_for_platform,
 };
 use crate::indexer::install_dir;
+use crate::process::hidden_tokio_command;
 use crate::progress::NoopHandler;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum ExecutionBackendKind {
     #[default]
@@ -171,7 +172,7 @@ pub async fn probe_wsl() -> BackendProbeResult {
 }
 
 pub async fn probe_wsl_with_distro(distro: Option<&str>) -> BackendProbeResult {
-    let mut command = tokio::process::Command::new("wsl.exe");
+    let mut command = hidden_tokio_command("wsl.exe");
     command.args(wsl_probe_args(distro));
 
     match command.output().await {
@@ -187,7 +188,8 @@ pub async fn probe_wsl_with_distro(distro: Option<&str>) -> BackendProbeResult {
 }
 
 pub async fn probe_docker() -> BackendProbeResult {
-    match tokio::process::Command::new("docker")
+    let mut command = hidden_tokio_command("docker");
+    match command
         .args(["info", "--format", "{{.ServerVersion}}"])
         .output()
         .await
@@ -531,7 +533,7 @@ fn linux_asset_platform_for_host() -> IndexerAssetPlatform {
 
 async fn chmod_wsl_binary(binary_on_host: &Path, distro: Option<&str>) -> Result<()> {
     let binary = wsl_path_for_windows_path_with_distro(binary_on_host, distro).await?;
-    let mut command = tokio::process::Command::new("wsl.exe");
+    let mut command = hidden_tokio_command("wsl.exe");
     push_wsl_distro_command_args(&mut command, distro);
     let output = command
         .args(["--", "chmod", "+x", &binary])
@@ -556,7 +558,7 @@ pub async fn wsl_path_for_windows_path_with_distro(
     distro: Option<&str>,
 ) -> Result<String> {
     let wsl_input = remove_windows_extended_path_prefix(path);
-    let mut command = tokio::process::Command::new("wsl.exe");
+    let mut command = hidden_tokio_command("wsl.exe");
     push_wsl_distro_command_args(&mut command, distro);
     match command
         .args(["--", "wslpath", "-a", "-u"])

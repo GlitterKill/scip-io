@@ -15,6 +15,7 @@ use crate::indexer::IndexerEntry;
 use crate::indexer::backend::{self, BackendExecutionRequest, BackendPreference};
 use crate::indexer::planner::{self, PlannedShard};
 use crate::merge::merge_scip_files;
+use crate::process::hidden_tokio_command;
 use crate::scip_language::{
     ScipCompactionStats, compact_scip_file, normalize_path_component,
     normalize_scip_file_languages, prefix_scip_file_document_paths, publish_scip_file_atomically,
@@ -606,7 +607,7 @@ async fn run_indexer_to_temp_output_with_args(
         preference: request.backend_preference,
     })
     .await?;
-    let mut cmd = tokio::process::Command::new(&prepared.program);
+    let mut cmd = hidden_tokio_command(&prepared.program);
     if let Some(current_dir) = &prepared.current_dir {
         cmd.current_dir(current_dir);
     }
@@ -1229,7 +1230,7 @@ async fn run_python_shard(
         "running scip-python shard"
     );
 
-    let mut cmd = tokio::process::Command::new(binary);
+    let mut cmd = hidden_tokio_command(binary);
     cmd.current_dir(project_root);
     cmd.kill_on_drop(true);
     for arg in build_python_shard_args(entry, command_target, &shard_output) {

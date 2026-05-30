@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Suppressed transient Windows console windows when the GUI launches child
+  processes for indexer status checks, WSL/Docker probes, installs, indexing,
+  and output reveal actions.
+- Reused WSL/Docker backend probe results within a single GUI status refresh so
+  opening the app or selecting a folder does not relaunch the same probe for
+  every backend-capable indexer row.
+
 ## [0.1.5] - 2026-05-29
 
 ### Added

@@ -3,6 +3,7 @@ pub mod config_discovery;
 pub mod detect;
 pub mod indexer;
 pub mod merge;
+pub mod process;
 pub mod progress;
 pub mod scip_language;
 pub mod toolchain;

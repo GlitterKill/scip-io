@@ -4,16 +4,18 @@ use scip_io_core::config_discovery::{
 };
 use scip_io_core::detect::{DetectionEvidenceKind, Language, scan_languages};
 use scip_io_core::indexer::backend::{
-    BackendPreference, ExecutionBackendKind, backend_availability_for_entry_with_preference,
+    BackendPreference, BackendProbeResult, ExecutionBackendKind, probe_docker,
+    probe_wsl_with_distro,
 };
 use scip_io_core::indexer::registry::REGISTRY;
 use scip_io_core::indexer::version::version_is_newer;
 use scip_io_core::indexer::{IndexerEntry, install_dir, is_managed_install_path};
+use scip_io_core::process::hidden_std_command;
 use scip_io_core::progress::{ProgressEvent, ProgressHandler};
 use scip_io_core::toolchain::toolchain_preflight_for_indexer;
 use scip_io_core::validate::validate_scip_file;
 use serde::Serialize;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::{AppHandle, Emitter};
@@ -537,11 +539,14 @@ pub async fn cancel_indexing() -> Result<(), String> {
 pub async fn get_indexer_status(path: Option<String>) -> Result<Vec<IndexerStatusInfo>, String> {
     let config = load_config_for_optional_path(path.as_deref())?;
     let mut seen = BTreeSet::new();
+    let mut backend_probe_cache = BackendProbeCache::default();
     let mut statuses = Vec::new();
 
     for entry in REGISTRY.all() {
         if seen.insert(entry.indexer_name.clone()) {
-            statuses.push(indexer_status_for_entry(entry, &config).await);
+            statuses.push(
+                indexer_status_for_entry_cached(entry, &config, &mut backend_probe_cache).await,
+            );
         }
     }
 
@@ -927,6 +932,15 @@ async fn indexer_status_for_entry(
     entry: &IndexerEntry,
     config: &ProjectConfig,
 ) -> IndexerStatusInfo {
+    let mut backend_probe_cache = BackendProbeCache::default();
+    indexer_status_for_entry_cached(entry, config, &mut backend_probe_cache).await
+}
+
+async fn indexer_status_for_entry_cached(
+    entry: &IndexerEntry,
+    config: &ProjectConfig,
+    backend_probe_cache: &mut BackendProbeCache,
+) -> IndexerStatusInfo {
     let action_entry = REGISTRY.action_entry_for(entry).unwrap_or(entry);
     let languages = languages_for_status_entry(entry);
     let installed_path = action_entry.installed_path();
@@ -937,8 +951,9 @@ async fn indexer_status_for_entry(
         .then_some(action_entry.indexer_name.clone());
     let backend_preference =
         config.backend_preference_for(entry.language_name(), &action_entry.indexer_name);
-    let backend_probes =
-        backend_availability_for_entry_with_preference(action_entry, &backend_preference).await;
+    let backend_probes = backend_probe_cache
+        .availability_for_entry(action_entry, &backend_preference)
+        .await;
     let toolchain = toolchain_preflight_for_indexer(action_entry, &config.toolchains);
 
     IndexerStatusInfo {
@@ -984,6 +999,90 @@ async fn indexer_status_for_entry(
             .map(|path| path.to_string_lossy().to_string()),
         toolchain_message: toolchain.as_ref().map(|status| status.message.clone()),
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct BackendProbeCacheKey {
+    backend: ExecutionBackendKind,
+    // Docker availability is daemon-level in today's status model; image
+    // checks belong here only if status becomes image-specific later.
+    wsl_distro: Option<String>,
+}
+
+#[derive(Default)]
+struct BackendProbeCache {
+    results: BTreeMap<BackendProbeCacheKey, BackendProbeResult>,
+}
+
+impl BackendProbeCache {
+    async fn availability_for_entry(
+        &mut self,
+        entry: &IndexerEntry,
+        preference: &BackendPreference,
+    ) -> Vec<BackendProbeResult> {
+        // One status refresh can cover several logical languages with the same
+        // WSL/Docker backend, so probe once and share the result across rows.
+        let mut probes = Vec::new();
+        for key in backend_probe_cache_keys_for_entry(entry, preference) {
+            let result = match self.results.get(&key) {
+                Some(result) => result.clone(),
+                None => {
+                    let result = match key.backend {
+                        ExecutionBackendKind::Wsl => {
+                            probe_wsl_with_distro(key.wsl_distro.as_deref()).await
+                        }
+                        ExecutionBackendKind::Docker => probe_docker().await,
+                        _ => continue,
+                    };
+                    self.results.insert(key.clone(), result.clone());
+                    result
+                }
+            };
+            probes.push(result);
+        }
+        probes
+    }
+}
+
+fn backend_probe_cache_keys_for_entry(
+    entry: &IndexerEntry,
+    preference: &BackendPreference,
+) -> Vec<BackendProbeCacheKey> {
+    let mut keys = Vec::new();
+    if entry.backend_capabilities.supports_wsl {
+        keys.push(BackendProbeCacheKey {
+            backend: ExecutionBackendKind::Wsl,
+            wsl_distro: preference.wsl_distro.clone(),
+        });
+    }
+    if entry.backend_capabilities.supports_docker {
+        keys.push(BackendProbeCacheKey {
+            backend: ExecutionBackendKind::Docker,
+            wsl_distro: None,
+        });
+    }
+    keys
+}
+
+#[cfg(test)]
+fn backend_probe_cache_keys_for_status_refresh(
+    config: &ProjectConfig,
+) -> Vec<BackendProbeCacheKey> {
+    let mut seen = BTreeSet::new();
+    let mut keys = Vec::new();
+
+    for entry in REGISTRY.all() {
+        let action_entry = REGISTRY.action_entry_for(entry).unwrap_or(entry);
+        let backend_preference =
+            config.backend_preference_for(entry.language_name(), &action_entry.indexer_name);
+        for key in backend_probe_cache_keys_for_entry(action_entry, &backend_preference) {
+            if seen.insert(key.clone()) {
+                keys.push(key);
+            }
+        }
+    }
+
+    keys
 }
 
 fn languages_for_status_entry(entry: &IndexerEntry) -> String {
@@ -1080,6 +1179,61 @@ mod tests {
                 .language
                 .contains("scala")
         );
+    }
+
+    #[test]
+    fn status_refresh_probe_keys_are_unique_per_backend_configuration() {
+        let config = ProjectConfig::default();
+        let keys = backend_probe_cache_keys_for_status_refresh(&config);
+        let unique = keys.iter().collect::<BTreeSet<_>>();
+
+        assert_eq!(keys.len(), unique.len());
+        assert!(
+            keys.iter()
+                .any(|key| key.backend == ExecutionBackendKind::Wsl)
+        );
+        assert!(
+            keys.iter()
+                .any(|key| key.backend == ExecutionBackendKind::Docker)
+        );
+    }
+
+    #[tokio::test]
+    async fn backend_probe_cache_reuses_cached_result_without_reprobing() {
+        let docker_key = BackendProbeCacheKey {
+            backend: ExecutionBackendKind::Docker,
+            wsl_distro: None,
+        };
+        let mut cache = BackendProbeCache {
+            results: BTreeMap::from([(
+                docker_key,
+                BackendProbeResult::unavailable(ExecutionBackendKind::Docker, "cached sentinel"),
+            )]),
+        };
+        let entry = IndexerEntry {
+            indexer_name: "probe-cache-test".into(),
+            language: "test".into(),
+            github_repo: "owner/repo".into(),
+            binary_name: "probe-cache-test".into(),
+            version: "v1.0.0".into(),
+            default_args: Vec::new(),
+            output_file: "test.scip".into(),
+            install_method: scip_io_core::indexer::InstallMethod::Unsupported {
+                reason: "test".into(),
+            },
+            backend_capabilities: scip_io_core::indexer::backend::BackendCapabilities {
+                supports_wsl: false,
+                supports_docker: true,
+                native_windows_unsupported_reason: None,
+            },
+        };
+
+        let probes = cache
+            .availability_for_entry(&entry, &BackendPreference::auto())
+            .await;
+
+        assert_eq!(probes.len(), 1);
+        assert_eq!(probes[0].detail.as_deref(), Some("cached sentinel"));
     }
 
     #[tokio::test]
@@ -1272,12 +1426,12 @@ pub async fn reveal_in_explorer(path: String) -> Result<(), String> {
     {
         // On Windows, use explorer /select to highlight the file
         if p.is_file() {
-            std::process::Command::new("explorer")
+            hidden_std_command("explorer")
                 .args(["/select,", &path])
                 .spawn()
                 .map_err(|e| e.to_string())?;
         } else {
-            std::process::Command::new("explorer")
+            hidden_std_command("explorer")
                 .arg(dir)
                 .spawn()
                 .map_err(|e| e.to_string())?;
@@ -1286,7 +1440,7 @@ pub async fn reveal_in_explorer(path: String) -> Result<(), String> {
 
     #[cfg(target_os = "macos")]
     {
-        std::process::Command::new("open")
+        hidden_std_command("open")
             .arg("-R")
             .arg(&path)
             .spawn()
@@ -1295,7 +1449,7 @@ pub async fn reveal_in_explorer(path: String) -> Result<(), String> {
 
     #[cfg(target_os = "linux")]
     {
-        std::process::Command::new("xdg-open")
+        hidden_std_command("xdg-open")
             .arg(dir)
             .spawn()
             .map_err(|e| e.to_string())?;
