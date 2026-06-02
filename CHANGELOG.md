@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.7] - 2026-06-02
+
+### Added
+
+- Added automatic nested project indexing for manifest/config-bearing child
+  roots across TypeScript, JavaScript, Python, Rust, Go, Java, C#, Ruby,
+  Kotlin, C/C++ compile databases, and Scala. Parent runs now exclude those
+  nested roots and child SCIP document paths are prefixed before merge.
+- Added partial-index reporting across CLI text output, CLI JSON output, and
+  the GUI. When at least one language succeeds and another fails, SCIP-IO now
+  publishes the successful output and reports the failed language count/details
+  instead of presenting the run as a generic success or hiding usable output.
+
+### Fixed
+
+- Pruned parent SCIP documents owned by nested child roots before merging so
+  root-bound indexers do not duplicate facts that are produced by separately
+  scheduled child project runs.
+- Tightened C/C++ nested-root promotion so only `compile_commands.json` creates
+  an indexable C/C++ root; CMake, Makefile, Kbuild, and Kconfig evidence still
+  detect C/C++ but no longer imply a runnable `scip-clang` child root.
+- Improved shared TypeScript/JavaScript planning so nested TypeScript evidence
+  without explicit root configs uses the JavaScript-style `--infer-tsconfig`
+  invocation for the shared `scip-typescript` run.
+
 ## [0.1.6] - 2026-05-30
 
 ### Fixed
@@ -220,7 +245,8 @@ Initial release.
 - **One-line install scripts** for the CLI on Linux/macOS (`install.sh`) and
   Windows (`install.ps1`).
 
-[Unreleased]: https://github.com/GlitterKill/scip-io/compare/v0.1.6...HEAD
+[Unreleased]: https://github.com/GlitterKill/scip-io/compare/v0.1.7...HEAD
+[0.1.7]: https://github.com/GlitterKill/scip-io/compare/v0.1.6...v0.1.7
 [0.1.6]: https://github.com/GlitterKill/scip-io/compare/v0.1.5...v0.1.6
 [0.1.5]: https://github.com/GlitterKill/scip-io/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/GlitterKill/scip-io/compare/v0.1.3...v0.1.4
