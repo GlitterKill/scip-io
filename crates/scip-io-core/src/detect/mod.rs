@@ -107,6 +107,32 @@ pub fn discover_project_roots(root: &Path) -> Result<Vec<PathBuf>> {
     )
 }
 
+/// Discover descendant roots that contain project manifests/configs which can
+/// safely define their own indexer working directory.
+///
+/// This is narrower than [`discover_project_roots`]: it avoids build evidence
+/// such as CMake or Makefiles that prove a language exists but do not give the
+/// indexer enough information to run from that directory.
+pub fn discover_indexable_project_roots(root: &Path) -> Result<Vec<PathBuf>> {
+    let mut roots = BTreeSet::new();
+
+    for entry in walker(root, &LanguageScanOptions::default()) {
+        let entry = entry?;
+        if !entry.file_type().is_file() {
+            continue;
+        }
+
+        let file_name = entry.file_name().to_string_lossy();
+        if is_indexable_project_root_manifest(&file_name)
+            && let Some(parent) = entry.path().parent()
+        {
+            roots.insert(parent.to_path_buf());
+        }
+    }
+
+    Ok(roots.into_iter().collect())
+}
+
 /// Discover project roots with explicit scan options.
 pub fn discover_project_roots_with_options(
     root: &Path,
@@ -156,6 +182,18 @@ fn is_language_manifest(file_name: &str) -> bool {
     Language::ALL
         .iter()
         .any(|lang| lang.matches_manifest(file_name))
+}
+
+fn is_indexable_project_root_manifest(file_name: &str) -> bool {
+    Language::ALL
+        .iter()
+        .any(|lang| match lang.detect_evidence(file_name) {
+            Some(DetectionEvidenceKind::ProjectConfig) => true,
+            // `scip-java` can run from Gradle roots even though Gradle is
+            // classified as build evidence rather than project-config evidence.
+            Some(DetectionEvidenceKind::BuildFile) => *lang == languages::LanguageKind::Java,
+            _ => false,
+        })
 }
 
 fn is_hidden_or_ignored(entry: &walkdir::DirEntry) -> bool {
@@ -226,6 +264,44 @@ mod tests {
         let (_dir, project) = create_fixture_project(&["go.mod", "main.go"]);
         let langs = scan_languages(&project).unwrap();
         assert!(langs.iter().any(|l| l.kind == LanguageKind::Go));
+    }
+
+    #[test]
+    fn indexable_project_roots_cover_manifests_without_cmake_only_roots() {
+        let (_dir, project) = create_fixture_project(&[
+            "services/api/Cargo.toml",
+            "cmd/tool/go.mod",
+            "apps/web/tsconfig.json",
+            "packages/js/package.json",
+            "java/pom.xml",
+            "gradle/build.gradle",
+            "dotnet/App.csproj",
+            "gems/Gemfile",
+            "kotlin/build.gradle.kts",
+            "scala/build.sbt",
+            "native/compile_commands.json",
+            "cmake-only/CMakeLists.txt",
+        ]);
+
+        let roots = discover_indexable_project_roots(&project).unwrap();
+
+        assert_eq!(
+            roots,
+            vec![
+                project.join("apps/web"),
+                project.join("cmd/tool"),
+                project.join("dotnet"),
+                project.join("gems"),
+                project.join("gradle"),
+                project.join("java"),
+                project.join("kotlin"),
+                project.join("native"),
+                project.join("packages/js"),
+                project.join("scala"),
+                project.join("services/api"),
+            ]
+        );
+        assert!(!roots.contains(&project.join("cmake-only")));
     }
 
     #[test]

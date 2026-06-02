@@ -21,8 +21,13 @@
 1. **Detects** every supported language in your project from project config files, build files, and source files.
 2. **Installs** the latest compatible SCIP indexer binary for each language (downloading from GitHub releases, npm, `dotnet tool`, Coursier, or reusing what's already on your `PATH`).
 3. **Runs** each indexer against your project with sensible defaults.
-4. **Merges** every per-language `.scip` file into a single deterministic `index.scip`.
+4. **Merges** every successful per-language `.scip` file into a single deterministic `index.scip`.
 5. **Validates** the final index so you know it's wellformed.
+
+If one or more language indexers fail after another language succeeds, SCIP-IO
+publishes the successful output as a partial index instead of hiding it behind a
+generic success message. The CLI text output, CLI JSON output, and GUI all mark
+the result as partial and include the failed language count.
 
 It ships as both a **CLI** (`scip-io`) and a **Tauri GUI** with a dark/cyberpunk-corporate aesthetic — use whichever fits your workflow.
 
@@ -122,6 +127,18 @@ flowchart TD
     style Start fill:#0a0e1b,stroke:#00ffcc,color:#00ffcc
     style Done fill:#0a0e1b,stroke:#ff00aa,color:#ff00aa
 ```
+
+During indexing, SCIP-IO also promotes nested indexable manifests into their own
+project-root runs. This covers TypeScript, JavaScript, Python, Rust, Go, Java,
+C#, Ruby, Kotlin, C/C++ with `compile_commands.json`, and Scala project
+configs. Parent roots exclude those nested roots while scanning, so a parent
+repository does not accidentally run a root-bound indexer against a child
+project's config.
+
+C/C++ remains stricter than the other languages: `compile_commands.json` can
+define an indexable nested root, but `CMakeLists.txt`, Makefiles, Kbuild, and
+Kconfig files only prove that C/C++ exists. They do not provide enough
+information for `scip-clang` unless a compile database is present.
 
 ### Indexer installation strategy
 
@@ -229,6 +246,11 @@ only then publishes `<language>.scip`. Failed or cancelled processes are killed
 with the parent task, stdout/stderr are captured for diagnostics, and stale
 successful outputs are left in place instead of being replaced by partial data.
 
+When at least one indexer succeeds and another fails, the final output uses only
+the successful `.scip` files and is reported as partial. CLI JSON includes
+`partial`, `successful_outputs`, and `failed_languages`; the GUI completion
+screen shows the same status plus per-language failure details.
+
 Shard execution is capability-gated by upstream indexer contracts:
 
 - Python uses `scip-python --target-only` shards for large trees.
@@ -272,7 +294,14 @@ machines with less RAM.
 
 ### Merge
 
-Merging is deterministic: same inputs always produce a byte-identical `index.scip`, regardless of which order indexers finished. Overlapping documents (e.g. generated files touched by more than one indexer) are combined rather than duplicated. SCIP-IO also compacts every indexer output and final merged or copied output so duplicate `Document.relative_path` entries, duplicate occurrences, and duplicate document symbols do not reach downstream consumers.
+Merging is deterministic: same inputs always produce a byte-identical
+`index.scip`, regardless of which order indexers finished. Overlapping
+documents (e.g. generated files touched by more than one indexer) are combined
+rather than duplicated. SCIP-IO also compacts every indexer output and final
+merged or copied output so duplicate `Document.relative_path` entries, duplicate
+occurrences, and duplicate document symbols do not reach downstream consumers.
+If a run is partial, the merge uses the successful language outputs and reports
+the failed languages separately.
 
 ```mermaid
 flowchart LR
@@ -474,10 +503,13 @@ scip-io index --parallel 4 --timeout 600
 | `--all-roots`     | Auto-discover every manifest/config-bearing project root under `--path`, skipping ignored dirs |
 | `--include-additional-configs` | Include supported secondary config files in each indexer run |
 
-`--roots` and `--all-roots` index each selected project root separately and
-merge the generated `.scip` files into the requested output unless `--no-merge`
-is set. `--all-roots` scans all non-ignored descendants for known project
-config files, so use `--roots` when you want an explicit subset.
+`scip-io index` automatically indexes nested project configs from their own
+roots, then prefixes those SCIP document paths before merging. Use `--roots`
+when you want an explicit subset. Use `--all-roots` for the broader exhaustive
+mode that scans all non-ignored descendants for known manifest/config-bearing
+project roots. `--roots` and `--all-roots` index each selected project root
+separately and merge the generated `.scip` files into the requested output
+unless `--no-merge` is set.
 
 By default, SCIP-IO indexes the primary project config for a root. Use
 `--include-additional-configs` when a repository keeps support scripts, test
@@ -488,6 +520,13 @@ combined run fails with a memory signature, SCIP-IO retries those configs as
 sequential project-argument shards and merges the results. For .NET, SCIP-IO
 passes all discovered `.sln`, `.csproj`, and `.vbproj` files to `scip-dotnet`
 and uses the same safe retry behavior for memory failures.
+
+TypeScript and JavaScript share `scip-typescript`, so SCIP-IO runs one shared
+invocation when both are detected. If TypeScript evidence only appears in nested
+configs and the selected root has no explicit TypeScript configs, SCIP-IO
+prefers the JavaScript-style `--infer-tsconfig` invocation for that shared run.
+That avoids an empty root `tsconfig.json` lookup while still producing one
+combined TypeScript/JavaScript SCIP output.
 
 ### `scip-io status`
 

@@ -13,7 +13,7 @@ use scip_io_core::config_discovery::{
     supported_additional_config_languages,
 };
 use scip_io_core::detect::{
-    DetectionEvidenceKind, Language, LanguageScanOptions, discover_project_roots,
+    DetectionEvidenceKind, Language, LanguageScanOptions, discover_indexable_project_roots,
     scan_languages_with_options,
 };
 use scip_io_core::indexer::backend::{BackendPreference, ExecutionBackendKind};
@@ -22,6 +22,7 @@ use scip_io_core::indexer::{IndexerEntry, runner};
 use scip_io_core::merge::merge_scip_files_atomically;
 use scip_io_core::scip_language::{
     compact_scip_file, copy_scip_file_atomically, prefix_scip_file_document_paths,
+    prune_scip_file_document_paths_with_prefixes,
 };
 use scip_io_core::toolchain::toolchain_preflight_for_indexer;
 
@@ -35,6 +36,7 @@ struct IndexerTask {
     binary_path: Option<PathBuf>,
     project_root: PathBuf,
     additional_configs: Vec<PathBuf>,
+    owned_child_prefixes: Vec<String>,
     backend_preference: BackendPreference,
     args_override: Option<Vec<String>>,
     /// Additional detected languages whose indexing is handled by the same
@@ -47,6 +49,7 @@ struct IndexerTask {
 struct ProjectLanguages {
     root: PathBuf,
     languages: Vec<Language>,
+    owned_child_prefixes: Vec<String>,
 }
 
 /// Result of running a single indexer.
@@ -112,6 +115,7 @@ pub async fn run(args: IndexArgs) -> Result<()> {
                 binary_path,
                 project_root: project.root.clone(),
                 additional_configs: lang.additional_configs.clone(),
+                owned_child_prefixes: project.owned_child_prefixes.clone(),
                 backend_preference,
                 args_override,
                 covers: Vec::new(),
@@ -168,13 +172,17 @@ pub async fn run(args: IndexArgs) -> Result<()> {
                 .await;
                 match outcome {
                     Ok(Ok(output)) => {
-                        let outcome = prefix_output_paths_for_project_root(
-                            &output,
-                            &task.project_root,
-                            &base_path,
-                        )
-                        .and_then(|_| compact_scip_file(&output).map(|_| ()))
-                        .map(|_| output);
+                        let outcome =
+                            prune_nested_project_documents(&output, &task.owned_child_prefixes)
+                                .and_then(|_| {
+                                    prefix_output_paths_for_project_root(
+                                        &output,
+                                        &task.project_root,
+                                        &base_path,
+                                    )
+                                })
+                                .and_then(|_| compact_scip_file(&output).map(|_| ()))
+                                .map(|_| output);
                         IndexerResult {
                             lang_name,
                             covers,
@@ -264,18 +272,18 @@ pub async fn run(args: IndexArgs) -> Result<()> {
         merge_scip_files_atomically(&scip_outputs, &args.output)?;
         if !is_json {
             println!(
-                "{} Merged index written to {}",
+                "{} {}",
                 style("v").green().bold(),
-                args.output.display()
+                index_publication_message(&args.output, scip_outputs.len(), failures.len(), true)
             );
         }
     } else if scip_outputs.len() == 1 && !args.no_merge {
         copy_scip_file_atomically(&scip_outputs[0], &args.output)?;
         if !is_json {
             println!(
-                "\n{} Index written to {}",
+                "\n{} {}",
                 style("v").green().bold(),
-                args.output.display()
+                index_publication_message(&args.output, scip_outputs.len(), failures.len(), false)
             );
         }
     }
@@ -295,6 +303,9 @@ pub async fn run(args: IndexArgs) -> Result<()> {
             } else {
                 None
             },
+            "partial": !failures.is_empty(),
+            "successful_outputs": scip_outputs.len(),
+            "failed_languages": failures.len(),
             "failures": failures.iter().map(|(lang, err)| {
                 serde_json::json!({ "language": lang, "error": err })
             }).collect::<Vec<_>>(),
@@ -310,14 +321,14 @@ pub async fn run(args: IndexArgs) -> Result<()> {
         } else {
             // Partial failure — report but don't bail so merge output is kept
             eprintln!(
-                "\n{} {} of {} indexer(s) failed",
+                "\n{} Partial index: {} successful output(s), {} failed language(s)",
                 style("!").yellow().bold(),
+                scip_outputs.len(),
                 failures.len(),
-                failures.len() + scip_outputs.len(),
             );
             // Return a partial-failure error so main.rs can set exit code 1
             bail!(
-                "partial-failure: {} indexer(s) succeeded, {} failed",
+                "partial-failure: {} successful output(s), {} failed language(s)",
                 scip_outputs.len(),
                 failures.len()
             );
@@ -330,12 +341,13 @@ pub async fn run(args: IndexArgs) -> Result<()> {
 /// Resolve which project roots the index command should operate on.
 fn resolve_project_roots(args: &IndexArgs, base_path: &Path) -> Result<Vec<PathBuf>> {
     if args.all_roots {
-        let mut roots = discover_project_roots(base_path)?;
+        let mut roots = discover_indexable_project_roots(base_path)?;
         if args.include_additional_configs && has_allowed_additional_config_language(args) {
             roots.extend(discover_additional_config_roots(base_path)?);
             roots.sort();
             roots.dedup();
         }
+        roots = filter_project_roots_by_language(args, roots)?;
         if roots.is_empty() {
             bail!(
                 "No language config roots found under {}",
@@ -374,51 +386,61 @@ fn resolve_project_roots(args: &IndexArgs, base_path: &Path) -> Result<Vec<PathB
         return Ok(roots);
     }
 
-    Ok(vec![base_path.to_path_buf()])
+    let mut roots = vec![base_path.to_path_buf()];
+    roots.extend(
+        discover_indexable_project_roots(base_path)?
+            .into_iter()
+            .filter(|root| root != base_path),
+    );
+    roots.sort();
+    roots.dedup();
+    Ok(roots)
 }
 
 fn detect_languages_for_roots(
     args: &IndexArgs,
     project_roots: &[PathBuf],
 ) -> Result<Vec<ProjectLanguages>> {
-    project_roots
-        .iter()
-        .map(|root| {
-            let excluded_roots = if args.all_roots {
-                project_roots
-                    .iter()
-                    .filter(|candidate| *candidate != root && candidate.starts_with(root))
-                    .cloned()
-                    .collect()
-            } else {
-                Vec::new()
-            };
-            let detected = scan_languages_with_options(
-                root,
-                LanguageScanOptions {
-                    max_depth: None,
-                    excluded_roots,
-                },
-            )?;
-            let languages = if args.lang.is_empty() {
-                detected
-            } else {
-                detected
-                    .into_iter()
-                    .filter(|l| {
-                        args.lang
-                            .iter()
-                            .any(|name| name.eq_ignore_ascii_case(l.name()))
-                    })
-                    .collect()
-            };
-            let languages = add_additional_configs_if_requested(args, root, languages)?;
-            Ok(ProjectLanguages {
-                root: root.clone(),
-                languages,
-            })
-        })
-        .collect()
+    let mut projects = Vec::new();
+
+    for root in project_roots {
+        let excluded_roots: Vec<PathBuf> = project_roots
+            .iter()
+            .filter(|candidate| *candidate != root && candidate.starts_with(root))
+            .cloned()
+            .collect();
+        let owned_child_prefixes = child_prefixes_for_project_root(root, &excluded_roots);
+        let detected = scan_languages_with_options(
+            root,
+            LanguageScanOptions {
+                max_depth: None,
+                excluded_roots,
+            },
+        )?;
+        let languages = if args.lang.is_empty() {
+            detected
+        } else {
+            detected
+                .into_iter()
+                .filter(|l| {
+                    args.lang
+                        .iter()
+                        .any(|name| name.eq_ignore_ascii_case(l.name()))
+                })
+                .collect()
+        };
+        let languages = add_additional_configs_if_requested(args, root, languages)?;
+        if languages.is_empty() {
+            continue;
+        }
+        projects.push(ProjectLanguages {
+            root: root.clone(),
+            languages,
+            owned_child_prefixes,
+        });
+    }
+
+    Ok(projects)
 }
 
 fn add_additional_configs_if_requested(
@@ -436,6 +458,30 @@ fn add_additional_configs_if_requested(
     add_languages_from_additional_configs(args, root, &mut languages)?;
 
     Ok(languages)
+}
+
+fn filter_project_roots_by_language(args: &IndexArgs, roots: Vec<PathBuf>) -> Result<Vec<PathBuf>> {
+    if args.lang.is_empty() {
+        return Ok(roots);
+    }
+
+    let mut filtered = Vec::new();
+    for root in roots {
+        let detected = scan_languages_with_options(
+            &root,
+            LanguageScanOptions {
+                max_depth: Some(1),
+                excluded_roots: Vec::new(),
+            },
+        )?;
+        if detected
+            .iter()
+            .any(|language| language_filter_allows(args, language.kind))
+        {
+            filtered.push(root);
+        }
+    }
+    Ok(filtered)
 }
 
 fn add_languages_from_additional_configs(
@@ -461,6 +507,28 @@ fn add_languages_from_additional_configs(
         }
     }
 
+    Ok(())
+}
+
+fn child_prefixes_for_project_root(root: &Path, child_roots: &[PathBuf]) -> Vec<String> {
+    let mut prefixes = child_roots
+        .iter()
+        .filter_map(|child_root| child_root.strip_prefix(root).ok())
+        .filter(|relative| !relative.as_os_str().is_empty())
+        .map(|relative| relative.to_string_lossy().replace('\\', "/"))
+        .collect::<Vec<_>>();
+    prefixes.sort();
+    prefixes.dedup();
+    prefixes
+}
+
+fn prune_nested_project_documents(output: &Path, child_prefixes: &[String]) -> Result<()> {
+    let stats = prune_scip_file_document_paths_with_prefixes(output, child_prefixes)?;
+    if stats.documents_before > 0 && stats.documents_after == 0 {
+        bail!(
+            "SCIP output contains no documents owned by this project root after excluding nested roots"
+        );
+    }
     Ok(())
 }
 
@@ -528,6 +596,28 @@ fn unique_language_names(projects: &[ProjectLanguages]) -> Vec<&'static str> {
         }
     }
     seen.into_iter().collect()
+}
+
+fn index_publication_message(
+    output: &Path,
+    successful_outputs: usize,
+    failed_languages: usize,
+    merged: bool,
+) -> String {
+    let label = match (failed_languages > 0, merged) {
+        (true, true) => "Partial merged index",
+        (true, false) => "Partial index",
+        (false, true) => "Merged index",
+        (false, false) => "Index",
+    };
+    let mut message = format!("{label} written to {}", output.display());
+    if failed_languages > 0 {
+        message.push_str(&format!(
+            " ({} successful output(s), {} failed language(s))",
+            successful_outputs, failed_languages
+        ));
+    }
+    message
 }
 
 fn prefix_output_paths_for_project_root(
@@ -746,14 +836,17 @@ fn dedupe_tasks_by_indexer(tasks: Vec<IndexerTask>, is_json: bool) -> Vec<Indexe
             continue;
         }
 
-        // Pick the primary: prefer args without `--infer-tsconfig`,
-        // then fall back to lexicographic language name for determinism.
+        let needs_infer_tsconfig = group.iter().any(|task| {
+            is_nested_typescript_without_explicit_configs(&task.lang, &task.additional_configs)
+        });
+
+        // Pick the primary: nested TypeScript evidence needs the
+        // `--infer-tsconfig` invocation because the plain command only looks
+        // for a root tsconfig.json. Otherwise prefer the cleaner non-infer
+        // invocation, then fall back to language name for determinism.
         group.sort_by(|a, b| {
-            let a_infer = a.entry.default_args.iter().any(|x| x == "--infer-tsconfig");
-            let b_infer = b.entry.default_args.iter().any(|x| x == "--infer-tsconfig");
-            a_infer
-                .cmp(&b_infer)
-                .then_with(|| a.lang.name().cmp(b.lang.name()))
+            shared_indexer_task_sort_key(a, needs_infer_tsconfig)
+                .cmp(&shared_indexer_task_sort_key(b, needs_infer_tsconfig))
         });
 
         let mut iter = group.into_iter();
@@ -779,10 +872,43 @@ fn dedupe_tasks_by_indexer(tasks: Vec<IndexerTask>, is_json: bool) -> Vec<Indexe
 
     out
 }
+
+fn shared_indexer_task_sort_key(
+    task: &IndexerTask,
+    needs_infer_tsconfig: bool,
+) -> (bool, bool, &str) {
+    let uses_infer_tsconfig = uses_infer_tsconfig(task.entry);
+    (
+        needs_infer_tsconfig && !uses_infer_tsconfig,
+        !needs_infer_tsconfig && uses_infer_tsconfig,
+        task.lang.name(),
+    )
+}
+
+fn uses_infer_tsconfig(entry: &IndexerEntry) -> bool {
+    entry
+        .default_args
+        .iter()
+        .any(|arg| arg == "--infer-tsconfig")
+}
+
+fn is_nested_typescript_without_explicit_configs(
+    lang: &Language,
+    additional_configs: &[PathBuf],
+) -> bool {
+    lang.kind == scip_io_core::detect::languages::LanguageKind::TypeScript
+        && additional_configs.is_empty()
+        && lang.evidence.contains(['/', '\\'])
+}
 #[cfg(test)]
 mod tests {
-    use super::{IndexArgs, detect_languages_for_roots, resolve_project_roots};
+    use super::{
+        IndexArgs, IndexerTask, dedupe_tasks_by_indexer, detect_languages_for_roots,
+        index_publication_message, resolve_project_roots,
+    };
     use scip_io_core::LanguageKind;
+    use scip_io_core::indexer::backend::BackendPreference;
+    use scip_io_core::indexer::registry::REGISTRY;
     use std::fs;
     use std::path::{Path, PathBuf};
     use tempfile::TempDir;
@@ -833,15 +959,133 @@ mod tests {
 
     #[test]
     fn resolve_project_roots_discovers_all_manifest_roots() {
-        let (_dir, root) = fixture(&["services/api/Cargo.toml", "packages/web/package.json"]);
+        let (_dir, root) = fixture(&[
+            "services/api/Cargo.toml",
+            "packages/web/package.json",
+            "native/compile_commands.json",
+            "cmake-only/CMakeLists.txt",
+        ]);
         let mut args = base_args();
         args.all_roots = true;
 
         let roots = resolve_project_roots(&args, &root).unwrap();
         assert_eq!(
             roots,
-            vec![root.join("packages/web"), root.join("services/api")]
+            vec![
+                root.join("native"),
+                root.join("packages/web"),
+                root.join("services/api")
+            ]
         );
+        assert!(!roots.contains(&root.join("cmake-only")));
+    }
+
+    #[test]
+    fn default_project_roots_include_nested_indexable_configs_across_languages() {
+        let (_dir, root) = fixture(&[
+            "src/root.py",
+            "services/api/Cargo.toml",
+            "cmd/tool/go.mod",
+            "apps/web/tsconfig.json",
+            "packages/js/package.json",
+            "java/pom.xml",
+            "gradle/build.gradle",
+            "dotnet/App.csproj",
+            "gems/Gemfile",
+            "kotlin/build.gradle.kts",
+            "scala/build.sbt",
+            "native/compile_commands.json",
+            "cmake-only/CMakeLists.txt",
+        ]);
+        let args = base_args();
+
+        let roots = resolve_project_roots(&args, &root).unwrap();
+
+        assert_eq!(
+            roots,
+            vec![
+                root.clone(),
+                root.join("apps/web"),
+                root.join("cmd/tool"),
+                root.join("dotnet"),
+                root.join("gems"),
+                root.join("gradle"),
+                root.join("java"),
+                root.join("kotlin"),
+                root.join("native"),
+                root.join("packages/js"),
+                root.join("scala"),
+                root.join("services/api"),
+            ]
+        );
+        assert!(!roots.contains(&root.join("cmake-only")));
+    }
+
+    #[test]
+    fn default_detection_excludes_nested_config_roots_from_parent_project() {
+        let (_dir, root) = fixture(&[
+            "src/root.py",
+            "services/api/Cargo.toml",
+            "services/api/src/main.rs",
+            "apps/web/tsconfig.json",
+            "apps/web/src/main.ts",
+        ]);
+        let args = base_args();
+
+        let roots = resolve_project_roots(&args, &root).unwrap();
+        let projects = detect_languages_for_roots(&args, &roots).unwrap();
+
+        let root_project = projects
+            .iter()
+            .find(|project| project.root == root)
+            .expect("root project");
+        assert_eq!(root_project.languages.len(), 1);
+        assert_eq!(root_project.languages[0].kind, LanguageKind::Python);
+
+        let api_project = projects
+            .iter()
+            .find(|project| project.root == root.join("services/api"))
+            .expect("api project");
+        assert_eq!(api_project.languages.len(), 1);
+        assert_eq!(api_project.languages[0].kind, LanguageKind::Rust);
+        assert_eq!(api_project.languages[0].evidence, "Cargo.toml");
+
+        let web_project = projects
+            .iter()
+            .find(|project| project.root == root.join("apps/web"))
+            .expect("web project");
+        assert_eq!(web_project.languages.len(), 1);
+        assert_eq!(web_project.languages[0].kind, LanguageKind::TypeScript);
+        assert_eq!(web_project.languages[0].evidence, "tsconfig.json");
+    }
+
+    #[test]
+    fn default_detection_assigns_child_prefixes_to_parent_project() {
+        let (_dir, root) = fixture(&[
+            "package.json",
+            "src/root.js",
+            "packages/web/package.json",
+            "packages/web/src/index.js",
+        ]);
+        let args = base_args();
+
+        let roots = resolve_project_roots(&args, &root).unwrap();
+        let projects = detect_languages_for_roots(&args, &roots).unwrap();
+
+        let root_project = projects
+            .iter()
+            .find(|project| project.root == root)
+            .expect("root project");
+        assert_eq!(
+            root_project.owned_child_prefixes,
+            vec!["packages/web".to_string()]
+        );
+
+        let web_project = projects
+            .iter()
+            .find(|project| project.root == root.join("packages/web"))
+            .expect("web project");
+        assert!(web_project.owned_child_prefixes.is_empty());
     }
 
     #[test]
@@ -916,6 +1160,77 @@ mod tests {
             evidence.components().collect::<Vec<_>>(),
             expected.components().collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn nested_typescript_project_prefers_infer_tsconfig_shared_run() {
+        let (_dir, root) = fixture(&[
+            "tools/vscode/tsconfig.json",
+            "tools/vscode/src/extension.ts",
+            "tools/tree-sitter/package.json",
+            "tools/tree-sitter/grammar.js",
+        ]);
+        let typescript = LanguageKind::TypeScript.with_evidence(
+            Path::new("tools")
+                .join("vscode")
+                .join("tsconfig.json")
+                .to_string_lossy()
+                .into_owned(),
+        );
+        let javascript = LanguageKind::JavaScript.with_evidence(
+            Path::new("tools")
+                .join("tree-sitter")
+                .join("package.json")
+                .to_string_lossy()
+                .into_owned(),
+        );
+
+        let tasks = vec![
+            IndexerTask {
+                entry: REGISTRY.runnable_for(&typescript).unwrap(),
+                lang: typescript,
+                binary_path: None,
+                project_root: root.clone(),
+                additional_configs: Vec::new(),
+                owned_child_prefixes: Vec::new(),
+                backend_preference: BackendPreference::auto(),
+                args_override: None,
+                covers: Vec::new(),
+            },
+            IndexerTask {
+                entry: REGISTRY.runnable_for(&javascript).unwrap(),
+                lang: javascript,
+                binary_path: None,
+                project_root: root,
+                additional_configs: Vec::new(),
+                owned_child_prefixes: Vec::new(),
+                backend_preference: BackendPreference::auto(),
+                args_override: None,
+                covers: Vec::new(),
+            },
+        ];
+
+        let deduped = dedupe_tasks_by_indexer(tasks, true);
+
+        assert_eq!(deduped.len(), 1);
+        assert_eq!(deduped[0].lang.kind, LanguageKind::JavaScript);
+        assert!(
+            deduped[0]
+                .entry
+                .default_args
+                .iter()
+                .any(|arg| arg == "--infer-tsconfig")
+        );
+        assert_eq!(deduped[0].covers, vec!["typescript".to_string()]);
+    }
+
+    #[test]
+    fn publication_message_marks_single_output_with_failures_as_partial() {
+        let message = index_publication_message(Path::new("index.scip"), 1, 3, false);
+
+        assert!(message.contains("Partial index written to index.scip"));
+        assert!(message.contains("1 successful output"));
+        assert!(message.contains("3 failed language(s)"));
     }
 
     #[test]

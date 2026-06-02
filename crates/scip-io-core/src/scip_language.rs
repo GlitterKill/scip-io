@@ -34,6 +34,13 @@ pub struct ScipPublishStats {
     pub compaction: ScipCompactionStats,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ScipDocumentPruneStats {
+    pub documents_before: usize,
+    pub documents_after: usize,
+    pub removed_documents: usize,
+}
+
 /// Return SCIP's canonical language name when the input is one SCIP-IO supports.
 pub fn normalize_language_name(raw: &str) -> Option<&'static str> {
     match raw.trim().to_ascii_lowercase().as_str() {
@@ -477,6 +484,59 @@ pub fn prefix_scip_file_document_paths(path: &Path, prefix: &str) -> Result<usiz
     Ok(updated)
 }
 
+/// Remove documents whose paths belong to child project roots.
+///
+/// Parent project indexers can auto-discover nested projects even when SCIP-IO
+/// schedules those child projects as separate roots. Pruning by path ownership
+/// keeps the child root authoritative and avoids duplicate facts in the merged
+/// output without relying on indexer-specific exclusion flags.
+pub fn prune_scip_file_document_paths_with_prefixes(
+    path: &Path,
+    prefixes: &[String],
+) -> Result<ScipDocumentPruneStats> {
+    let prefixes = prefixes
+        .iter()
+        .map(|prefix| normalize_path_component(prefix))
+        .filter(|prefix| !prefix.is_empty())
+        .collect::<Vec<_>>();
+    if prefixes.is_empty() {
+        return Ok(ScipDocumentPruneStats::default());
+    }
+
+    let bytes =
+        std::fs::read(path).with_context(|| format!("Failed to read {}", path.display()))?;
+    let mut index = Index::parse_from_bytes(&bytes)
+        .with_context(|| format!("Failed to parse SCIP index from {}", path.display()))?;
+
+    let documents_before = index.documents.len();
+    index.documents.retain(|document| {
+        let relative_path = normalize_path_component(&document.relative_path);
+        !prefixes.iter().any(|prefix| {
+            relative_path == *prefix || relative_path.starts_with(&format!("{prefix}/"))
+        })
+    });
+    let documents_after = index.documents.len();
+    let removed_documents = documents_before.saturating_sub(documents_after);
+    if removed_documents == 0 {
+        return Ok(ScipDocumentPruneStats {
+            documents_before,
+            documents_after,
+            removed_documents,
+        });
+    }
+
+    let bytes = index
+        .write_to_bytes()
+        .context("Failed to serialize pruned SCIP index")?;
+    std::fs::write(path, bytes).with_context(|| format!("Failed to write {}", path.display()))?;
+
+    Ok(ScipDocumentPruneStats {
+        documents_before,
+        documents_after,
+        removed_documents,
+    })
+}
+
 /// Rewrite empty document paths when an indexer reports facts for a known
 /// single-file target without naming the target in `Document.relative_path`.
 pub fn replace_empty_scip_document_paths(path: &Path, replacement: &str) -> Result<usize> {
@@ -759,6 +819,41 @@ mod tests {
             normalized.documents[0].relative_path,
             "services/api/src/main.rs"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn prunes_scip_document_paths_owned_by_child_roots() -> Result<()> {
+        let mut index = Index::new();
+        for path in [
+            "src/root.py",
+            "services/api/src/main.rs",
+            "services/api-extra/src/main.rs",
+            "packages/web/src/index.ts",
+        ] {
+            let mut doc = Document::new();
+            doc.relative_path = path.into();
+            index.documents.push(doc);
+        }
+
+        let file = NamedTempFile::new()?;
+        std::fs::write(file.path(), index.write_to_bytes()?)?;
+
+        let stats = prune_scip_file_document_paths_with_prefixes(
+            file.path(),
+            &["services/api".to_string(), "packages/web".to_string()],
+        )?;
+        let pruned = Index::parse_from_bytes(&std::fs::read(file.path())?)?;
+        let paths = pruned
+            .documents
+            .iter()
+            .map(|document| document.relative_path.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(stats.documents_before, 4);
+        assert_eq!(stats.documents_after, 2);
+        assert_eq!(stats.removed_documents, 2);
+        assert_eq!(paths, vec!["src/root.py", "services/api-extra/src/main.rs"]);
         Ok(())
     }
 

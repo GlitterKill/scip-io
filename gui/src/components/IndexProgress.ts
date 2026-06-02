@@ -359,6 +359,8 @@ function handleProgressEvent(event: Record<string, unknown>) {
   }
 
   if (kind === 'indexing_complete') {
+    const partial = Boolean(event.partial);
+    const failedLanguages = (event.failed_languages as number) || 0;
     store.setState({
       isIndexing: false,
       pipelineStep: 'done',
@@ -370,9 +372,17 @@ function handleProgressEvent(event: Record<string, unknown>) {
         totalDuration: (event.total_duration as number) || 0,
         languages: (event.languages as IndexingResult['languages']) || [],
         outputSize: (event.output_size as number) || 0,
+        partial,
+        successfulLanguages: (event.successful_languages as number) || 0,
+        failedLanguages,
+        failures: (event.failures as IndexingResult['failures']) || [],
       },
     });
-    addLog('success', 'Indexing complete!');
+    if (partial) {
+      addLog('warning', `Partial index generated: ${failedLanguages} language(s) failed.`);
+    } else {
+      addLog('success', 'Indexing complete!');
+    }
   }
 
   if (kind === 'log') {
@@ -452,6 +462,10 @@ function simulateProgress() {
             duration: 3200 + idx * 800,
           })),
           outputSize: 524288,
+          partial: false,
+          successfulLanguages: selectedLangs.length,
+          failedLanguages: 0,
+          failures: [],
         },
       });
       addLog('success', '[sim] Indexing complete!');

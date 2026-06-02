@@ -11,10 +11,15 @@ export function renderResults(container: HTMLElement): void {
   // Header
   const header = document.createElement('div');
   header.className = 'flex items-center justify-between mb-lg animate-fade-in';
+  const title = results?.partial ? 'Indexing Partially Complete' : 'Indexing Complete';
+  const titleClass = results?.partial ? 'text-warning' : 'text-success';
+  const subtitle = results?.partial
+    ? 'A partial SCIP index was generated from the languages that completed.'
+    : 'Your SCIP index has been generated successfully.';
   header.innerHTML = `
     <div>
-      <h2 class="text-xl text-success">Indexing Complete</h2>
-      <p class="text-sm text-secondary mt-xs">Your SCIP index has been generated successfully.</p>
+      <h2 class="text-xl ${titleClass}">${title}</h2>
+      <p class="text-sm text-secondary mt-xs">${subtitle}</p>
     </div>
   `;
   wrapper.appendChild(header);
@@ -32,6 +37,10 @@ export function renderResults(container: HTMLElement): void {
     wrapper.appendChild(empty);
     wrapper.appendChild(renderBackButton());
     return;
+  }
+
+  if (results.partial) {
+    wrapper.appendChild(renderPartialWarning(results));
   }
 
   // Summary stats
@@ -93,6 +102,37 @@ function renderSummaryStats(results: NonNullable<ReturnType<typeof store.getStat
     `;
     panel.appendChild(sizeInfo);
   }
+
+  return panel;
+}
+
+function renderPartialWarning(results: NonNullable<ReturnType<typeof store.getState>['results']>): HTMLElement {
+  const panel = document.createElement('div');
+  panel.className = 'panel animate-fade-in';
+  panel.style.borderColor = 'var(--color-warning)';
+
+  const failures = results.failures || [];
+  const rows = failures
+    .map(
+      (failure) => `
+        <div class="flex items-start justify-between gap-md py-xs">
+          <span class="text-warning font-medium">${escapeHtml(failure.language)}</span>
+          <span class="text-sm text-secondary">${escapeHtml(failure.error)}</span>
+        </div>
+      `
+    )
+    .join('');
+
+  panel.innerHTML = `
+    <div class="section-header">
+      <span class="section-header__title text-warning">Partial Output</span>
+      <div class="section-header__line"></div>
+    </div>
+    <div class="text-sm text-secondary mb-md">
+      ${results.successfulLanguages.toLocaleString()} language(s) succeeded; ${results.failedLanguages.toLocaleString()} language(s) failed.
+    </div>
+    <div class="flex flex-col gap-xs">${rows}</div>
+  `;
 
   return panel;
 }

@@ -53,6 +53,13 @@ export interface IndexingResult {
     duration: number;
   }>;
   outputSize: number;
+  partial: boolean;
+  successfulLanguages: number;
+  failedLanguages: number;
+  failures: Array<{
+    language: string;
+    error: string;
+  }>;
 }
 
 export interface AppState {
