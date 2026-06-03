@@ -2,6 +2,8 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
+use std::fmt;
+use std::str::FromStr;
 
 use crate::indexer::backend::{BackendPreference, ExecutionBackendKind};
 use crate::toolchain::ToolchainsConfig;
@@ -18,6 +20,10 @@ pub struct ProjectConfig {
 
     /// Include supported secondary config files during indexing
     pub include_additional_configs: Option<bool>,
+
+    /// Controls whether indexing is scoped to the selected repository tree or
+    /// to discovered language config/build roots.
+    pub scope: Option<IndexScope>,
 
     /// Per-language indexer overrides
     #[serde(default)]
@@ -36,6 +42,42 @@ pub struct ProjectConfig {
 
     /// Merge configuration
     pub merge: Option<MergeConfig>,
+}
+
+/// Root selection mode for indexing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum IndexScope {
+    /// Index from the selected repository root and let each upstream indexer
+    /// decide what it can cover within that tree.
+    #[default]
+    RepoTree,
+    /// Preserve the legacy behavior: schedule discovered config/build roots as
+    /// separate indexing runs and prune nested output ownership.
+    Configs,
+}
+
+impl fmt::Display for IndexScope {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::RepoTree => "repo-tree",
+            Self::Configs => "configs",
+        })
+    }
+}
+
+impl FromStr for IndexScope {
+    type Err = String;
+
+    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
+        match value {
+            "repo-tree" | "repo_tree" | "repo" => Ok(Self::RepoTree),
+            "configs" | "config" | "legacy" => Ok(Self::Configs),
+            _ => Err(format!(
+                "invalid index scope '{value}', expected 'repo-tree' or 'configs'"
+            )),
+        }
+    }
 }
 
 /// Per-language overrides for indexer config.
@@ -160,12 +202,24 @@ mod tests {
             languages = ["typescript", "python"]
             output = "build/index.scip"
             include_additional_configs = true
+            scope = "configs"
         "#;
         fs::write(dir.path().join(".scip-io.toml"), config_content).unwrap();
         let config = ProjectConfig::load(dir.path()).unwrap();
         assert_eq!(config.languages, vec!["typescript", "python"]);
         assert_eq!(config.output.unwrap(), PathBuf::from("build/index.scip"));
         assert_eq!(config.include_additional_configs, Some(true));
+        assert_eq!(config.scope, Some(IndexScope::Configs));
+    }
+
+    #[test]
+    fn test_load_config_with_repo_tree_scope() {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join(".scip-io.toml"), r#"scope = "repo-tree""#).unwrap();
+
+        let config = ProjectConfig::load(dir.path()).unwrap();
+
+        assert_eq!(config.scope, Some(IndexScope::RepoTree));
     }
 
     #[test]

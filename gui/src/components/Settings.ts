@@ -117,6 +117,18 @@ function renderGeneralSettings(): HTMLElement {
   `;
   grid.appendChild(configsField);
 
+  const scopeField = document.createElement('div');
+  scopeField.className = 'form-field';
+  scopeField.innerHTML = `
+    <label class="form-label" for="setting-scope">Index Scope</label>
+    <select class="input" id="setting-scope">
+      <option value="repo-tree" ${settings.scope === 'repo-tree' ? 'selected' : ''}>Repo tree</option>
+      <option value="configs" ${settings.scope === 'configs' ? 'selected' : ''}>Configs</option>
+    </select>
+    <span class="form-hint">Choose default root scheduling</span>
+  `;
+  grid.appendChild(scopeField);
+
   // Timeout
   const timeoutField = document.createElement('div');
   timeoutField.className = 'form-field';
@@ -431,6 +443,10 @@ async function loadConfig() {
             typeof c.include_additional_configs === 'boolean'
               ? c.include_additional_configs
               : current.includeAdditionalConfigs,
+          scope:
+            c.scope === 'configs' || c.scope === 'repo-tree'
+              ? c.scope
+              : current.scope,
           goHome: typeof goConfig.home === 'string' ? goConfig.home : current.goHome,
           javaHome: typeof javaConfig.home === 'string' ? javaConfig.home : current.javaHome,
         },
@@ -462,6 +478,7 @@ async function handleSave() {
   // Read current form values
   const timeoutInput = document.getElementById('setting-timeout') as HTMLInputElement | null;
   const outputInput = document.getElementById('setting-output') as HTMLInputElement | null;
+  const scopeSelect = document.getElementById('setting-scope') as HTMLSelectElement | null;
   const cacheInput = document.getElementById('setting-cache-dir') as HTMLInputElement | null;
   const goHomeInput = document.getElementById('setting-go-home') as HTMLInputElement | null;
   const javaHomeInput = document.getElementById('setting-java-home') as HTMLInputElement | null;
@@ -472,6 +489,10 @@ async function handleSave() {
     timeout: timeoutInput ? parseInt(timeoutInput.value, 10) || 300 : current.timeout,
     outputFile: outputInput ? outputInput.value || 'index.scip' : current.outputFile,
     cacheDir: cacheInput ? cacheInput.value : current.cacheDir,
+    scope:
+      scopeSelect && (scopeSelect.value === 'configs' || scopeSelect.value === 'repo-tree')
+        ? scopeSelect.value
+        : current.scope,
     includeAdditionalConfigs: current.includeAdditionalConfigs,
     goHome: goHomeInput ? goHomeInput.value : current.goHome,
     javaHome: javaHomeInput ? javaHomeInput.value : current.javaHome,
@@ -482,6 +503,7 @@ async function handleSave() {
   // Build config object for the backend
   const config = {
     output: settings.outputFile,
+    scope: settings.scope,
     include_additional_configs: settings.includeAdditionalConfigs,
     settings: {
       parallel: settings.parallel ? 4 : 1,
@@ -526,6 +548,7 @@ function handleReset() {
       timeout: 300,
       outputFile: 'index.scip',
       cacheDir: '',
+      scope: 'repo-tree',
       includeAdditionalConfigs: false,
       goHome: '',
       javaHome: '',
@@ -545,6 +568,7 @@ function handleReset() {
   // Update form fields
   const timeoutInput = document.getElementById('setting-timeout') as HTMLInputElement | null;
   const outputInput = document.getElementById('setting-output') as HTMLInputElement | null;
+  const scopeSelect = document.getElementById('setting-scope') as HTMLSelectElement | null;
   const cacheInput = document.getElementById('setting-cache-dir') as HTMLInputElement | null;
   const goHomeInput = document.getElementById('setting-go-home') as HTMLInputElement | null;
   const javaHomeInput = document.getElementById('setting-java-home') as HTMLInputElement | null;
@@ -553,6 +577,7 @@ function handleReset() {
 
   if (timeoutInput) timeoutInput.value = '300';
   if (outputInput) outputInput.value = 'index.scip';
+  if (scopeSelect) scopeSelect.value = 'repo-tree';
   if (cacheInput) cacheInput.value = '';
   if (goHomeInput) goHomeInput.value = '';
   if (javaHomeInput) javaHomeInput.value = '';

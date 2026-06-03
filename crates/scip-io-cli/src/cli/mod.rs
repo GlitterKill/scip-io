@@ -13,6 +13,7 @@ pub mod validate;
 
 use anyhow::{Result, anyhow};
 use clap::{Parser, Subcommand};
+use scip_io_core::config::IndexScope;
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -112,6 +113,10 @@ pub struct IndexArgs {
     /// Discover and index all sub-project roots in a monorepo
     #[arg(long, conflicts_with = "roots")]
     pub all_roots: bool,
+
+    /// Indexing scope: repo-tree (default) or configs
+    #[arg(long)]
+    pub scope: Option<IndexScope>,
 
     /// Include extra language config files supported by each indexer
     #[arg(long)]

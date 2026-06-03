@@ -1,6 +1,6 @@
 use std::collections::{HashSet, VecDeque};
 use std::ffi::OsString;
-use std::io::ErrorKind;
+use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitStatus;
 use std::time::{Duration, Instant};
@@ -546,13 +546,29 @@ async fn run_indexer_to_temp_output(
     request: TempOutputRequest<'_>,
 ) -> Result<ProtectedIndexerOutput> {
     let temp_output = request.temp_dir.join(request.output_name);
+    let generated_javascript_config = if should_generate_javascript_project_config(
+        request.entry,
+        request.lang,
+        request.config_paths,
+        request.args_override,
+    ) {
+        Some(create_javascript_project_config(request.project_root)?)
+    } else {
+        None
+    };
+    let generated_config_paths = generated_javascript_config
+        .as_ref()
+        .map(|config| vec![config.path().to_path_buf()]);
+    let config_paths = generated_config_paths
+        .as_deref()
+        .unwrap_or(request.config_paths);
     let explicit_output =
-        indexer_supports_explicit_output_arg(request.entry) || !request.config_paths.is_empty();
+        indexer_supports_explicit_output_arg(request.entry) || !config_paths.is_empty();
     let default_args = request.args_override.unwrap_or(&request.entry.default_args);
     let args = build_indexer_args_for_project_with_defaults(
         request.entry,
         &temp_output,
-        request.config_paths,
+        config_paths,
         request.project_root,
         default_args,
     );
@@ -570,6 +586,50 @@ async fn run_indexer_to_temp_output(
         toolchains: request.toolchains,
     })
     .await
+}
+
+fn should_generate_javascript_project_config(
+    entry: &IndexerEntry,
+    lang: &Language,
+    config_paths: &[PathBuf],
+    args_override: Option<&[String]>,
+) -> bool {
+    entry.indexer_name == "scip-typescript"
+        && lang.name() == "javascript"
+        && config_paths.is_empty()
+        && args_override.is_none()
+}
+
+fn create_javascript_project_config(project_root: &Path) -> Result<tempfile::NamedTempFile> {
+    let mut config = tempfile::Builder::new()
+        .prefix(".scip-io-jsconfig-")
+        .suffix(".json")
+        .tempfile_in(project_root)
+        .with_context(|| {
+            format!(
+                "Failed to create temporary JavaScript project config in {}",
+                project_root.display()
+            )
+        })?;
+
+    config.write_all(
+        br#"{
+  "compilerOptions": {
+    "allowJs": true,
+    "checkJs": false,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "moduleResolution": "node",
+    "target": "ES2022",
+    "module": "ESNext"
+  },
+  "include": ["**/*.js", "**/*.jsx", "**/*.mjs", "**/*.cjs"],
+  "exclude": ["node_modules", "dist", "build", "target"]
+}
+"#,
+    )?;
+    config.flush()?;
+    Ok(config)
 }
 
 struct ProtectedIndexerRun<'a> {
@@ -2184,6 +2244,22 @@ mod tests {
         );
 
         assert_eq!(strings(args), vec!["index", "--output", "typescript.scip"]);
+    }
+
+    #[test]
+    fn javascript_scip_typescript_uses_generated_project_config() -> Result<()> {
+        let dir = TempDir::new()?;
+        let config = create_javascript_project_config(dir.path())?;
+        let content = std::fs::read_to_string(config.path())?;
+
+        assert!(config.path().starts_with(dir.path()));
+        assert!(content.contains("\"allowJs\": true"));
+        assert!(content.contains("\"**/*.js\""));
+        assert!(content.contains("\"**/*.mjs\""));
+        assert!(content.contains("\"node_modules\""));
+        assert!(content.contains("\"dist\""));
+
+        Ok(())
     }
 
     #[test]

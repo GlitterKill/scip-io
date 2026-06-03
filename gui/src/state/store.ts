@@ -107,6 +107,7 @@ export interface AppState {
     timeout: number;
     outputFile: string;
     cacheDir: string;
+    scope: 'repo-tree' | 'configs';
     includeAdditionalConfigs: boolean;
     goHome: string;
     javaHome: string;
@@ -129,6 +130,7 @@ export const store = new Store<AppState>({
     timeout: 300,
     outputFile: 'index.scip',
     cacheDir: '',
+    scope: 'repo-tree',
     includeAdditionalConfigs: false,
     goHome: '',
     javaHome: '',

@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -7,14 +7,12 @@ use anyhow::{Context, Result, bail};
 use console::style;
 use futures_util::stream::{self, StreamExt};
 
-use scip_io_core::config::ProjectConfig;
+use scip_io_core::config::{IndexScope, ProjectConfig};
 use scip_io_core::config_discovery::{
-    discover_additional_config_roots, discover_additional_configs,
-    supported_additional_config_languages,
+    discover_additional_configs, supported_additional_config_languages,
 };
 use scip_io_core::detect::{
-    DetectionEvidenceKind, Language, LanguageScanOptions, discover_indexable_project_roots,
-    scan_languages_with_options,
+    DetectionEvidenceKind, Language, LanguageScanOptions, scan_languages_with_options,
 };
 use scip_io_core::indexer::backend::{BackendPreference, ExecutionBackendKind};
 use scip_io_core::indexer::registry::REGISTRY;
@@ -24,6 +22,7 @@ use scip_io_core::scip_language::{
     compact_scip_file, copy_scip_file_atomically, prefix_scip_file_document_paths,
     prune_scip_file_document_paths_with_prefixes,
 };
+use scip_io_core::scope::{IndexScopeResolution, resolve_indexing_roots};
 use scip_io_core::toolchain::toolchain_preflight_for_indexer;
 
 use super::IndexArgs;
@@ -67,7 +66,7 @@ pub async fn run(args: IndexArgs) -> Result<()> {
     let path = path.canonicalize()?;
     let config = ProjectConfig::load(&path)?;
 
-    let project_roots = resolve_project_roots(&args, &path)?;
+    let project_roots = resolve_project_roots_with_config(&args, &path, &config)?;
     let projects = detect_languages_for_roots(&args, &project_roots)?;
     let total_languages = projects
         .iter()
@@ -86,16 +85,26 @@ pub async fn run(args: IndexArgs) -> Result<()> {
     }
 
     if !is_json {
-        print_index_plan(&projects, &path);
+        print_index_plan(&projects, &path, effective_scope(&args, &config));
     }
 
     let progress = Arc::new(CliProgressHandler::new());
+
+    let mut failures = collect_unready_language_failures(&projects);
+    if !is_json {
+        for (language, error) in &failures {
+            eprintln!("  {} {} skipped: {}", style("!").yellow(), language, error);
+        }
+    }
 
     // Phase 1: Ensure all indexers are installed (sequentially, to avoid
     // duplicate downloads of the same binary)
     let mut tasks = Vec::new();
     for project in &projects {
         for lang in &project.languages {
+            if !lang.indexer_ready {
+                continue;
+            }
             let entry = REGISTRY
                 .runnable_for(lang)
                 .with_context(|| format!("No indexer registered for {}", lang.name()))?;
@@ -123,12 +132,10 @@ pub async fn run(args: IndexArgs) -> Result<()> {
         }
     }
 
-    // Dedupe tasks whose indexer binary handles multiple languages in a
-    // single invocation. The canonical case is scip-typescript, which
-    // indexes both .ts and .js files from one run when tsconfig.json
-    // has `allowJs: true`. Running it twice would just produce a
-    // duplicate index. Detection still reports all languages; this is
-    // only about how many times the tool is actually invoked.
+    // Dedupe duplicate tasks for the same language/root/indexer. Languages
+    // that share a binary still need separate invocations when their project
+    // arguments differ, such as scip-typescript's TypeScript and JavaScript
+    // modes.
     let tasks = dedupe_tasks_by_indexer(tasks, is_json);
 
     // Phase 2: Run indexers in parallel with timeout
@@ -212,7 +219,6 @@ pub async fn run(args: IndexArgs) -> Result<()> {
 
     // Collect successes and failures
     let mut scip_outputs = Vec::new();
-    let mut failures = Vec::new();
 
     for result in results {
         match result.outcome {
@@ -339,62 +345,34 @@ pub async fn run(args: IndexArgs) -> Result<()> {
 }
 
 /// Resolve which project roots the index command should operate on.
+#[cfg(test)]
 fn resolve_project_roots(args: &IndexArgs, base_path: &Path) -> Result<Vec<PathBuf>> {
+    resolve_project_roots_with_config(args, base_path, &ProjectConfig::default())
+}
+
+fn resolve_project_roots_with_config(
+    args: &IndexArgs,
+    base_path: &Path,
+    config: &ProjectConfig,
+) -> Result<Vec<PathBuf>> {
+    Ok(resolve_indexing_roots(IndexScopeResolution {
+        base_path,
+        scope: effective_scope(args, config),
+        explicit_roots: &args.roots,
+        all_roots: args.all_roots,
+        include_additional_configs: args.include_additional_configs,
+        language_filters: &args.lang,
+    })?
+    .into_iter()
+    .map(|resolved| resolved.root)
+    .collect())
+}
+
+fn effective_scope(args: &IndexArgs, config: &ProjectConfig) -> IndexScope {
     if args.all_roots {
-        let mut roots = discover_indexable_project_roots(base_path)?;
-        if args.include_additional_configs && has_allowed_additional_config_language(args) {
-            roots.extend(discover_additional_config_roots(base_path)?);
-            roots.sort();
-            roots.dedup();
-        }
-        roots = filter_project_roots_by_language(args, roots)?;
-        if roots.is_empty() {
-            bail!(
-                "No language config roots found under {}",
-                base_path.display()
-            );
-        }
-        return Ok(roots);
+        return IndexScope::Configs;
     }
-
-    if !args.roots.is_empty() {
-        let canonical_base = base_path
-            .canonicalize()
-            .with_context(|| format!("Invalid base path: {}", base_path.display()))?;
-        let mut seen = HashSet::new();
-        let mut roots = Vec::new();
-        for root in &args.roots {
-            let candidate = if root.is_absolute() {
-                root.clone()
-            } else {
-                base_path.join(root)
-            };
-            let candidate = candidate
-                .canonicalize()
-                .with_context(|| format!("Invalid project root: {}", candidate.display()))?;
-            if !candidate.starts_with(&canonical_base) {
-                bail!(
-                    "Project root {} is outside base path {}",
-                    candidate.display(),
-                    base_path.display()
-                );
-            }
-            if seen.insert(candidate.clone()) {
-                roots.push(candidate);
-            }
-        }
-        return Ok(roots);
-    }
-
-    let mut roots = vec![base_path.to_path_buf()];
-    roots.extend(
-        discover_indexable_project_roots(base_path)?
-            .into_iter()
-            .filter(|root| root != base_path),
-    );
-    roots.sort();
-    roots.dedup();
-    Ok(roots)
+    args.scope.or(config.scope).unwrap_or_default()
 }
 
 fn detect_languages_for_roots(
@@ -460,30 +438,6 @@ fn add_additional_configs_if_requested(
     Ok(languages)
 }
 
-fn filter_project_roots_by_language(args: &IndexArgs, roots: Vec<PathBuf>) -> Result<Vec<PathBuf>> {
-    if args.lang.is_empty() {
-        return Ok(roots);
-    }
-
-    let mut filtered = Vec::new();
-    for root in roots {
-        let detected = scan_languages_with_options(
-            &root,
-            LanguageScanOptions {
-                max_depth: Some(1),
-                excluded_roots: Vec::new(),
-            },
-        )?;
-        if detected
-            .iter()
-            .any(|language| language_filter_allows(args, language.kind))
-        {
-            filtered.push(root);
-        }
-    }
-    Ok(filtered)
-}
-
 fn add_languages_from_additional_configs(
     args: &IndexArgs,
     root: &Path,
@@ -532,12 +486,6 @@ fn prune_nested_project_documents(output: &Path, child_prefixes: &[String]) -> R
     Ok(())
 }
 
-fn has_allowed_additional_config_language(args: &IndexArgs) -> bool {
-    supported_additional_config_languages()
-        .iter()
-        .any(|&kind| language_filter_allows(args, kind))
-}
-
 fn language_filter_allows(args: &IndexArgs, kind: scip_io_core::LanguageKind) -> bool {
     args.lang.is_empty()
         || args
@@ -546,8 +494,29 @@ fn language_filter_allows(args: &IndexArgs, kind: scip_io_core::LanguageKind) ->
             .any(|name| name.eq_ignore_ascii_case(kind.name()))
 }
 
-fn print_index_plan(projects: &[ProjectLanguages], base_path: &Path) {
-    println!("{} Indexing:", style(">").cyan().bold());
+fn collect_unready_language_failures(projects: &[ProjectLanguages]) -> Vec<(String, String)> {
+    projects
+        .iter()
+        .flat_map(|project| {
+            project
+                .languages
+                .iter()
+                .filter(|language| !language.indexer_ready)
+                .map(|language| {
+                    (
+                        language.name().to_string(),
+                        language
+                            .readiness_message
+                            .clone()
+                            .unwrap_or_else(|| "language is not index-ready".to_string()),
+                    )
+                })
+        })
+        .collect()
+}
+
+fn print_index_plan(projects: &[ProjectLanguages], base_path: &Path, scope: IndexScope) {
+    println!("{} Indexing ({} scope):", style(">").cyan().bold(), scope);
     for project in projects {
         println!(
             "  {} {}",
@@ -564,6 +533,11 @@ fn print_index_plan(projects: &[ProjectLanguages], base_path: &Path) {
                 .join(", ")
         );
         for lang in &project.languages {
+            if !lang.indexer_ready
+                && let Some(message) = &lang.readiness_message
+            {
+                println!("      {} {}: {}", style("!").yellow(), lang.name(), message);
+            }
             if !lang.additional_configs.is_empty() {
                 println!(
                     "      {} {} config(s): {}",
@@ -664,13 +638,16 @@ fn run_dry_run(
                         "toolchain_required": toolchain.as_ref().map(|status| status.kind.as_str()),
                         "toolchain_available": toolchain.as_ref().map(|status| status.available),
                         "toolchain_message": toolchain.as_ref().map(|status| status.message.as_str()),
-                        "command": indexer.map(|e| {
+                        "indexer_ready": lang.indexer_ready,
+                        "readiness_message": lang.readiness_message.as_deref(),
+                        "scope": effective_scope(args, config).to_string(),
+                        "command": if lang.indexer_ready { indexer.map(|e| {
                             format!(
                                 "{} {}",
                                 e.binary_name,
                                 dry_run_command_args(e, &project.root, lang, config).join(" ")
                             )
-                        }),
+                        }) } else { None },
                         "configs": lang.additional_configs.iter().map(|path| {
                             display_project_root(path, &project.root)
                         }).collect::<Vec<_>>(),
@@ -681,8 +658,9 @@ fn run_dry_run(
         println!("{}", serde_json::to_string_pretty(&plan)?);
     } else {
         println!(
-            "{} Dry run -- the following would be indexed:",
-            style("*").cyan().bold()
+            "{} Dry run -- the following would be indexed ({} scope):",
+            style("*").cyan().bold(),
+            effective_scope(args, config)
         );
         for project in projects {
             println!("  {} {}", style("root").dim(), project.root.display());
@@ -690,24 +668,36 @@ fn run_dry_run(
                 let indexer = REGISTRY.runnable_for(lang);
                 let backend = indexer
                     .map(|entry| config.backend_preference_for(lang.name(), &entry.indexer_name));
-                let status = match indexer {
-                    Some(e)
-                        if !e.native_supported_on_current_platform()
-                            && backend.as_ref().is_some_and(|preference| {
-                                preference.kind != ExecutionBackendKind::Native
-                            }) =>
-                    {
-                        format!(
-                            "{} (will use {})",
-                            e.indexer_name,
-                            backend_label(backend.as_ref())
-                        )
+                let status = if !lang.indexer_ready {
+                    "not runnable".to_string()
+                } else {
+                    match indexer {
+                        Some(e)
+                            if !e.native_supported_on_current_platform()
+                                && backend.as_ref().is_some_and(|preference| {
+                                    preference.kind != ExecutionBackendKind::Native
+                                }) =>
+                        {
+                            format!(
+                                "{} (will use {})",
+                                e.indexer_name,
+                                backend_label(backend.as_ref())
+                            )
+                        }
+                        Some(e) if e.is_installed() => format!("{} (installed)", e.indexer_name),
+                        Some(e) => format!("{} (will download)", e.indexer_name),
+                        None => "no indexer registered".to_string(),
                     }
-                    Some(e) if e.is_installed() => format!("{} (installed)", e.indexer_name),
-                    Some(e) => format!("{} (will download)", e.indexer_name),
-                    None => "no indexer registered".to_string(),
                 };
                 println!("    {} {} -- {}", style(">").cyan(), lang.name(), status);
+                if !lang.indexer_ready
+                    && let Some(message) = &lang.readiness_message
+                {
+                    println!("      readiness: {}", message);
+                }
+                if !lang.indexer_ready {
+                    continue;
+                }
                 if let Some(e) = indexer {
                     if let Some(toolchain) = toolchain_preflight_for_indexer(e, &config.toolchains)
                     {
@@ -808,19 +798,18 @@ fn dry_run_command_args(
     .collect()
 }
 
-/// Group tasks by their `indexer_name` and project root, then collapse each
-/// group to a single invocation. When multiple detected languages in the same
-/// project root resolve to the same indexer tool (e.g. scip-typescript handles
-/// both TypeScript and JavaScript), running it once is enough. The same indexer
-/// in a different project root remains a separate task.
+/// Group tasks by language, `indexer_name`, and project root, then collapse
+/// true duplicates to one invocation. Different languages can share a binary
+/// while still requiring distinct project arguments and outputs.
 fn dedupe_tasks_by_indexer(tasks: Vec<IndexerTask>, is_json: bool) -> Vec<IndexerTask> {
     let mut grouped: HashMap<String, Vec<IndexerTask>> = HashMap::new();
     let mut order: Vec<String> = Vec::new();
     for task in tasks {
         let key = format!(
-            "{}\0{}",
+            "{}\0{}\0{}",
             task.project_root.display(),
-            task.entry.indexer_name
+            task.entry.indexer_name,
+            task.lang.name()
         );
         if !grouped.contains_key(&key) {
             order.push(key.clone());
@@ -903,8 +892,8 @@ fn is_nested_typescript_without_explicit_configs(
 #[cfg(test)]
 mod tests {
     use super::{
-        IndexArgs, IndexerTask, dedupe_tasks_by_indexer, detect_languages_for_roots,
-        index_publication_message, resolve_project_roots,
+        IndexArgs, IndexerTask, collect_unready_language_failures, dedupe_tasks_by_indexer,
+        detect_languages_for_roots, index_publication_message, resolve_project_roots,
     };
     use scip_io_core::LanguageKind;
     use scip_io_core::indexer::backend::BackendPreference;
@@ -925,6 +914,7 @@ mod tests {
             dry_run: true,
             roots: Vec::new(),
             all_roots: false,
+            scope: None,
             include_additional_configs: false,
         }
     }
@@ -981,7 +971,7 @@ mod tests {
     }
 
     #[test]
-    fn default_project_roots_include_nested_indexable_configs_across_languages() {
+    fn default_project_roots_use_repo_tree_scope() {
         let (_dir, root) = fixture(&[
             "src/root.py",
             "services/api/Cargo.toml",
@@ -1001,28 +991,11 @@ mod tests {
 
         let roots = resolve_project_roots(&args, &root).unwrap();
 
-        assert_eq!(
-            roots,
-            vec![
-                root.clone(),
-                root.join("apps/web"),
-                root.join("cmd/tool"),
-                root.join("dotnet"),
-                root.join("gems"),
-                root.join("gradle"),
-                root.join("java"),
-                root.join("kotlin"),
-                root.join("native"),
-                root.join("packages/js"),
-                root.join("scala"),
-                root.join("services/api"),
-            ]
-        );
-        assert!(!roots.contains(&root.join("cmake-only")));
+        assert_eq!(roots, vec![root]);
     }
 
     #[test]
-    fn default_detection_excludes_nested_config_roots_from_parent_project() {
+    fn default_detection_keeps_nested_languages_in_repo_tree_scope() {
         let (_dir, root) = fixture(&[
             "src/root.py",
             "services/api/Cargo.toml",
@@ -1039,35 +1012,51 @@ mod tests {
             .iter()
             .find(|project| project.root == root)
             .expect("root project");
-        assert_eq!(root_project.languages.len(), 1);
-        assert_eq!(root_project.languages[0].kind, LanguageKind::Python);
-
-        let api_project = projects
+        let kinds = root_project
+            .languages
             .iter()
-            .find(|project| project.root == root.join("services/api"))
-            .expect("api project");
-        assert_eq!(api_project.languages.len(), 1);
-        assert_eq!(api_project.languages[0].kind, LanguageKind::Rust);
-        assert_eq!(api_project.languages[0].evidence, "Cargo.toml");
-
-        let web_project = projects
-            .iter()
-            .find(|project| project.root == root.join("apps/web"))
-            .expect("web project");
-        assert_eq!(web_project.languages.len(), 1);
-        assert_eq!(web_project.languages[0].kind, LanguageKind::TypeScript);
-        assert_eq!(web_project.languages[0].evidence, "tsconfig.json");
+            .map(|language| language.kind)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            kinds,
+            vec![
+                LanguageKind::Python,
+                LanguageKind::Rust,
+                LanguageKind::TypeScript
+            ]
+        );
+        assert_eq!(projects.len(), 1);
+        assert!(root_project.owned_child_prefixes.is_empty());
     }
 
     #[test]
-    fn default_detection_assigns_child_prefixes_to_parent_project() {
+    fn repo_tree_detection_reports_unready_languages_as_partial_failures() {
+        let (_dir, root) = fixture(&[
+            "native/compile_commands.json",
+            "native/src/main.cpp",
+            "src/root.py",
+        ]);
+        let args = base_args();
+
+        let roots = resolve_project_roots(&args, &root).unwrap();
+        let projects = detect_languages_for_roots(&args, &roots).unwrap();
+        let failures = collect_unready_language_failures(&projects);
+
+        assert_eq!(failures.len(), 1);
+        assert_eq!(failures[0].0, "cpp");
+        assert!(failures[0].1.contains("nested compile database"));
+    }
+
+    #[test]
+    fn config_scope_detection_assigns_child_prefixes_to_parent_project() {
         let (_dir, root) = fixture(&[
             "package.json",
             "src/root.js",
             "packages/web/package.json",
             "packages/web/src/index.js",
         ]);
-        let args = base_args();
+        let mut args = base_args();
+        args.scope = Some(scip_io_core::config::IndexScope::Configs);
 
         let roots = resolve_project_roots(&args, &root).unwrap();
         let projects = detect_languages_for_roots(&args, &roots).unwrap();
@@ -1163,7 +1152,7 @@ mod tests {
     }
 
     #[test]
-    fn nested_typescript_project_prefers_infer_tsconfig_shared_run() {
+    fn javascript_and_typescript_tasks_remain_separate_by_default() {
         let (_dir, root) = fixture(&[
             "tools/vscode/tsconfig.json",
             "tools/vscode/src/extension.ts",
@@ -1212,16 +1201,15 @@ mod tests {
 
         let deduped = dedupe_tasks_by_indexer(tasks, true);
 
-        assert_eq!(deduped.len(), 1);
-        assert_eq!(deduped[0].lang.kind, LanguageKind::JavaScript);
-        assert!(
-            deduped[0]
-                .entry
-                .default_args
-                .iter()
-                .any(|arg| arg == "--infer-tsconfig")
+        let kinds = deduped
+            .iter()
+            .map(|task| task.lang.kind)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            kinds,
+            vec![LanguageKind::TypeScript, LanguageKind::JavaScript]
         );
-        assert_eq!(deduped[0].covers, vec!["typescript".to_string()]);
+        assert!(deduped.iter().all(|task| task.covers.is_empty()));
     }
 
     #[test]

@@ -1,10 +1,9 @@
-use scip_io_core::config::ProjectConfig;
+use scip_io_core::config::{IndexScope, ProjectConfig};
 use scip_io_core::config_discovery::{
     discover_additional_configs, supported_additional_config_languages,
 };
 use scip_io_core::detect::{
-    DetectionEvidenceKind, Language, LanguageScanOptions, discover_indexable_project_roots,
-    scan_languages_with_options,
+    DetectionEvidenceKind, Language, LanguageScanOptions, scan_languages_with_options,
 };
 use scip_io_core::indexer::backend::{
     BackendPreference, BackendProbeResult, ExecutionBackendKind, probe_docker,
@@ -17,11 +16,13 @@ use scip_io_core::process::hidden_std_command;
 use scip_io_core::progress::{ProgressEvent, ProgressHandler};
 use scip_io_core::scip_language::prune_scip_file_document_paths_with_prefixes;
 use scip_io_core::scip_language::{compact_scip_file, prefix_scip_file_document_paths};
+use scip_io_core::scope::{IndexScopeResolution, resolve_indexing_roots};
 use scip_io_core::toolchain::toolchain_preflight_for_indexer;
 use scip_io_core::validate::validate_scip_file;
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::{AppHandle, Emitter};
 
@@ -265,13 +266,28 @@ impl ProgressHandler for TauriProgressHandler {
 static CANCEL_FLAG: AtomicBool = AtomicBool::new(false);
 
 #[tauri::command]
-pub async fn detect_languages(path: String) -> Result<Vec<LanguageInfo>, String> {
+pub async fn detect_languages(
+    path: String,
+    include_additional_configs: Option<bool>,
+    scope: Option<String>,
+) -> Result<Vec<LanguageInfo>, String> {
     let root = PathBuf::from(&path);
     if !root.exists() {
         return Err(format!("Path does not exist: {}", path));
     }
 
-    let projects = discover_gui_indexing_projects(&root, &[], false)?;
+    let config = if include_additional_configs.is_none() || scope.is_none() {
+        Some(ProjectConfig::load(&root).map_err(|e| e.to_string())?)
+    } else {
+        None
+    };
+    let default_config = ProjectConfig::default();
+    let config_ref = config.as_ref().unwrap_or(&default_config);
+    let scope = parse_gui_scope(scope.as_deref(), config_ref)?;
+    let include_additional_configs = include_additional_configs
+        .or(config_ref.include_additional_configs)
+        .unwrap_or(false);
+    let projects = discover_gui_indexing_projects(&root, &[], include_additional_configs, scope)?;
     let mut languages_by_name = BTreeMap::<String, LanguageInfo>::new();
 
     for project in projects {
@@ -305,20 +321,26 @@ pub async fn start_indexing(
     languages: Vec<String>,
     output: String,
     include_additional_configs: bool,
+    scope: Option<String>,
 ) -> Result<(), String> {
     CANCEL_FLAG.store(false, Ordering::SeqCst);
 
     let root = PathBuf::from(&path);
     let handler = TauriProgressHandler { app: app.clone() };
     let config = ProjectConfig::load(&root).map_err(|e| e.to_string())?;
+    let scope = parse_gui_scope(scope.as_deref(), &config)?;
 
     // Detect languages
     handler.on_event(ProgressEvent::DetectStart { path: root.clone() });
-    let projects = discover_gui_indexing_projects(&root, &languages, include_additional_configs)?;
+    let projects =
+        discover_gui_indexing_projects(&root, &languages, include_additional_configs, scope)?;
     let lang_names = unique_project_language_names(&projects);
     handler.on_event(ProgressEvent::DetectResult {
         languages: lang_names,
     });
+
+    let mut failures: Vec<IndexingFailureInfo> = Vec::new();
+    record_unready_indexing_failures(&handler, &projects, &mut failures);
 
     // Dedupe by indexer_name so a tool that handles multiple languages
     // (e.g. scip-typescript for both .ts and .js via `allowJs: true`)
@@ -327,15 +349,21 @@ pub async fn start_indexing(
     let plans = projects
         .iter()
         .flat_map(|project| {
+            let ready_languages = ready_indexing_languages(&project.languages);
             build_indexing_plans_for_project(
                 &project.root,
-                &project.languages,
+                &ready_languages,
                 &project.owned_child_prefixes,
             )
         })
         .collect::<Vec<_>>();
     if plans.is_empty() {
-        return Err("No registered SCIP indexers found for the selected languages".to_string());
+        if failures.is_empty() {
+            return Err("No registered SCIP indexers found for the selected languages".to_string());
+        }
+        return Err(
+            "No SCIP output was generated; selected languages are not index-ready".to_string(),
+        );
     }
 
     let mut prepared_plans = Vec::with_capacity(plans.len());
@@ -391,7 +419,6 @@ pub async fn start_indexing(
 
     let mut outputs = Vec::new();
     let mut lang_results: Vec<serde_json::Value> = Vec::new();
-    let mut failures: Vec<IndexingFailureInfo> = Vec::new();
     let indexing_start = std::time::Instant::now();
 
     for plan in &prepared_plans {
@@ -629,6 +656,31 @@ fn record_indexing_failure(
     }
 }
 
+fn record_unready_indexing_failures(
+    handler: &TauriProgressHandler,
+    projects: &[IndexingProject],
+    failures: &mut Vec<IndexingFailureInfo>,
+) {
+    for language in projects.iter().flat_map(|project| &project.languages) {
+        if language.indexer_ready {
+            continue;
+        }
+
+        let failure = IndexingFailureInfo {
+            language: language.kind.name().to_string(),
+            error: language
+                .readiness_message
+                .clone()
+                .unwrap_or_else(|| "language is not index-ready".to_string()),
+        };
+        handler.on_event(ProgressEvent::IndexerFailed {
+            language: failure.language.clone(),
+            error: failure.error.clone(),
+        });
+        failures.push(failure);
+    }
+}
+
 #[tauri::command]
 pub async fn cancel_indexing() -> Result<(), String> {
     CANCEL_FLAG.store(true, Ordering::SeqCst);
@@ -852,30 +904,26 @@ fn discover_gui_indexing_projects(
     root: &Path,
     language_filters: &[String],
     include_additional_configs: bool,
+    scope: IndexScope,
 ) -> Result<Vec<IndexingProject>, String> {
-    let mut roots = vec![root.to_path_buf()];
-    roots.extend(
-        discover_indexable_project_roots(root)
-            .map_err(|e| e.to_string())?
-            .into_iter()
-            .filter(|candidate| candidate != root),
-    );
-    roots.sort();
-    roots.dedup();
+    let roots = resolve_indexing_roots(IndexScopeResolution {
+        base_path: root,
+        scope,
+        explicit_roots: &[],
+        all_roots: false,
+        include_additional_configs,
+        language_filters,
+    })
+    .map_err(|e| e.to_string())?;
 
     let mut projects = Vec::new();
-    for project_root in &roots {
-        let excluded_roots: Vec<PathBuf> = roots
-            .iter()
-            .filter(|candidate| *candidate != project_root && candidate.starts_with(project_root))
-            .cloned()
-            .collect();
-        let owned_child_prefixes = child_prefixes_for_project_root(project_root, &excluded_roots);
+    for resolved in &roots {
+        let project_root = &resolved.root;
         let detected = scan_languages_with_options(
             project_root,
             LanguageScanOptions {
                 max_depth: None,
-                excluded_roots,
+                excluded_roots: resolved.excluded_roots.clone(),
             },
         )
         .map_err(|e| e.to_string())?;
@@ -903,11 +951,26 @@ fn discover_gui_indexing_projects(
         projects.push(IndexingProject {
             root: project_root.clone(),
             languages,
-            owned_child_prefixes,
+            owned_child_prefixes: resolved.owned_child_prefixes.clone(),
         });
     }
 
     Ok(projects)
+}
+
+fn ready_indexing_languages(languages: &[Language]) -> Vec<Language> {
+    languages
+        .iter()
+        .filter(|language| language.indexer_ready)
+        .cloned()
+        .collect()
+}
+
+fn parse_gui_scope(scope: Option<&str>, config: &ProjectConfig) -> Result<IndexScope, String> {
+    match scope {
+        Some(value) => IndexScope::from_str(value).map_err(|error| error.to_string()),
+        None => Ok(config.scope.unwrap_or_default()),
+    }
 }
 
 fn unique_project_language_names(projects: &[IndexingProject]) -> Vec<String> {
@@ -934,18 +997,6 @@ fn prefix_output_paths_for_project_root(
 
     let prefix = relative_root.to_string_lossy().replace('\\', "/");
     prefix_scip_file_document_paths(output, &prefix)
-}
-
-fn child_prefixes_for_project_root(root: &Path, child_roots: &[PathBuf]) -> Vec<String> {
-    let mut prefixes = child_roots
-        .iter()
-        .filter_map(|child_root| child_root.strip_prefix(root).ok())
-        .filter(|relative| !relative.as_os_str().is_empty())
-        .map(|relative| relative.to_string_lossy().replace('\\', "/"))
-        .collect::<Vec<_>>();
-    prefixes.sort();
-    prefixes.dedup();
-    prefixes
 }
 
 fn prune_nested_project_documents(output: &Path, child_prefixes: &[String]) -> anyhow::Result<()> {
@@ -1403,7 +1454,25 @@ mod tests {
     }
 
     #[test]
-    fn gui_project_roots_include_nested_indexable_configs_across_languages() {
+    fn gui_project_roots_default_to_repo_tree_scope() {
+        let (_dir, root) = fixture(&[
+            "src/root.py",
+            "services/api/Cargo.toml",
+            "apps/web/tsconfig.json",
+        ]);
+
+        let projects =
+            discover_gui_indexing_projects(&root, &[], false, IndexScope::RepoTree).unwrap();
+        let roots = projects
+            .iter()
+            .map(|project| project.root.clone())
+            .collect::<Vec<_>>();
+
+        assert_eq!(roots, vec![root]);
+    }
+
+    #[test]
+    fn gui_project_roots_include_nested_indexable_configs_in_config_scope() {
         let (_dir, root) = fixture(&[
             "src/root.py",
             "services/api/Cargo.toml",
@@ -1420,7 +1489,8 @@ mod tests {
             "cmake-only/CMakeLists.txt",
         ]);
 
-        let projects = discover_gui_indexing_projects(&root, &[], false).unwrap();
+        let projects =
+            discover_gui_indexing_projects(&root, &[], false, IndexScope::Configs).unwrap();
         let roots = projects
             .iter()
             .map(|project| project.root.clone())
@@ -1447,7 +1517,7 @@ mod tests {
     }
 
     #[test]
-    fn gui_project_detection_excludes_nested_roots_from_parent_project() {
+    fn gui_project_detection_keeps_nested_languages_in_repo_tree_scope() {
         let (_dir, root) = fixture(&[
             "src/root.py",
             "services/api/Cargo.toml",
@@ -1456,34 +1526,25 @@ mod tests {
             "apps/web/src/main.ts",
         ]);
 
-        let projects = discover_gui_indexing_projects(&root, &[], false).unwrap();
+        let projects =
+            discover_gui_indexing_projects(&root, &[], false, IndexScope::RepoTree).unwrap();
 
         let root_project = projects
             .iter()
             .find(|project| project.root == root)
             .expect("root project");
-        assert_eq!(root_project.languages.len(), 1);
-        assert_eq!(root_project.languages[0].kind.name(), "python");
-
-        let api_project = projects
+        let names = root_project
+            .languages
             .iter()
-            .find(|project| project.root == root.join("services/api"))
-            .expect("api project");
-        assert_eq!(api_project.languages.len(), 1);
-        assert_eq!(api_project.languages[0].kind.name(), "rust");
-        assert_eq!(api_project.languages[0].evidence, "Cargo.toml");
-
-        let web_project = projects
-            .iter()
-            .find(|project| project.root == root.join("apps/web"))
-            .expect("web project");
-        assert_eq!(web_project.languages.len(), 1);
-        assert_eq!(web_project.languages[0].kind.name(), "typescript");
-        assert_eq!(web_project.languages[0].evidence, "tsconfig.json");
+            .map(|language| language.kind.name())
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec!["python", "rust", "typescript"]);
+        assert_eq!(projects.len(), 1);
+        assert!(root_project.owned_child_prefixes.is_empty());
     }
 
     #[test]
-    fn gui_project_detection_assigns_child_prefixes_to_parent_project() {
+    fn gui_config_scope_detection_assigns_child_prefixes_to_parent_project() {
         let (_dir, root) = fixture(&[
             "package.json",
             "src/root.js",
@@ -1491,7 +1552,8 @@ mod tests {
             "packages/web/src/index.js",
         ]);
 
-        let projects = discover_gui_indexing_projects(&root, &[], false).unwrap();
+        let projects =
+            discover_gui_indexing_projects(&root, &[], false, IndexScope::Configs).unwrap();
 
         let root_project = projects
             .iter()
@@ -1511,14 +1573,50 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn detect_languages_reports_nested_cpp_compile_database_as_ready() {
+    async fn detect_languages_reports_nested_cpp_compile_database_as_partial_repo_tree_coverage() {
         let (_dir, root) = fixture(&[
             "native/compile_commands.json",
             "native/src/main.cpp",
             "cmake-only/CMakeLists.txt",
         ]);
 
-        let languages = detect_languages(root.to_string_lossy().to_string())
+        let languages = detect_languages(
+            root.to_string_lossy().to_string(),
+            Some(false),
+            Some("repo-tree".to_string()),
+        )
+        .await
+        .unwrap();
+        let cpp = languages
+            .iter()
+            .find(|language| language.name == "cpp")
+            .expect("cpp language");
+
+        assert!(!cpp.indexer_ready);
+        assert!(
+            cpp.readiness_message
+                .as_deref()
+                .is_some_and(|message| { message.contains("nested compile database") })
+        );
+        assert_eq!(
+            Path::new(&cpp.evidence).components().collect::<Vec<_>>(),
+            Path::new("native")
+                .join("compile_commands.json")
+                .components()
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[tokio::test]
+    async fn detect_languages_uses_config_scope_when_scope_argument_is_omitted() {
+        let (_dir, root) = fixture(&[
+            "native/compile_commands.json",
+            "native/src/main.cpp",
+            "cmake-only/CMakeLists.txt",
+        ]);
+        std::fs::write(root.join(".scip-io.toml"), r#"scope = "configs""#).unwrap();
+
+        let languages = detect_languages(root.to_string_lossy().to_string(), Some(false), None)
             .await
             .unwrap();
         let cpp = languages
@@ -1528,12 +1626,30 @@ mod tests {
 
         assert!(cpp.indexer_ready);
         assert_eq!(
-            Path::new(&cpp.evidence).components().collect::<Vec<_>>(),
-            Path::new("native")
-                .join("compile_commands.json")
-                .components()
-                .collect::<Vec<_>>()
+            Path::new(&cpp.evidence),
+            Path::new("native/compile_commands.json")
         );
+    }
+
+    #[test]
+    fn unready_languages_are_not_built_into_indexing_plans() {
+        let (_dir, root) = fixture(&[
+            "native/compile_commands.json",
+            "native/src/main.cpp",
+            "src/root.py",
+        ]);
+        let projects =
+            discover_gui_indexing_projects(&root, &[], false, IndexScope::RepoTree).unwrap();
+        let ready = ready_indexing_languages(&projects[0].languages);
+        let plans = build_indexing_plans_for_project(&projects[0].root, &ready, &[]);
+
+        assert!(
+            projects[0]
+                .languages
+                .iter()
+                .any(|language| { language.kind.name() == "cpp" && !language.indexer_ready })
+        );
+        assert!(plans.iter().all(|plan| plan.primary.kind.name() != "cpp"));
     }
 
     #[tokio::test]

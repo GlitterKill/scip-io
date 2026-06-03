@@ -128,12 +128,14 @@ flowchart TD
     style Done fill:#0a0e1b,stroke:#ff00aa,color:#ff00aa
 ```
 
-During indexing, SCIP-IO also promotes nested indexable manifests into their own
-project-root runs. This covers TypeScript, JavaScript, Python, Rust, Go, Java,
-C#, Ruby, Kotlin, C/C++ with `compile_commands.json`, and Scala project
-configs. Parent roots exclude those nested roots while scanning, so a parent
-repository does not accidentally run a root-bound indexer against a child
-project's config.
+By default, indexing is repo-tree scoped: the selected root owns the full
+non-ignored tree and SCIP-IO lets each upstream indexer decide which files it
+can safely include. Use `--scope configs` when you want the legacy behavior that
+promotes nested indexable manifests into their own project-root runs. That mode
+covers TypeScript, JavaScript, Python, Rust, Go, Java, C#, Ruby, Kotlin, C/C++
+with `compile_commands.json`, and Scala project configs. Parent roots exclude
+those nested roots while scanning, so a parent repository does not accidentally
+run a root-bound indexer against a child project's config.
 
 C/C++ remains stricter than the other languages: `compile_commands.json` can
 define an indexable nested root, but `CMakeLists.txt`, Makefiles, Kbuild, and
@@ -470,7 +472,10 @@ scip-io index --output ./artifacts/project.scip
 # Dry run — see what would happen, don't touch anything
 scip-io index --dry-run
 
-# Index a monorepo by discovering every sub-project root
+# Use legacy config-root scheduling for nested project configs
+scip-io index --scope configs
+
+# Discover only config-bearing roots under the project
 scip-io index --all-roots
 
 # Include supported secondary config files such as tsconfig.test.json
@@ -500,16 +505,20 @@ scip-io index --parallel 4 --timeout 600
 | `-f, --format`    | `text` or `json` progress output                                      |
 | `--dry-run`       | Print the plan without running anything                               |
 | `--roots`         | Comma-separated sub-project roots to index; relative paths resolve from `--path` |
-| `--all-roots`     | Auto-discover every manifest/config-bearing project root under `--path`, skipping ignored dirs |
+| `--scope`         | `repo-tree` (default) or `configs` root scheduling                     |
+| `--all-roots`     | Compatibility alias for config-root discovery under `--path`, skipping ignored dirs |
 | `--include-additional-configs` | Include supported secondary config files in each indexer run |
 
-`scip-io index` automatically indexes nested project configs from their own
-roots, then prefixes those SCIP document paths before merging. Use `--roots`
-when you want an explicit subset. Use `--all-roots` for the broader exhaustive
-mode that scans all non-ignored descendants for known manifest/config-bearing
-project roots. `--roots` and `--all-roots` index each selected project root
-separately and merge the generated `.scip` files into the requested output
-unless `--no-merge` is set.
+`scip-io index` defaults to repo-tree scope, so the selected `--path` is the
+single ownership boundary for the index. Some upstream indexers still use their
+own config/build model internally; SCIP-IO reports readiness warnings when that
+means a repo-tree run may be partial. Use `--scope configs` for the previous
+config-root scheduling method: nested project configs are indexed from their own
+roots, SCIP document paths are prefixed before merging, and child-owned output
+is pruned from parent runs. Use `--roots` when you want an explicit subset. Use
+`--all-roots` when you specifically want the older discovered-config-root sweep.
+`--roots`, `--scope configs`, and `--all-roots` merge generated `.scip` files
+into the requested output unless `--no-merge` is set.
 
 By default, SCIP-IO indexes the primary project config for a root. Use
 `--include-additional-configs` when a repository keeps support scripts, test
@@ -521,12 +530,13 @@ sequential project-argument shards and merges the results. For .NET, SCIP-IO
 passes all discovered `.sln`, `.csproj`, and `.vbproj` files to `scip-dotnet`
 and uses the same safe retry behavior for memory failures.
 
-TypeScript and JavaScript share `scip-typescript`, so SCIP-IO runs one shared
-invocation when both are detected. If TypeScript evidence only appears in nested
-configs and the selected root has no explicit TypeScript configs, SCIP-IO
-prefers the JavaScript-style `--infer-tsconfig` invocation for that shared run.
-That avoids an empty root `tsconfig.json` lookup while still producing one
-combined TypeScript/JavaScript SCIP output.
+TypeScript and JavaScript share `scip-typescript`, but SCIP-IO keeps them as
+separate language runs when both are detected. The TypeScript run uses the
+normal TypeScript project config behavior. The JavaScript run creates a
+temporary root-local project config with `allowJs` and JavaScript-only globs
+(`*.js`, `*.jsx`, `*.mjs`, `*.cjs`) so standalone JavaScript files are emitted
+alongside TypeScript in the final merge instead of being hidden by an existing
+`tsconfig.json`.
 
 ### `scip-io status`
 
@@ -659,6 +669,7 @@ Drop a `.scip-io.toml` at the root of any project to override defaults:
 ```toml
 # .scip-io.toml
 output = "artifacts/index.scip"
+scope = "repo-tree" # or "configs"
 include_additional_configs = true
 languages = ["typescript", "python"]
 

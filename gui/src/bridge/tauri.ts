@@ -59,17 +59,22 @@ export interface ProgressEvent {
   [key: string]: unknown;
 }
 
-export async function detectLanguages(path: string): Promise<LanguageInfo[]> {
-  return invoke('detect_languages', { path });
+export async function detectLanguages(
+  path: string,
+  includeAdditionalConfigs: boolean,
+  scope: 'repo-tree' | 'configs'
+): Promise<LanguageInfo[]> {
+  return invoke('detect_languages', { path, includeAdditionalConfigs, scope });
 }
 
 export async function startIndexing(
   path: string,
   languages: string[],
   output: string,
-  includeAdditionalConfigs: boolean
+  includeAdditionalConfigs: boolean,
+  scope: 'repo-tree' | 'configs'
 ): Promise<void> {
-  return invoke('start_indexing', { path, languages, output, includeAdditionalConfigs });
+  return invoke('start_indexing', { path, languages, output, includeAdditionalConfigs, scope });
 }
 
 export async function cancelIndexing(): Promise<void> {

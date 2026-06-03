@@ -6,6 +6,7 @@ pub mod merge;
 pub mod process;
 pub mod progress;
 pub mod scip_language;
+pub mod scope;
 pub mod toolchain;
 pub mod validate;
 

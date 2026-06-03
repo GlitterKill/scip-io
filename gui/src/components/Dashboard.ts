@@ -1,6 +1,7 @@
 import { store, addLog } from '../state/store.js';
 import {
   detectLanguages,
+  getConfig,
   getIndexerStatus,
   installIndexer,
   startIndexing,
@@ -68,10 +69,14 @@ export function renderDashboard(container: HTMLElement): void {
     if (configChip) {
       configChip.classList.toggle('chip--selected', state.settings.includeAdditionalConfigs);
     }
+    const scopeSelect = wrapper.querySelector('#index-scope-select') as HTMLSelectElement | null;
+    if (scopeSelect) {
+      scopeSelect.value = state.settings.scope;
+    }
   });
 
   // Fetch initial data
-  handleDetect();
+  handleDetect({ loadProjectSettings: true });
   handleFetchIndexers();
 }
 
@@ -113,6 +118,25 @@ function renderProjectPathSection(): HTMLElement {
   const optionRow = document.createElement('div');
   optionRow.className = 'flex items-center gap-sm mt-md';
 
+  const scopeField = document.createElement('div');
+  scopeField.className = 'form-field';
+  scopeField.innerHTML = `
+    <label class="form-label" for="index-scope-select">Scope</label>
+    <select class="input" id="index-scope-select">
+      <option value="repo-tree" ${store.getState().settings.scope === 'repo-tree' ? 'selected' : ''}>Repo tree</option>
+      <option value="configs" ${store.getState().settings.scope === 'configs' ? 'selected' : ''}>Configs</option>
+    </select>
+  `;
+  const scopeSelect = scopeField.querySelector('#index-scope-select') as HTMLSelectElement | null;
+  scopeSelect?.addEventListener('change', () => {
+    const current = store.getState().settings;
+    store.setState({
+      settings: { ...current, scope: scopeSelect.value as 'repo-tree' | 'configs' },
+    });
+    handleDetect();
+  });
+  optionRow.appendChild(scopeField);
+
   const configChip = document.createElement('label');
   configChip.className = `chip${store.getState().settings.includeAdditionalConfigs ? ' chip--selected' : ''}`;
   configChip.id = 'include-additional-configs-chip';
@@ -128,6 +152,7 @@ function renderProjectPathSection(): HTMLElement {
       settings: { ...current, includeAdditionalConfigs: nextValue },
     });
     configChip.classList.toggle('chip--selected', nextValue);
+    handleDetect();
   });
   optionRow.appendChild(configChip);
 
@@ -144,7 +169,7 @@ function renderProjectPathSection(): HTMLElement {
   const detectBtn = document.createElement('button');
   detectBtn.className = 'btn btn--secondary';
   detectBtn.textContent = 'Detect Languages';
-  detectBtn.addEventListener('click', handleDetect);
+  detectBtn.addEventListener('click', () => handleDetect({ loadProjectSettings: true }));
   actions.appendChild(detectBtn);
 
   const indexBtn = document.createElement('button');
@@ -429,11 +454,11 @@ function applyProjectPath(path: string) {
   const input = document.getElementById('project-path-input') as HTMLInputElement | null;
   if (input) input.value = path;
   addLog('info', `Project path set to: ${path}`);
-  handleDetect();
+  handleDetect({ loadProjectSettings: true });
   handleFetchIndexers();
 }
 
-async function handleDetect() {
+async function handleDetect(options: { loadProjectSettings?: boolean } = {}) {
   const input = document.getElementById('project-path-input') as HTMLInputElement | null;
   if (input) {
     store.setState({ projectPath: input.value });
@@ -443,7 +468,11 @@ async function handleDetect() {
   addLog('info', `Detecting languages in: ${path}`);
 
   try {
-    const result = await detectLanguages(path);
+    if (options.loadProjectSettings) {
+      await loadProjectIndexSettings(path);
+    }
+    const settings = store.getState().settings;
+    const result = await detectLanguages(path, settings.includeAdditionalConfigs, settings.scope);
     const languages = result.map((lang) => ({
       name: lang.name,
       evidence: lang.evidence,
@@ -470,6 +499,31 @@ async function handleDetect() {
         ],
       });
     }
+  }
+}
+
+async function loadProjectIndexSettings(path: string): Promise<void> {
+  try {
+    const config = await getConfig(path);
+    if (!config || typeof config !== 'object') return;
+
+    const current = store.getState().settings;
+    const projectConfig = config as Record<string, unknown>;
+    store.setState({
+      settings: {
+        ...current,
+        includeAdditionalConfigs:
+          typeof projectConfig.include_additional_configs === 'boolean'
+            ? projectConfig.include_additional_configs
+            : current.includeAdditionalConfigs,
+        scope:
+          projectConfig.scope === 'configs' || projectConfig.scope === 'repo-tree'
+            ? projectConfig.scope
+            : current.scope,
+      },
+    });
+  } catch {
+    // Missing or invalid project config should not block language detection.
   }
 }
 
@@ -677,7 +731,7 @@ async function handleIndexAll() {
 
   addLog(
     'info',
-    `Starting indexing for: ${selectedLangs.join(', ')}${
+    `Starting ${state.settings.scope} indexing for: ${selectedLangs.join(', ')}${
       state.settings.includeAdditionalConfigs ? ' with extra configs' : ''
     }`
   );
@@ -687,7 +741,8 @@ async function handleIndexAll() {
       state.projectPath,
       selectedLangs,
       state.settings.outputFile,
-      state.settings.includeAdditionalConfigs
+      state.settings.includeAdditionalConfigs,
+      state.settings.scope
     );
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
