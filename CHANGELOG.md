@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Preserved split-index `Metadata.project_root` and
+  `Metadata.text_document_encoding` values when merging SCIP artifacts, so the
+  final `index.scip` keeps producer-side repository root and encoding metadata
+  when all inputs agree.
+- Added an authoritative-root merge API and routed CLI/GUI `index` merges
+  through it so multi-language index output records the selected repository root
+  even when nested project artifacts contributed child-root metadata.
+- Repaired managed `scip-python` npm installs with the embedded Pyright
+  wildcard-import assertion patch so large Python indexes such as LLVM do not
+  fail during analysis when import metadata is stale.
+
 ## [0.1.7] - 2026-06-02
 
 ### Added

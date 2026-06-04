@@ -545,9 +545,12 @@ pub async fn start_indexing(
         handler.on_event(ProgressEvent::MergeStart {
             inputs: outputs.clone(),
         });
-        let publish_stats =
-            scip_io_core::merge::merge_scip_files_atomically(&outputs, &output_path)
-                .map_err(|e| format!("Merge failed: {}", e))?;
+        let publish_stats = scip_io_core::merge::merge_scip_files_atomically_with_project_root(
+            &outputs,
+            &output_path,
+            &root,
+        )
+        .map_err(|e| format!("Merge failed: {}", e))?;
 
         let size = std::fs::metadata(&output_path)
             .map(|m| m.len())

@@ -17,7 +17,7 @@ use scip_io_core::detect::{
 use scip_io_core::indexer::backend::{BackendPreference, ExecutionBackendKind};
 use scip_io_core::indexer::registry::REGISTRY;
 use scip_io_core::indexer::{IndexerEntry, runner};
-use scip_io_core::merge::merge_scip_files_atomically;
+use scip_io_core::merge::merge_scip_files_atomically_with_project_root;
 use scip_io_core::scip_language::{
     compact_scip_file, copy_scip_file_atomically, prefix_scip_file_document_paths,
     prune_scip_file_document_paths_with_prefixes,
@@ -275,7 +275,7 @@ pub async fn run(args: IndexArgs) -> Result<()> {
                 scip_outputs.len()
             );
         }
-        merge_scip_files_atomically(&scip_outputs, &args.output)?;
+        merge_scip_files_atomically_with_project_root(&scip_outputs, &args.output, &path)?;
         if !is_json {
             println!(
                 "{} {}",

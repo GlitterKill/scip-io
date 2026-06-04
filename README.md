@@ -191,8 +191,10 @@ that row manages `scip-java`, which is the tool that provides Kotlin indexing.
 The Settings update check inspects installed indexers, reports non-managed
 tools separately, and offers per-indexer or bulk updates for managed installs
 when a newer compatible version is available.
-On Windows, SCIP-IO also repairs managed `scip-python` npm installs affected
-by the upstream `path.sep` regex crash before running the indexer.
+SCIP-IO also repairs managed `scip-python` npm installs affected by the
+embedded Pyright wildcard-import assertion that can fail large Python indexes.
+On Windows, it additionally repairs the upstream `path.sep` regex crash before
+running the indexer.
 
 ### Windows Linux Backends
 
@@ -302,6 +304,14 @@ documents (e.g. generated files touched by more than one indexer) are combined
 rather than duplicated. SCIP-IO also compacts every indexer output and final
 merged or copied output so duplicate `Document.relative_path` entries, duplicate
 occurrences, and duplicate document symbols do not reach downstream consumers.
+When `scip-io index` merges multiple language outputs, the merged
+`Metadata.project_root` is the selected repository root because document paths
+have already been normalized relative to that root. Manual merges keep input
+`Metadata.project_root` and `Metadata.text_document_encoding` only when the
+non-empty/specified inputs agree. Conflicts are logged and left
+empty/unspecified so the merged artifact does not claim a root or encoding that
+is false for part of the index. The merged `tool_info` still records `scip-io`
+as the producer of the combined artifact.
 If a run is partial, the merge uses the successful language outputs and reports
 the failed languages separately.
 
@@ -604,6 +614,8 @@ scip-io uninstall scip-python --dry-run
 ### `scip-io merge`
 
 Manually merge a set of `.scip` files into one. Useful for CI where per-language files are built in separate stages.
+The merged artifact preserves input project root and text encoding metadata
+when those values are unambiguous while recording `scip-io` as the merge tool.
 
 ```sh
 scip-io merge ts.scip py.scip rust.scip --output all.scip

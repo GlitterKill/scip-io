@@ -1008,17 +1008,58 @@ fn apply_npm_compatibility_repairs(
     prefix_dir: &Path,
     package: &str,
 ) -> Result<()> {
-    if cfg!(windows) && entry.indexer_name == "scip-python" {
-        let repaired = repair_scip_python_windows_path_separator_regex(prefix_dir, package)?;
-        if repaired {
+    if entry.indexer_name == "scip-python" {
+        let wildcard_import_repaired =
+            repair_scip_python_pyright_wildcard_import_assert(prefix_dir, package)?;
+        if wildcard_import_repaired {
             tracing::info!(
                 indexer = %entry.indexer_name,
-                "applied Windows compatibility repair for npm indexer"
+                "applied Pyright wildcard import compatibility repair for npm indexer"
             );
+        }
+
+        if cfg!(windows) {
+            let regex_repaired =
+                repair_scip_python_windows_path_separator_regex(prefix_dir, package)?;
+            if regex_repaired {
+                tracing::info!(
+                    indexer = %entry.indexer_name,
+                    "applied Windows compatibility repair for npm indexer"
+                );
+            }
         }
     }
 
     Ok(())
+}
+
+fn repair_scip_python_pyright_wildcard_import_assert(
+    prefix_dir: &Path,
+    package: &str,
+) -> Result<bool> {
+    let bundle = npm_package_dir(prefix_dir, package)
+        .join("dist")
+        .join("pyright-internal.js");
+    let source = match std::fs::read_to_string(&bundle) {
+        Ok(source) => source,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(err) => return Err(err).with_context(|| format!("Cannot read {}", bundle.display())),
+    };
+
+    let broken = r#"const i=(0,r.getImportInfo)(t.node.module);(0,s.assert)(void 0!==i&&i.isImportFound),(0,s.assert)(t.node.isWildcardImport);"#;
+    let fixed =
+        r#"const i=(0,r.getImportInfo)(t.node.module);(0,s.assert)(t.node.isWildcardImport);"#;
+    if !source.contains(broken) {
+        return Ok(false);
+    }
+
+    // scip-python 0.6.6 embeds Pyright 1.1.301, whose wildcard import flow
+    // analyzer can assert when import metadata is stale even though the symbol
+    // lookup can still resolve the declaration. Drop only that assertion so
+    // Pyright keeps the existing symbol inference path.
+    std::fs::write(&bundle, source.replace(broken, fixed))
+        .with_context(|| format!("Cannot write {}", bundle.display()))?;
+    Ok(true)
 }
 
 fn repair_scip_python_windows_path_separator_regex(
@@ -1623,6 +1664,57 @@ mod tests {
     }
 
     #[test]
+    fn repairs_scip_python_pyright_wildcard_import_assert() {
+        let dir = tempfile::tempdir().unwrap();
+        let prefix_dir = dir.path().join("npm");
+        let bundle = super::super::npm_package_dir(&prefix_dir, "@sourcegraph/scip-python")
+            .join("dist")
+            .join("pyright-internal.js");
+        std::fs::create_dir_all(bundle.parent().unwrap()).unwrap();
+        std::fs::write(
+            &bundle,
+            r#"function S(t,n){const i=(0,r.getImportInfo)(t.node.module);(0,s.assert)(void 0!==i&&i.isImportFound),(0,s.assert)(t.node.isWildcardImport);const a=e.lookUpSymbolRecursive(t.node,n,!1);}"#,
+        )
+        .unwrap();
+
+        let repaired = repair_scip_python_pyright_wildcard_import_assert(
+            &prefix_dir,
+            "@sourcegraph/scip-python",
+        )
+        .unwrap();
+        let contents = std::fs::read_to_string(&bundle).unwrap();
+
+        assert!(repaired);
+        assert!(contents.contains(
+            r#"const i=(0,r.getImportInfo)(t.node.module);(0,s.assert)(t.node.isWildcardImport);"#
+        ));
+        assert!(!contents.contains(r#"void 0!==i&&i.isImportFound"#));
+    }
+
+    #[test]
+    fn scip_python_pyright_wildcard_import_repair_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let prefix_dir = dir.path().join("npm");
+        let bundle = super::super::npm_package_dir(&prefix_dir, "@sourcegraph/scip-python")
+            .join("dist")
+            .join("pyright-internal.js");
+        std::fs::create_dir_all(bundle.parent().unwrap()).unwrap();
+        std::fs::write(
+            &bundle,
+            r#"function S(t,n){const i=(0,r.getImportInfo)(t.node.module);(0,s.assert)(t.node.isWildcardImport);const a=e.lookUpSymbolRecursive(t.node,n,!1);}"#,
+        )
+        .unwrap();
+
+        let repaired = repair_scip_python_pyright_wildcard_import_assert(
+            &prefix_dir,
+            "@sourcegraph/scip-python",
+        )
+        .unwrap();
+
+        assert!(!repaired);
+    }
+
+    #[test]
     fn repairs_existing_scip_python_npm_install() {
         let dir = tempfile::tempdir().unwrap();
         let install_root = dir.path().join("bin");
@@ -1634,6 +1726,14 @@ mod tests {
         std::fs::write(
             &bundle,
             r#"const o={sep:"\\"};const a=new RegExp(o.sep,"g");"#,
+        )
+        .unwrap();
+        let pyright_bundle = super::super::npm_package_dir(&prefix_dir, "@sourcegraph/scip-python")
+            .join("dist")
+            .join("pyright-internal.js");
+        std::fs::write(
+            &pyright_bundle,
+            r#"function S(t,n){const i=(0,r.getImportInfo)(t.node.module);(0,s.assert)(void 0!==i&&i.isImportFound),(0,s.assert)(t.node.isWildcardImport);const a=e.lookUpSymbolRecursive(t.node,n,!1);}"#,
         )
         .unwrap();
         let entry = IndexerEntry {
@@ -1662,5 +1762,11 @@ mod tests {
         } else {
             assert!(contents.contains(r#"new RegExp(o.sep,"g")"#));
         }
+
+        let pyright_contents = std::fs::read_to_string(&pyright_bundle).unwrap();
+        assert!(pyright_contents.contains(
+            r#"const i=(0,r.getImportInfo)(t.node.module);(0,s.assert)(t.node.isWildcardImport);"#
+        ));
+        assert!(!pyright_contents.contains(r#"void 0!==i&&i.isImportFound"#));
     }
 }
