@@ -52,6 +52,23 @@ pub struct ProjectConfig {
 pub struct CppConfig {
     /// CMake compile database generation settings.
     pub cmake: Option<CmakeCompileDatabaseConfig>,
+    /// Compile database selection settings used after discovery/generation.
+    pub coverage: Option<CppCoverageConfig>,
+}
+
+/// Optional C/C++ compile database selection controls. These settings tune
+/// which discovered databases are merged before running `scip-clang`.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct CppCoverageConfig {
+    /// Optional path patterns for compile databases to keep. When empty, every
+    /// discovered C/C++ compile database is eligible unless excluded.
+    #[serde(default)]
+    pub include: Vec<String>,
+    /// Path patterns for compile databases to ignore after discovery.
+    #[serde(default)]
+    pub exclude: Vec<String>,
+    /// Minimum number of new source files an additional database must add.
+    pub min_new_files: Option<usize>,
 }
 
 /// Optional CMake configure jobs used to create compile database files before
@@ -325,6 +342,34 @@ mod tests {
             cmake.build_root.unwrap(),
             PathBuf::from("out/scip-io-cmake")
         );
+    }
+
+    #[test]
+    fn test_load_config_with_cpp_coverage_profile() {
+        let dir = TempDir::new().unwrap();
+        let config_content = r#"
+            [cpp.coverage]
+            include = ["compile_commands.json", "build-*/compile_commands.json"]
+            exclude = ["build-old/**", "out/tmp/**"]
+            min_new_files = 25
+        "#;
+        fs::write(dir.path().join(".scip-io.toml"), config_content).unwrap();
+
+        let config = ProjectConfig::load(dir.path()).unwrap();
+        let coverage = config.cpp.unwrap().coverage.unwrap();
+
+        assert_eq!(
+            coverage.include,
+            vec![
+                "compile_commands.json".to_string(),
+                "build-*/compile_commands.json".to_string()
+            ]
+        );
+        assert_eq!(
+            coverage.exclude,
+            vec!["build-old/**".to_string(), "out/tmp/**".to_string()]
+        );
+        assert_eq!(coverage.min_new_files, Some(25));
     }
 
     #[test]

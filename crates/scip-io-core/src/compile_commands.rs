@@ -29,6 +29,35 @@ pub struct CompileCommandMergeReport {
     pub unique_files: usize,
     pub new_files_vs_primary: usize,
     pub skipped: Vec<CompileCommandDatabaseSkip>,
+    pub databases: Vec<CompileCommandDatabaseCoverage>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Default)]
+pub struct CompileCommandCoverageOptions {
+    #[serde(default)]
+    pub include: Vec<String>,
+    #[serde(default)]
+    pub exclude: Vec<String>,
+    pub min_new_files: Option<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Default)]
+pub struct CompileCommandSelection {
+    pub configs: Vec<PathBuf>,
+    pub databases: Vec<CompileCommandDatabaseCoverage>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CompileCommandDatabaseCoverage {
+    pub path: PathBuf,
+    pub relative_path: String,
+    pub selected: bool,
+    pub skip_reason: Option<String>,
+    pub input_commands: usize,
+    pub output_commands: usize,
+    pub duplicate_commands: usize,
+    pub unique_files: usize,
+    pub new_unique_files: usize,
 }
 
 pub fn discover_compile_command_databases(root: &Path) -> Result<CompileCommandDiscovery> {
@@ -83,6 +112,80 @@ pub fn summarize_compile_command_databases(
 ) -> Result<CompileCommandMergeReport> {
     let (_, report) = merge_compile_command_database_entries(compile_databases)?;
     Ok(report)
+}
+
+pub fn select_compile_command_databases(
+    root: &Path,
+    compile_databases: &[PathBuf],
+    options: &CompileCommandCoverageOptions,
+) -> Result<CompileCommandSelection> {
+    let mut selection = CompileCommandSelection::default();
+    let mut selected_files = BTreeSet::new();
+    let mut selected_commands = HashSet::new();
+    let min_new_files = options.min_new_files.unwrap_or(0);
+
+    for path in compile_databases {
+        let relative_path = compile_database_relative_path(root, path);
+        let commands = read_compile_database(path)?;
+        let mut input_commands = 0;
+        let mut database_files = BTreeSet::new();
+        let mut command_keys = Vec::new();
+
+        for command in commands.iter().filter(|entry| is_cpp_entry(entry)) {
+            input_commands += 1;
+            let Some(file_key) = compile_command_file_key(command) else {
+                continue;
+            };
+            database_files.insert(file_key.clone());
+            command_keys.push(format!(
+                "{file_key}\0{}",
+                compile_command_command_key(command)
+            ));
+        }
+
+        let new_unique_files = database_files.difference(&selected_files).count();
+        let mut new_command_keys = HashSet::new();
+        let mut output_commands = 0;
+        let mut duplicate_commands = 0;
+        for command_key in &command_keys {
+            if selected_commands.contains(command_key)
+                || !new_command_keys.insert(command_key.clone())
+            {
+                duplicate_commands += 1;
+            } else {
+                output_commands += 1;
+            }
+        }
+        let unique_files = database_files.len();
+
+        let skip_reason = compile_database_coverage_skip_reason(
+            &relative_path,
+            selection.configs.is_empty(),
+            new_unique_files,
+            min_new_files,
+            options,
+        );
+        let selected = skip_reason.is_none();
+        if selected {
+            selected_files.extend(database_files);
+            selected_commands.extend(new_command_keys);
+            selection.configs.push(path.clone());
+        }
+
+        selection.databases.push(CompileCommandDatabaseCoverage {
+            path: path.clone(),
+            relative_path,
+            selected,
+            skip_reason,
+            input_commands,
+            output_commands,
+            duplicate_commands,
+            unique_files,
+            new_unique_files,
+        });
+    }
+
+    Ok(selection)
 }
 
 pub fn merge_compile_command_databases(
@@ -283,6 +386,83 @@ fn compile_command_command_key(command: &Value) -> String {
     }
 }
 
+fn compile_database_coverage_skip_reason(
+    relative_path: &str,
+    is_first_selected: bool,
+    new_unique_files: usize,
+    min_new_files: usize,
+    options: &CompileCommandCoverageOptions,
+) -> Option<String> {
+    if !options.include.is_empty() && !path_matches_any_pattern(relative_path, &options.include) {
+        return Some("not matched by cpp.coverage.include".to_string());
+    }
+    if path_matches_any_pattern(relative_path, &options.exclude) {
+        return Some("excluded by cpp.coverage.exclude".to_string());
+    }
+    if !is_first_selected && new_unique_files < min_new_files {
+        return Some(format!(
+            "adds {new_unique_files} new unique file(s), below cpp.coverage.min_new_files={min_new_files}"
+        ));
+    }
+    None
+}
+
+fn path_matches_any_pattern(path: &str, patterns: &[String]) -> bool {
+    patterns
+        .iter()
+        .any(|pattern| path_matches_pattern(path, pattern))
+}
+
+fn path_matches_pattern(path: &str, pattern: &str) -> bool {
+    let path = path.replace('\\', "/");
+    let pattern = pattern.replace('\\', "/");
+    if !pattern.contains('*') && !pattern.contains('?') {
+        let directory_pattern = pattern.trim_end_matches('/');
+        return path == directory_pattern || path.starts_with(&format!("{directory_pattern}/"));
+    }
+    wildcard_matches(&pattern, &path)
+}
+
+fn wildcard_matches(pattern: &str, text: &str) -> bool {
+    let pattern = pattern.as_bytes();
+    let text = text.as_bytes();
+    let mut pattern_index = 0;
+    let mut text_index = 0;
+    let mut star_index = None;
+    let mut star_text_index = 0;
+
+    while text_index < text.len() {
+        if pattern_index < pattern.len()
+            && (pattern[pattern_index] == b'?' || pattern[pattern_index] == text[text_index])
+        {
+            pattern_index += 1;
+            text_index += 1;
+        } else if pattern_index < pattern.len() && pattern[pattern_index] == b'*' {
+            star_index = Some(pattern_index);
+            pattern_index += 1;
+            star_text_index = text_index;
+        } else if let Some(star) = star_index {
+            pattern_index = star + 1;
+            star_text_index += 1;
+            text_index = star_text_index;
+        } else {
+            return false;
+        }
+    }
+
+    while pattern_index < pattern.len() && pattern[pattern_index] == b'*' {
+        pattern_index += 1;
+    }
+    pattern_index == pattern.len()
+}
+
+fn compile_database_relative_path(root: &Path, path: &Path) -> String {
+    path.strip_prefix(root)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .replace('\\', "/")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -325,6 +505,105 @@ mod tests {
         assert_eq!(report.output_commands, 2);
         assert_eq!(report.duplicate_commands, 0);
         assert_eq!(report.unique_files, 1);
+    }
+
+    #[test]
+    fn coverage_selection_skips_excluded_and_low_gain_databases() {
+        let dir = TempDir::new().unwrap();
+        write_compile_database(
+            dir.path(),
+            "compile_commands.json",
+            r#"[{"directory":"src","file":"a.cc","command":"clang++ -c a.cc"}]"#,
+        );
+        write_compile_database(
+            dir.path(),
+            "build-duplicate/compile_commands.json",
+            r#"[{"directory":"src","file":"a.cc","command":"clang++ -c a.cc"}]"#,
+        );
+        write_compile_database(
+            dir.path(),
+            "build-small/compile_commands.json",
+            r#"[{"directory":"src","file":"b.cc","command":"clang++ -c b.cc"}]"#,
+        );
+        write_compile_database(
+            dir.path(),
+            "build-large/compile_commands.json",
+            r#"[
+              {"directory":"src","file":"c.cc","command":"clang++ -c c.cc"},
+              {"directory":"src","file":"d.cc","command":"clang++ -c d.cc"}
+            ]"#,
+        );
+        write_compile_database(
+            dir.path(),
+            "build-excluded/compile_commands.json",
+            r#"[{"directory":"src","file":"e.cc","command":"clang++ -c e.cc"}]"#,
+        );
+
+        let discovery = discover_compile_command_databases(dir.path()).unwrap();
+        let selection = select_compile_command_databases(
+            dir.path(),
+            &discovery.configs,
+            &CompileCommandCoverageOptions {
+                exclude: vec!["build-excluded/**".to_string()],
+                min_new_files: Some(2),
+                ..CompileCommandCoverageOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            selection.configs,
+            vec![
+                dir.path().join("compile_commands.json"),
+                dir.path().join("build-large/compile_commands.json")
+            ]
+        );
+        let reports = selection
+            .databases
+            .iter()
+            .map(|database| {
+                (
+                    database.relative_path.clone(),
+                    database.selected,
+                    database.new_unique_files,
+                    database.skip_reason.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            reports,
+            vec![
+                ("compile_commands.json".to_string(), true, 1, None),
+                (
+                    "build-duplicate/compile_commands.json".to_string(),
+                    false,
+                    0,
+                    Some(
+                        "adds 0 new unique file(s), below cpp.coverage.min_new_files=2".to_string()
+                    )
+                ),
+                (
+                    "build-excluded/compile_commands.json".to_string(),
+                    false,
+                    1,
+                    Some("excluded by cpp.coverage.exclude".to_string())
+                ),
+                (
+                    "build-large/compile_commands.json".to_string(),
+                    true,
+                    2,
+                    None
+                ),
+                (
+                    "build-small/compile_commands.json".to_string(),
+                    false,
+                    1,
+                    Some(
+                        "adds 1 new unique file(s), below cpp.coverage.min_new_files=2".to_string()
+                    )
+                )
+            ]
+        );
     }
 
     #[test]

@@ -21,6 +21,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   feed those generated databases through the existing C/C++ merge path. On
   Windows, generation follows the WSL backend when `scip-clang` is WSL-backed so
   generated compile databases stay Linux-path compatible.
+- Added `[cpp.coverage]` compile database curation for C/C++. Users can include
+  or exclude discovered `compile_commands.json` paths and set `min_new_files` so
+  large repositories skip low-gain duplicate databases while dry-run output
+  reports per-database selection, skip reason, command counts, and file gain.
+  Profiles that filter out every C/C++ compile database now fail as config
+  errors instead of falling back to root-only indexing.
 
 ### Fixed
 
