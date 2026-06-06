@@ -7,7 +7,14 @@ use anyhow::{Context, Result, bail};
 use console::style;
 use futures_util::stream::{self, StreamExt};
 
-use scip_io_core::config::{IndexScope, ProjectConfig};
+use scip_io_core::cmake_compile_databases::{
+    CmakeCompileDatabaseGenerationPlan, cmake_compile_database_generation_enabled,
+    generate_cmake_compile_databases_with_backend, plan_cmake_compile_database_generation,
+};
+use scip_io_core::compile_commands::{
+    discover_compile_command_databases, summarize_compile_command_databases,
+};
+use scip_io_core::config::{CmakeCompileDatabaseConfig, IndexScope, ProjectConfig};
 use scip_io_core::config_discovery::{
     discover_additional_configs, supported_additional_config_languages,
 };
@@ -67,7 +74,13 @@ pub async fn run(args: IndexArgs) -> Result<()> {
     let config = ProjectConfig::load(&path)?;
 
     let project_roots = resolve_project_roots_with_config(&args, &path, &config)?;
-    let projects = detect_languages_for_roots(&args, &project_roots)?;
+    let is_json = args.format == "json";
+    let cmake_generation_plans =
+        plan_cmake_compile_database_generation_for_roots(&args, &config, &project_roots)?;
+    if !args.dry_run {
+        generate_cmake_compile_databases_for_roots(&args, &config, &project_roots, is_json).await?;
+    }
+    let projects = detect_languages_for_roots_with_config(&args, &project_roots, &config)?;
     let total_languages = projects
         .iter()
         .map(|project| project.languages.len())
@@ -77,11 +90,9 @@ pub async fn run(args: IndexArgs) -> Result<()> {
         bail!("No supported languages found to index");
     }
 
-    let is_json = args.format == "json";
-
     // Dry-run mode: show what would be done then exit
     if args.dry_run {
-        return run_dry_run(&args, &projects, is_json, &config);
+        return run_dry_run(&args, &projects, is_json, &config, &cmake_generation_plans);
     }
 
     if !is_json {
@@ -360,7 +371,7 @@ fn resolve_project_roots_with_config(
         scope: effective_scope(args, config),
         explicit_roots: &args.roots,
         all_roots: args.all_roots,
-        include_additional_configs: args.include_additional_configs,
+        include_additional_configs: effective_include_additional_configs(args, config),
         language_filters: &args.lang,
     })?
     .into_iter()
@@ -375,9 +386,113 @@ fn effective_scope(args: &IndexArgs, config: &ProjectConfig) -> IndexScope {
     args.scope.or(config.scope).unwrap_or_default()
 }
 
+fn effective_include_additional_configs(args: &IndexArgs, config: &ProjectConfig) -> bool {
+    args.include_additional_configs
+        || config.include_additional_configs.unwrap_or(false)
+        || effective_cmake_compile_database_config(args, config)
+            .as_ref()
+            .is_some_and(cmake_compile_database_generation_enabled)
+}
+
+fn effective_cmake_compile_database_config(
+    args: &IndexArgs,
+    config: &ProjectConfig,
+) -> Option<CmakeCompileDatabaseConfig> {
+    let mut cmake = config
+        .cpp
+        .as_ref()
+        .and_then(|cpp| cpp.cmake.clone())
+        .unwrap_or_default();
+    if args.generate_cmake_compile_dbs {
+        cmake.generate_compile_databases = Some(true);
+    }
+    if let Some(preset) = args.cmake_preset {
+        cmake.preset = Some(preset);
+    }
+    if cmake_compile_database_generation_enabled(&cmake) {
+        Some(cmake)
+    } else {
+        None
+    }
+}
+
+fn plan_cmake_compile_database_generation_for_roots(
+    args: &IndexArgs,
+    config: &ProjectConfig,
+    roots: &[PathBuf],
+) -> Result<Vec<(PathBuf, CmakeCompileDatabaseGenerationPlan)>> {
+    let Some(cmake_config) = effective_cmake_compile_database_config(args, config) else {
+        return Ok(Vec::new());
+    };
+    roots
+        .iter()
+        .map(|root| {
+            plan_cmake_compile_database_generation(root, &cmake_config)
+                .map(|plan| (root.clone(), plan))
+        })
+        .collect()
+}
+
+async fn generate_cmake_compile_databases_for_roots(
+    args: &IndexArgs,
+    config: &ProjectConfig,
+    roots: &[PathBuf],
+    is_json: bool,
+) -> Result<()> {
+    let Some(cmake_config) = effective_cmake_compile_database_config(args, config) else {
+        return Ok(());
+    };
+
+    let backend_preference = config.backend_preference_for("cpp", "scip-clang");
+    for root in roots {
+        let report =
+            generate_cmake_compile_databases_with_backend(root, &cmake_config, &backend_preference)
+                .await?;
+        if is_json {
+            continue;
+        }
+        if report.planned_jobs == 0 {
+            continue;
+        }
+        println!(
+            "  {} CMake compile DBs: {} generated, {} existing ({})",
+            style("+").cyan(),
+            report.generated_jobs,
+            report.existing_jobs,
+            display_project_root(root, root)
+        );
+        for job in &report.jobs {
+            let status = match job.status {
+                scip_io_core::cmake_compile_databases::CmakeCompileDatabaseJobStatus::Pending => {
+                    "generated"
+                }
+                scip_io_core::cmake_compile_databases::CmakeCompileDatabaseJobStatus::Existing => {
+                    "existing"
+                }
+            };
+            println!(
+                "      {} {} -> {}",
+                status,
+                job.name,
+                display_project_root(&job.compile_commands, root)
+            );
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
 fn detect_languages_for_roots(
     args: &IndexArgs,
     project_roots: &[PathBuf],
+) -> Result<Vec<ProjectLanguages>> {
+    detect_languages_for_roots_with_config(args, project_roots, &ProjectConfig::default())
+}
+
+fn detect_languages_for_roots_with_config(
+    args: &IndexArgs,
+    project_roots: &[PathBuf],
+    config: &ProjectConfig,
 ) -> Result<Vec<ProjectLanguages>> {
     let mut projects = Vec::new();
 
@@ -407,7 +522,7 @@ fn detect_languages_for_roots(
                 })
                 .collect()
         };
-        let languages = add_additional_configs_if_requested(args, root, languages)?;
+        let languages = add_additional_configs_if_requested(args, config, root, languages)?;
         if languages.is_empty() {
             continue;
         }
@@ -423,10 +538,11 @@ fn detect_languages_for_roots(
 
 fn add_additional_configs_if_requested(
     args: &IndexArgs,
+    config: &ProjectConfig,
     root: &Path,
     mut languages: Vec<Language>,
 ) -> Result<Vec<Language>> {
-    if !args.include_additional_configs {
+    if !effective_include_additional_configs(args, config) {
         return Ok(languages);
     }
 
@@ -616,45 +732,48 @@ fn run_dry_run(
     projects: &[ProjectLanguages],
     is_json: bool,
     config: &ProjectConfig,
+    cmake_generation_plans: &[(PathBuf, CmakeCompileDatabaseGenerationPlan)],
 ) -> Result<()> {
     if is_json {
-        let plan: Vec<serde_json::Value> = projects
-            .iter()
-            .flat_map(|project| {
-                project.languages.iter().map(|lang| {
-                    let indexer = REGISTRY.runnable_for(lang);
-                    let backend = indexer
-                        .map(|entry| config.backend_preference_for(lang.name(), &entry.indexer_name));
-                    let toolchain = indexer
-                        .and_then(|entry| toolchain_preflight_for_indexer(entry, &config.toolchains));
-                    serde_json::json!({
-                        "root": project.root.display().to_string(),
-                        "language": lang.name(),
-                        "evidence": lang.evidence(),
-                        "indexer": indexer.map(|e| &e.indexer_name),
-                        "installed": indexer.map(|e| e.is_installed()).unwrap_or(false),
-                        "backend": backend.as_ref().map(|preference| format!("{:?}", preference.kind).to_ascii_lowercase()),
-                        "native_supported": indexer.map(|e| e.native_supported_on_current_platform()).unwrap_or(false),
-                        "toolchain_required": toolchain.as_ref().map(|status| status.kind.as_str()),
-                        "toolchain_available": toolchain.as_ref().map(|status| status.available),
-                        "toolchain_message": toolchain.as_ref().map(|status| status.message.as_str()),
-                        "indexer_ready": lang.indexer_ready,
-                        "readiness_message": lang.readiness_message.as_deref(),
-                        "scope": effective_scope(args, config).to_string(),
-                        "command": if lang.indexer_ready { indexer.map(|e| {
-                            format!(
-                                "{} {}",
-                                e.binary_name,
-                                dry_run_command_args(e, &project.root, lang, config).join(" ")
-                            )
-                        }) } else { None },
-                        "configs": lang.additional_configs.iter().map(|path| {
-                            display_project_root(path, &project.root)
-                        }).collect::<Vec<_>>(),
-                    })
-                })
-            })
-            .collect();
+        let mut plan = Vec::new();
+        for project in projects {
+            for lang in &project.languages {
+                let indexer = REGISTRY.runnable_for(lang);
+                let backend = indexer
+                    .map(|entry| config.backend_preference_for(lang.name(), &entry.indexer_name));
+                let toolchain = indexer
+                    .and_then(|entry| toolchain_preflight_for_indexer(entry, &config.toolchains));
+                let compile_database_summary =
+                    dry_run_compile_database_summary(&project.root, lang)?;
+                plan.push(serde_json::json!({
+                    "root": project.root.display().to_string(),
+                    "language": lang.name(),
+                    "evidence": lang.evidence(),
+                    "indexer": indexer.map(|e| &e.indexer_name),
+                    "installed": indexer.map(|e| e.is_installed()).unwrap_or(false),
+                    "backend": backend.as_ref().map(|preference| format!("{:?}", preference.kind).to_ascii_lowercase()),
+                    "native_supported": indexer.map(|e| e.native_supported_on_current_platform()).unwrap_or(false),
+                    "toolchain_required": toolchain.as_ref().map(|status| status.kind.as_str()),
+                    "toolchain_available": toolchain.as_ref().map(|status| status.available),
+                    "toolchain_message": toolchain.as_ref().map(|status| status.message.as_str()),
+                    "indexer_ready": lang.indexer_ready,
+                    "readiness_message": lang.readiness_message.as_deref(),
+                    "scope": effective_scope(args, config).to_string(),
+                    "command": if lang.indexer_ready { indexer.map(|e| {
+                        format!(
+                            "{} {}",
+                            e.binary_name,
+                            dry_run_command_args(e, &project.root, lang, config).join(" ")
+                        )
+                    }) } else { None },
+                    "configs": lang.additional_configs.iter().map(|path| {
+                        display_project_root(path, &project.root)
+                    }).collect::<Vec<_>>(),
+                    "compile_database_summary": compile_database_summary,
+                    "cmake_compile_database_generation": dry_run_cmake_compile_database_generation(&project.root, cmake_generation_plans)?,
+                }));
+            }
+        }
         println!("{}", serde_json::to_string_pretty(&plan)?);
     } else {
         println!(
@@ -699,6 +818,18 @@ fn run_dry_run(
                     continue;
                 }
                 if let Some(e) = indexer {
+                    if lang.kind == scip_io_core::LanguageKind::Cpp
+                        && let Some(summary) = dry_run_cmake_compile_database_generation(
+                            &project.root,
+                            cmake_generation_plans,
+                        )?
+                    {
+                        println!(
+                            "      cmake compile db generation: {} job(s), {} existing",
+                            json_u64(&summary, "planned_jobs"),
+                            json_u64(&summary, "existing_jobs")
+                        );
+                    }
                     if let Some(toolchain) = toolchain_preflight_for_indexer(e, &config.toolchains)
                     {
                         println!(
@@ -729,6 +860,23 @@ fn run_dry_run(
                                 .join(", ")
                         );
                     }
+                    if let Some(summary) = dry_run_compile_database_summary(&project.root, lang)? {
+                        println!(
+                            "      compile dbs: {} selected, {} input commands, {} merged commands, {} duplicate commands, {} unique files, {} new files vs primary, {} skipped",
+                            json_u64(&summary, "selected_databases"),
+                            json_u64(&summary, "input_commands"),
+                            json_u64(&summary, "output_commands"),
+                            json_u64(&summary, "duplicate_commands"),
+                            json_u64(&summary, "unique_files"),
+                            json_u64(&summary, "new_files_vs_primary"),
+                            json_u64(&summary, "skipped_databases")
+                        );
+                        let skipped_details =
+                            skipped_compile_database_details(&project.root, &summary);
+                        if !skipped_details.is_empty() {
+                            println!("      skipped compile dbs: {}", skipped_details.join("; "));
+                        }
+                    }
                 }
             }
         }
@@ -745,6 +893,72 @@ fn run_dry_run(
         }
     }
     Ok(())
+}
+
+fn dry_run_cmake_compile_database_generation(
+    root: &Path,
+    plans: &[(PathBuf, CmakeCompileDatabaseGenerationPlan)],
+) -> Result<Option<serde_json::Value>> {
+    let Some((_, plan)) = plans.iter().find(|(plan_root, _)| plan_root == root) else {
+        return Ok(None);
+    };
+    let existing_jobs = plan
+        .jobs
+        .iter()
+        .filter(|job| {
+            job.status
+                == scip_io_core::cmake_compile_databases::CmakeCompileDatabaseJobStatus::Existing
+        })
+        .count();
+    Ok(Some(serde_json::json!({
+        "planned_jobs": plan.jobs.len(),
+        "existing_jobs": existing_jobs,
+        "jobs": plan.jobs.iter().map(|job| serde_json::json!({
+            "name": job.name,
+            "source_dir": display_project_root(&job.source_dir, root),
+            "build_dir": display_project_root(&job.build_dir, root),
+            "compile_commands": display_project_root(&job.compile_commands, root),
+            "status": job.status,
+            "command": format!("{} {}", job.cmake.display(), job.args.join(" ")),
+        })).collect::<Vec<_>>(),
+    })))
+}
+
+fn dry_run_compile_database_summary(
+    root: &Path,
+    lang: &Language,
+) -> Result<Option<serde_json::Value>> {
+    if lang.kind != scip_io_core::LanguageKind::Cpp || lang.additional_configs.is_empty() {
+        return Ok(None);
+    }
+
+    let discovery = discover_compile_command_databases(root)?;
+    let mut report = summarize_compile_command_databases(&lang.additional_configs)?;
+    report.skipped = discovery.skipped;
+    report.skipped_databases = report.skipped.len();
+    Ok(Some(serde_json::to_value(report)?))
+}
+
+fn json_u64(value: &serde_json::Value, field: &str) -> u64 {
+    value
+        .get(field)
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0)
+}
+
+fn skipped_compile_database_details(root: &Path, summary: &serde_json::Value) -> Vec<String> {
+    summary
+        .get("skipped")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|skip| {
+            let path = skip.get("path")?.as_str()?;
+            let reason = skip.get("reason")?.as_str()?;
+            let display = display_project_root(Path::new(path), root).replace('\\', "/");
+            Some(format!("{display}: {reason}"))
+        })
+        .collect()
 }
 
 fn should_prepare_native_binary(entry: &IndexerEntry, preference: &BackendPreference) -> bool {
@@ -777,12 +991,33 @@ fn dry_run_command_args(
     config: &ProjectConfig,
 ) -> Vec<String> {
     let output_file = PathBuf::from(format!("{}.scip", lang.name()));
+    let override_entry = config.args_override_for(lang.name(), &entry.indexer_name);
+    if entry.indexer_name == "scip-clang" && !lang.additional_configs.is_empty() {
+        let merged_compile_database = PathBuf::from("<merged compile_commands.json>");
+        let args = match override_entry {
+            Some(default_args) => runner::build_compile_command_database_args_with_defaults(
+                entry,
+                &merged_compile_database,
+                &output_file,
+                &default_args,
+            ),
+            None => runner::build_compile_command_database_args(
+                entry,
+                &merged_compile_database,
+                &output_file,
+            ),
+        };
+        return args
+            .into_iter()
+            .map(|arg| arg.to_string_lossy().to_string())
+            .collect();
+    }
+
     let display_configs = lang
         .additional_configs
         .iter()
         .map(|path| PathBuf::from(display_project_root(path, project_root)))
         .collect::<Vec<_>>();
-    let override_entry = config.args_override_for(lang.name(), &entry.indexer_name);
 
     match override_entry {
         Some(default_args) => runner::build_indexer_args_with_defaults_for_display(
@@ -893,9 +1128,15 @@ fn is_nested_typescript_without_explicit_configs(
 mod tests {
     use super::{
         IndexArgs, IndexerTask, collect_unready_language_failures, dedupe_tasks_by_indexer,
-        detect_languages_for_roots, index_publication_message, resolve_project_roots,
+        detect_languages_for_roots, detect_languages_for_roots_with_config,
+        dry_run_compile_database_summary, effective_include_additional_configs,
+        index_publication_message, resolve_project_roots, resolve_project_roots_with_config,
+        skipped_compile_database_details,
     };
     use scip_io_core::LanguageKind;
+    use scip_io_core::config::{
+        CmakeCompileDatabaseConfig, CmakeCompileDatabasePreset, CppConfig, ProjectConfig,
+    };
     use scip_io_core::indexer::backend::BackendPreference;
     use scip_io_core::indexer::registry::REGISTRY;
     use std::fs;
@@ -916,6 +1157,8 @@ mod tests {
             all_roots: false,
             scope: None,
             include_additional_configs: false,
+            generate_cmake_compile_dbs: false,
+            cmake_preset: None,
         }
     }
 
@@ -929,6 +1172,12 @@ mod tests {
             fs::write(path, "").unwrap();
         }
         (dir, root)
+    }
+
+    fn write_compile_database(root: &Path, relative_path: &str, contents: &str) {
+        let path = root.join(relative_path);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, contents).unwrap();
     }
 
     #[test]
@@ -1124,6 +1373,143 @@ mod tests {
                 root.join("tsconfig.test.json")
             ]
         );
+    }
+
+    #[test]
+    fn dry_run_cpp_compile_database_summary_reports_coverage_delta() {
+        let (_dir, root) = fixture(&["src/main.cpp"]);
+        write_compile_database(
+            &root,
+            "compile_commands.json",
+            r#"[{"directory":"src","file":"a.cc","command":"clang++ -c a.cc"}]"#,
+        );
+        write_compile_database(
+            &root,
+            "build-scip-wsl/compile_commands.json",
+            r#"[
+              {"directory":"src","file":"a.cc","command":"clang++ -c a.cc"},
+              {"directory":"build-scip-wsl","file":"../src/b.cc","command":"clang++ -c ../src/b.cc"}
+            ]"#,
+        );
+        write_compile_database(&root, "cmake-build-bad/compile_commands.json", "{bad json");
+        let mut args = base_args();
+        args.include_additional_configs = true;
+
+        let projects = detect_languages_for_roots(&args, std::slice::from_ref(&root)).unwrap();
+        let lang = projects[0]
+            .languages
+            .iter()
+            .find(|language| language.kind == LanguageKind::Cpp)
+            .unwrap();
+        let summary = dry_run_compile_database_summary(&root, lang)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(summary["selected_databases"], 2);
+        assert_eq!(summary["input_commands"], 3);
+        assert_eq!(summary["output_commands"], 2);
+        assert_eq!(summary["duplicate_commands"], 1);
+        assert_eq!(summary["unique_files"], 2);
+        assert_eq!(summary["new_files_vs_primary"], 1);
+        assert_eq!(summary["skipped_databases"], 1);
+
+        let details = skipped_compile_database_details(&root, &summary);
+        assert_eq!(details.len(), 1);
+        assert!(details[0].contains("cmake-build-bad/compile_commands.json"));
+        assert!(details[0].contains("Failed to parse"));
+    }
+
+    #[test]
+    fn config_include_additional_configs_discovers_cpp_compile_databases() {
+        let (_dir, root) = fixture(&["src/main.cpp"]);
+        write_compile_database(
+            &root,
+            "compile_commands.json",
+            r#"[{"directory":"src","file":"main.cpp","command":"clang++ -c main.cpp"}]"#,
+        );
+        write_compile_database(
+            &root,
+            "build-scip-wsl/compile_commands.json",
+            r#"[{"directory":"build-scip-wsl","file":"../src/tool.cpp","command":"clang++ -c ../src/tool.cpp"}]"#,
+        );
+        let args = base_args();
+        let config = ProjectConfig {
+            include_additional_configs: Some(true),
+            ..ProjectConfig::default()
+        };
+
+        let projects =
+            detect_languages_for_roots_with_config(&args, std::slice::from_ref(&root), &config)
+                .unwrap();
+
+        let cpp = projects[0]
+            .languages
+            .iter()
+            .find(|language| language.kind == LanguageKind::Cpp)
+            .unwrap();
+        assert_eq!(
+            cpp.additional_configs,
+            vec![
+                root.join("compile_commands.json"),
+                root.join("build-scip-wsl/compile_commands.json")
+            ]
+        );
+    }
+
+    #[test]
+    fn cmake_generation_implies_additional_config_discovery() {
+        let (_dir, root) = fixture(&["llvm/CMakeLists.txt", "src/main.cpp"]);
+        write_compile_database(
+            &root,
+            "build-scip-io-llvm-all-targets/compile_commands.json",
+            r#"[{"directory":"build-scip-io-llvm-all-targets","file":"../src/main.cpp","command":"clang++ -c ../src/main.cpp"}]"#,
+        );
+        let args = base_args();
+        let config = ProjectConfig {
+            cpp: Some(CppConfig {
+                cmake: Some(CmakeCompileDatabaseConfig {
+                    generate_compile_databases: Some(true),
+                    preset: Some(CmakeCompileDatabasePreset::LlvmBroad),
+                    ..CmakeCompileDatabaseConfig::default()
+                }),
+            }),
+            ..ProjectConfig::default()
+        };
+
+        assert!(effective_include_additional_configs(&args, &config));
+        let projects =
+            detect_languages_for_roots_with_config(&args, std::slice::from_ref(&root), &config)
+                .unwrap();
+
+        let cpp = projects[0]
+            .languages
+            .iter()
+            .find(|language| language.kind == LanguageKind::Cpp)
+            .unwrap();
+        assert_eq!(
+            cpp.additional_configs,
+            vec![root.join("build-scip-io-llvm-all-targets/compile_commands.json")]
+        );
+    }
+
+    #[test]
+    fn config_include_additional_configs_discovers_config_only_roots() {
+        let (_dir, root) = fixture(&["src/main.cpp"]);
+        write_compile_database(
+            &root,
+            "build-scip-wsl/compile_commands.json",
+            r#"[{"directory":"build-scip-wsl","file":"../src/main.cpp","command":"clang++ -c ../src/main.cpp"}]"#,
+        );
+        let mut args = base_args();
+        args.all_roots = true;
+        let config = ProjectConfig {
+            include_additional_configs: Some(true),
+            ..ProjectConfig::default()
+        };
+
+        let roots = resolve_project_roots_with_config(&args, &root, &config).unwrap();
+
+        assert_eq!(roots, vec![root.join("build-scip-wsl")]);
     }
 
     #[test]

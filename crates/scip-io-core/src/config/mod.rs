@@ -36,12 +36,92 @@ pub struct ProjectConfig {
     #[serde(default, skip_serializing_if = "ToolchainsConfig::is_empty")]
     pub toolchains: ToolchainsConfig,
 
+    /// C/C++ language-specific settings.
+    pub cpp: Option<CppConfig>,
+
     /// Monorepo sub-project entries
     #[serde(default)]
     pub projects: Vec<ProjectEntry>,
 
     /// Merge configuration
     pub merge: Option<MergeConfig>,
+}
+
+/// C/C++ language-specific configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct CppConfig {
+    /// CMake compile database generation settings.
+    pub cmake: Option<CmakeCompileDatabaseConfig>,
+}
+
+/// Optional CMake configure jobs used to create compile database files before
+/// C/C++ indexing discovers and merges them.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct CmakeCompileDatabaseConfig {
+    /// Generate configured CMake build directories before indexing.
+    pub generate_compile_databases: Option<bool>,
+    /// Preset build matrix for known repository layouts.
+    pub preset: Option<CmakeCompileDatabasePreset>,
+    /// CMake executable path. Defaults to `cmake`.
+    pub cmake: Option<PathBuf>,
+    /// Shared source directory for configured or preset builds.
+    pub source_dir: Option<PathBuf>,
+    /// Shared build root for preset builds.
+    pub build_root: Option<PathBuf>,
+    /// Shared CMake generator, for example `Ninja`.
+    pub generator: Option<String>,
+    /// Re-run CMake even when the build dir already has compile_commands.json.
+    pub refresh: Option<bool>,
+    /// Additional custom CMake configure jobs.
+    #[serde(default)]
+    pub builds: Vec<CmakeCompileDatabaseBuildConfig>,
+}
+
+/// A single CMake configure job.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CmakeCompileDatabaseBuildConfig {
+    /// Human-readable label used in logs and dry-run output.
+    pub name: Option<String>,
+    /// Source directory for this configure job.
+    pub source_dir: Option<PathBuf>,
+    /// Build directory that should receive compile_commands.json.
+    pub build_dir: PathBuf,
+    /// CMake generator for this configure job.
+    pub generator: Option<String>,
+    /// Re-run CMake even when compile_commands.json already exists.
+    pub refresh: Option<bool>,
+    /// Extra CMake configure arguments, normally `-D...` definitions.
+    #[serde(default)]
+    pub args: Vec<String>,
+}
+
+/// Built-in CMake compile database matrix presets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CmakeCompileDatabasePreset {
+    /// LLVM-oriented broad coverage: all LLVM targets, broad projects, and runtimes.
+    LlvmBroad,
+}
+
+impl fmt::Display for CmakeCompileDatabasePreset {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::LlvmBroad => "llvm-broad",
+        })
+    }
+}
+
+impl FromStr for CmakeCompileDatabasePreset {
+    type Err = String;
+
+    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
+        match value {
+            "llvm-broad" | "llvm_broad" => Ok(Self::LlvmBroad),
+            _ => Err(format!(
+                "invalid CMake compile database preset '{value}', expected 'llvm-broad'"
+            )),
+        }
+    }
 }
 
 /// Root selection mode for indexing.
@@ -191,6 +271,7 @@ mod tests {
         assert!(config.indexer.is_empty());
         assert!(config.settings.is_none());
         assert!(config.toolchains.is_empty());
+        assert!(config.cpp.is_none());
         assert!(config.projects.is_empty());
         assert!(config.merge.is_none());
     }
@@ -220,6 +301,30 @@ mod tests {
         let config = ProjectConfig::load(dir.path()).unwrap();
 
         assert_eq!(config.scope, Some(IndexScope::RepoTree));
+    }
+
+    #[test]
+    fn test_load_config_with_cmake_compile_database_generation() {
+        let dir = TempDir::new().unwrap();
+        let config_content = r#"
+            [cpp.cmake]
+            generate_compile_databases = true
+            preset = "llvm-broad"
+            generator = "Ninja"
+            build_root = "out/scip-io-cmake"
+        "#;
+        fs::write(dir.path().join(".scip-io.toml"), config_content).unwrap();
+
+        let config = ProjectConfig::load(dir.path()).unwrap();
+        let cmake = config.cpp.unwrap().cmake.unwrap();
+
+        assert_eq!(cmake.generate_compile_databases, Some(true));
+        assert_eq!(cmake.preset, Some(CmakeCompileDatabasePreset::LlvmBroad));
+        assert_eq!(cmake.generator.as_deref(), Some("Ninja"));
+        assert_eq!(
+            cmake.build_root.unwrap(),
+            PathBuf::from("out/scip-io-cmake")
+        );
     }
 
     #[test]

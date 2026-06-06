@@ -1,9 +1,9 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
 use anyhow::{Context, Result};
 use protobuf::Message;
-use scip::types::{Document, Index, Metadata, TextEncoding, ToolInfo};
+use scip::types::{Document, Index, Metadata, SymbolInformation, TextEncoding, ToolInfo};
 
 use crate::scip_language::{
     ScipPublishStats, compact_index, compact_validate_publish_scip_file,
@@ -97,6 +97,7 @@ fn merge_scip_files_with_options(
 
     // Track documents by relative_path to handle overlapping files
     let mut doc_map: HashMap<String, Document> = HashMap::new();
+    let mut external_symbols: BTreeMap<String, SymbolInformation> = BTreeMap::new();
 
     for input_path in inputs {
         let input_path = input_path.as_ref();
@@ -132,12 +133,19 @@ fn merge_scip_files_with_options(
                 doc_map.insert(key, doc);
             }
         }
+
+        for symbol in index.external_symbols {
+            external_symbols
+                .entry(symbol.symbol.clone())
+                .or_insert(symbol);
+        }
     }
 
     // Collect documents sorted by path for deterministic output
     let mut documents: Vec<Document> = doc_map.into_values().collect();
     documents.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
     merged.documents = documents;
+    merged.external_symbols = external_symbols.into_values().collect();
     metadata_selection.apply_to(&mut metadata);
     if let Some(project_root) = options.project_root {
         metadata.project_root = project_root_to_scip_uri(project_root);
@@ -309,7 +317,7 @@ fn merge_document(target: &mut Document, source: Document) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use scip::types::TextEncoding;
+    use scip::types::{SymbolInformation, TextEncoding};
     use tempfile::TempDir;
 
     #[test]
@@ -342,6 +350,43 @@ mod tests {
         assert_eq!(merged.documents.len(), 2);
         assert_eq!(merged.documents[0].relative_path, "src/lib.ts");
         assert_eq!(merged.documents[1].relative_path, "src/main.rs");
+
+        Ok(())
+    }
+
+    #[test]
+    fn merge_preserves_external_symbols() -> Result<()> {
+        let dir = TempDir::new()?;
+
+        let mut idx1 = Index::new();
+        let mut symbol1 = SymbolInformation::new();
+        symbol1.symbol = "cpp std:: vector#".into();
+        idx1.external_symbols.push(symbol1);
+
+        let mut idx2 = Index::new();
+        let mut duplicate = SymbolInformation::new();
+        duplicate.symbol = "cpp std:: vector#".into();
+        idx2.external_symbols.push(duplicate);
+        let mut symbol2 = SymbolInformation::new();
+        symbol2.symbol = "cpp llvm:: StringRef#".into();
+        idx2.external_symbols.push(symbol2);
+
+        let path1 = dir.path().join("cpp.scip");
+        let path2 = dir.path().join("typescript.scip");
+        let out = dir.path().join("merged.scip");
+
+        std::fs::write(&path1, idx1.write_to_bytes()?)?;
+        std::fs::write(&path2, idx2.write_to_bytes()?)?;
+
+        merge_scip_files(&[&path1, &path2], &out)?;
+
+        let merged = Index::parse_from_bytes(&std::fs::read(&out)?)?;
+        let symbols = merged
+            .external_symbols
+            .iter()
+            .map(|symbol| symbol.symbol.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(symbols, vec!["cpp llvm:: StringRef#", "cpp std:: vector#"]);
 
         Ok(())
     }

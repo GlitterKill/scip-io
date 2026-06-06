@@ -5,17 +5,28 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use walkdir::WalkDir;
 
+use crate::compile_commands::discover_compile_command_databases;
 use crate::detect::languages::LanguageKind;
 
 /// Languages in SCIP-IO's registry whose indexers have a known multi-config
 /// contract. This list is based on indexer capability, not local install state.
 pub fn supported_additional_config_languages() -> &'static [LanguageKind] {
-    &[LanguageKind::TypeScript, LanguageKind::CSharp]
+    &[
+        LanguageKind::TypeScript,
+        LanguageKind::CSharp,
+        LanguageKind::Cpp,
+    ]
 }
 
 /// Discover directories that contain supported additional config files.
 pub fn discover_additional_config_roots(root: &Path) -> Result<Vec<PathBuf>> {
     let mut roots = BTreeSet::new();
+
+    for config in discover_compile_command_databases(root)?.configs {
+        if let Some(parent) = config.parent() {
+            roots.insert(parent.to_path_buf());
+        }
+    }
 
     for entry in WalkDir::new(root)
         .into_iter()
@@ -27,7 +38,8 @@ pub fn discover_additional_config_roots(root: &Path) -> Result<Vec<PathBuf>> {
         }
 
         let file_name = entry.file_name().to_string_lossy();
-        if supported_config_language(&file_name).is_some()
+        if file_name != "compile_commands.json"
+            && supported_config_language(&file_name).is_some()
             && let Some(parent) = entry.path().parent()
         {
             roots.insert(parent.to_path_buf());
@@ -42,6 +54,9 @@ pub fn discover_additional_config_roots(root: &Path) -> Result<Vec<PathBuf>> {
 pub fn discover_additional_configs(root: &Path, language: LanguageKind) -> Result<Vec<PathBuf>> {
     if language == LanguageKind::TypeScript {
         return discover_root_level_typescript_configs(root);
+    }
+    if language == LanguageKind::Cpp {
+        return Ok(discover_compile_command_databases(root)?.configs);
     }
 
     let mut configs = BTreeSet::new();
@@ -72,20 +87,18 @@ pub fn supported_config_language(file_name: &str) -> Option<LanguageKind> {
         Some(LanguageKind::TypeScript)
     } else if is_dotnet_config(file_name) {
         Some(LanguageKind::CSharp)
+    } else if file_name == "compile_commands.json" {
+        Some(LanguageKind::Cpp)
     } else {
         None
     }
 }
 
 fn config_matcher(language: LanguageKind) -> Option<fn(&str) -> bool> {
-    if !supported_additional_config_languages().contains(&language) {
-        return None;
-    }
-
     match language {
         LanguageKind::TypeScript => Some(is_typescript_config),
         LanguageKind::CSharp => Some(is_dotnet_config),
-        _ => unreachable!("supported additional config language without matcher"),
+        _ => None,
     }
 }
 
@@ -154,6 +167,12 @@ mod tests {
         (dir, root)
     }
 
+    fn write_compile_database(root: &Path, relative_path: &str, contents: &str) {
+        let path = root.join(relative_path);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, contents).unwrap();
+    }
+
     fn rels(root: &Path, paths: Vec<PathBuf>) -> Vec<String> {
         paths
             .iter()
@@ -200,6 +219,63 @@ mod tests {
             rels(&root, configs),
             vec!["App.sln", "src/App/App.csproj", "src/Legacy/Legacy.vbproj"]
         );
+    }
+
+    #[test]
+    fn cpp_discovers_root_and_build_compile_databases() {
+        let (_dir, root) = fixture(&["src/main.cpp"]);
+        let valid_root =
+            r#"[{"directory":".","file":"src/main.cpp","command":"clang++ -c src/main.cpp"}]"#;
+        let valid_build = r#"[{"directory":"build-scip-wsl","file":"../lib/a.cc","arguments":["clang++","-c","../lib/a.cc"]}]"#;
+        let valid_cmake = r#"[{"directory":"cmake-build-debug","file":"../tools/tool.c","command":"clang -c ../tools/tool.c"}]"#;
+        let source_fixture = r#"[{"directory":"clang/test/Index","file":"fixture.cpp","command":"clang++ -c fixture.cpp"}]"#;
+        let non_cpp =
+            r#"[{"directory":"build-js","file":"src/app.ts","command":"tsc src/app.ts"}]"#;
+
+        write_compile_database(&root, "compile_commands.json", valid_root);
+        write_compile_database(&root, "build-scip-wsl/compile_commands.json", valid_build);
+        write_compile_database(
+            &root,
+            "cmake-build-debug/compile_commands.json",
+            valid_cmake,
+        );
+        write_compile_database(
+            &root,
+            "clang/test/Index/compile_commands.json",
+            source_fixture,
+        );
+        write_compile_database(&root, "build-js/compile_commands.json", non_cpp);
+        write_compile_database(&root, "cmake-build-bad/compile_commands.json", "{not json");
+
+        let configs = discover_additional_configs(&root, LanguageKind::Cpp).unwrap();
+
+        assert_eq!(
+            rels(&root, configs),
+            vec![
+                "compile_commands.json",
+                "build-scip-wsl/compile_commands.json",
+                "cmake-build-debug/compile_commands.json"
+            ]
+        );
+    }
+
+    #[test]
+    fn cpp_additional_config_roots_include_valid_build_databases() {
+        let (_dir, root) = fixture(&["src/main.cpp"]);
+        write_compile_database(
+            &root,
+            "build-scip-wsl/compile_commands.json",
+            r#"[{"directory":"build-scip-wsl","file":"../src/main.cpp","command":"clang++ -c ../src/main.cpp"}]"#,
+        );
+        write_compile_database(
+            &root,
+            "clang/test/Index/compile_commands.json",
+            r#"[{"directory":"clang/test/Index","file":"fixture.cpp","command":"clang++ -c fixture.cpp"}]"#,
+        );
+
+        let roots = discover_additional_config_roots(&root).unwrap();
+
+        assert_eq!(rels(&root, roots), vec!["build-scip-wsl"]);
     }
 
     #[test]

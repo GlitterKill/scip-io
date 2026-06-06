@@ -65,8 +65,11 @@ When you opt in with `--include-additional-configs` or the GUI's Extra configs
 option, SCIP-IO also discovers secondary config files for indexers that accept
 multiple config inputs. Today that includes root-level `tsconfig.json` and
 `tsconfig.*.json` files for `scip-typescript` and `.sln`, `.csproj`, or `.vbproj` inputs for
-`scip-dotnet`. Other languages continue to use their normal project-root or
-workspace behavior until their indexers expose a safe multi-config contract.
+`scip-dotnet`. For C/C++, SCIP-IO also discovers validated root and
+build-output `compile_commands.json` files, merges duplicate compile commands,
+and sends one combined database to `scip-clang`. Other languages continue to
+use their normal project-root or workspace behavior until their indexers expose
+a safe multi-config contract.
 
 ---
 
@@ -140,7 +143,15 @@ run a root-bound indexer against a child project's config.
 C/C++ remains stricter than the other languages: `compile_commands.json` can
 define an indexable nested root, but `CMakeLists.txt`, Makefiles, Kbuild, and
 Kconfig files only prove that C/C++ exists. They do not provide enough
-information for `scip-clang` unless a compile database is present.
+information for `scip-clang` unless a compile database is present. When
+additional configs are enabled, SCIP-IO consumes existing root/build
+`compile_commands.json` files and deduplicates identical commands; it does not
+index raw C/C++ files without compile commands. CMake build directory
+generation is available only when explicitly enabled with
+`--generate-cmake-compile-dbs` or `[cpp.cmake] generate_compile_databases =
+true`; SCIP-IO runs CMake configure commands to produce more
+`compile_commands.json` files, then indexes only the compile database entries
+that `scip-clang` can consume.
 
 ### Indexer installation strategy
 
@@ -257,13 +268,18 @@ screen shows the same status plus per-language failure details.
 
 Shard execution is capability-gated by upstream indexer contracts:
 
-- Python uses `scip-python --target-only` shards for large trees.
+- Python uses `scip-python --target-only` shards for large trees. Hidden
+  Python files under scan-scope dot paths are added as explicit file targets
+  even when the rest of the Python tree fits in one shard, because
+  `scip-python` can skip hidden paths during a root scan.
 - TypeScript/JavaScript and C# keep the fast single invocation by default, then
   retry memory failures with safe `tsconfig*`, `.sln`, `.csproj`, or `.vbproj`
   project-argument shards. Very large discovered config lists shard up front to
   avoid Windows command-line length limits.
-- C/C++ can split large `compile_commands.json` files into command chunks,
-  because `scip-clang` is already compile-command scoped.
+- C/C++ can split large `compile_commands.json` files into command chunks.
+  With additional configs enabled, SCIP-IO first merges validated root/build
+  compile databases, removes duplicate `file + command/arguments` entries, and
+  then chunks the merged command set.
 - Go, Rust, Java, Scala, and Kotlin are planned around module/build roots only
   when the upstream indexer can safely honor that boundary; otherwise they keep
   the protected single-run behavior.
@@ -282,13 +298,16 @@ files to avoid excessive process startup overhead. Small shards run with
 conservative bounded parallelism, while large shards run alone to keep peak
 memory predictable. Loose files inside oversized directories are packed into
 file batches so flat directories do not become thousands of one-file indexer
-starts. If a large shard still hits a heap limit, SCIP-IO recursively splits it,
-records that target as a local hint, and pre-splits the same target on later
-runs instead of repeating the expensive failed attempt. Shard timing is logged
-so large-project runs expose which targets dominate wall time. If `scip-python`
-emits an empty document path for a single-file shard, SCIP-IO rewrites it to
-that shard's repo-relative file path before merging so unrelated file facts
-cannot collapse into one empty document.
+starts. Python files under dot-path directories such as `.ci/` and `.github/`
+are also planned as explicit shard targets or materialized file batches so
+upstream directory scans do not silently skip repository-scoped files. If a
+large shard still hits a heap limit, SCIP-IO recursively splits it, records that
+target as a local hint, and pre-splits the same target on later runs instead of
+repeating the expensive failed attempt. Shard timing is logged so large-project
+runs expose which targets dominate wall time. If `scip-python` emits an empty
+document path for a single-file shard, SCIP-IO rewrites it to that shard's
+repo-relative file path before merging so unrelated file facts cannot collapse
+into one empty document.
 
 A terminal shard failure still fails Python indexing instead of leaving a
 misleading partial `python.scip`. Setting
@@ -538,7 +557,25 @@ SCIP-IO passes root-level `tsconfig.json` and `tsconfig.*.json` files to
 combined run fails with a memory signature, SCIP-IO retries those configs as
 sequential project-argument shards and merges the results. For .NET, SCIP-IO
 passes all discovered `.sln`, `.csproj`, and `.vbproj` files to `scip-dotnet`
-and uses the same safe retry behavior for memory failures.
+and uses the same safe retry behavior for memory failures. For C/C++, SCIP-IO
+discovers root-level and build-output `compile_commands.json` files, skips
+invalid, empty, fixture-like, or non-C/C++ databases, merges duplicate compile
+commands, and reports selected database, skipped database, duplicate command,
+unique file, and net-new-file counts in dry-run output. This can increase real
+semantic coverage only when the extra databases contain compile commands that
+the primary database does not already cover.
+
+For CMake projects, SCIP-IO can also generate build-output compile databases
+before discovery. This is configure-only: it runs `cmake -S ... -B ...` with
+`CMAKE_EXPORT_COMPILE_COMMANDS=ON` and never runs `cmake --build`. Existing
+generated databases are reused unless `refresh = true` is set. For LLVM-style
+monorepos, the built-in `llvm-broad` preset creates three build directories for
+all LLVM targets, broad LLVM projects, and runtimes, then the normal C/C++
+additional-config merge path deduplicates their compile commands.
+On Windows, if `scip-clang` is configured for WSL or would auto-select WSL,
+SCIP-IO runs the CMake configure commands through WSL as well so the generated
+database contains Linux paths. Docker-backed CMake generation is not supported
+yet; generate those databases inside the container or use WSL/native generation.
 
 TypeScript and JavaScript share `scip-typescript`, but SCIP-IO keeps them as
 separate language runs when both are detected. The TypeScript run uses the
@@ -684,6 +721,13 @@ output = "artifacts/index.scip"
 scope = "repo-tree" # or "configs"
 include_additional_configs = true
 languages = ["typescript", "python"]
+
+[cpp.cmake]
+generate_compile_databases = true
+preset = "llvm-broad"
+generator = "Ninja"
+# Optional. Without build_root, the preset uses build-scip-io-* directories.
+build_root = "out/scip-io-cmake"
 
 [settings]
 parallel = 4

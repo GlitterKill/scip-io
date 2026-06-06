@@ -13,7 +13,7 @@ pub mod validate;
 
 use anyhow::{Result, anyhow};
 use clap::{Parser, Subcommand};
-use scip_io_core::config::IndexScope;
+use scip_io_core::config::{CmakeCompileDatabasePreset, IndexScope};
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -121,6 +121,14 @@ pub struct IndexArgs {
     /// Include extra language config files supported by each indexer
     #[arg(long)]
     pub include_additional_configs: bool,
+
+    /// Generate configured CMake compile databases before C/C++ indexing
+    #[arg(long)]
+    pub generate_cmake_compile_dbs: bool,
+
+    /// Built-in CMake compile database generation preset
+    #[arg(long, value_parser = parse_cmake_compile_database_preset)]
+    pub cmake_preset: Option<CmakeCompileDatabasePreset>,
 }
 
 #[derive(Parser)]
@@ -212,6 +220,12 @@ fn one_target<'a>(
                 command
             )
         })
+}
+
+fn parse_cmake_compile_database_preset(
+    value: &str,
+) -> std::result::Result<CmakeCompileDatabasePreset, String> {
+    value.parse()
 }
 
 #[derive(Parser)]

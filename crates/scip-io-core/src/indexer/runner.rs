@@ -10,6 +10,7 @@ use futures_util::future::{BoxFuture, FutureExt};
 use futures_util::stream::{FuturesUnordered, StreamExt};
 use sha2::{Digest, Sha256};
 
+use crate::compile_commands::discover_compile_command_databases;
 use crate::detect::Language;
 use crate::indexer::IndexerEntry;
 use crate::indexer::backend::{self, BackendExecutionRequest, BackendPreference};
@@ -193,6 +194,19 @@ pub async fn run_indexer_with_request(request: IndexerRunRequest<'_>) -> Result<
         .await;
     }
 
+    if request.entry.indexer_name == "scip-clang" && !request.config_paths.is_empty() {
+        let runtime = CompileCommandRuntime {
+            binary: request.binary,
+            entry: request.entry,
+            project_root: request.project_root,
+            lang: request.lang,
+            default_args: request.args_override.unwrap_or(&request.entry.default_args),
+            backend_preference: &request.backend_preference,
+            toolchains: request.toolchains,
+        };
+        return run_merged_compile_command_indexer(runtime, request.config_paths).await;
+    }
+
     if request.entry.indexer_name == "scip-clang" && request.config_paths.is_empty() {
         let compile_commands = request.project_root.join("compile_commands.json");
         if compile_commands.exists() {
@@ -201,16 +215,16 @@ pub async fn run_indexer_with_request(request: IndexerRunRequest<'_>) -> Result<
                 COMPILE_COMMANDS_SHARD_COMMAND_LIMIT,
             )?;
             if !shards.is_empty() {
-                return run_compile_command_sharded_indexer(
-                    request.binary,
-                    request.entry,
-                    request.project_root,
-                    request.lang,
-                    shards,
-                    &request.backend_preference,
-                    request.toolchains,
-                )
-                .await;
+                let runtime = CompileCommandRuntime {
+                    binary: request.binary,
+                    entry: request.entry,
+                    project_root: request.project_root,
+                    lang: request.lang,
+                    default_args: request.args_override.unwrap_or(&request.entry.default_args),
+                    backend_preference: &request.backend_preference,
+                    toolchains: request.toolchains,
+                };
+                return run_compile_command_sharded_indexer(runtime, shards).await;
             }
         }
     }
@@ -377,37 +391,124 @@ async fn run_project_argument_sharded_indexer(
     )
 }
 
+#[derive(Clone, Copy)]
+struct CompileCommandRuntime<'a> {
+    binary: Option<&'a Path>,
+    entry: &'a IndexerEntry,
+    project_root: &'a Path,
+    lang: &'a Language,
+    default_args: &'a [String],
+    backend_preference: &'a BackendPreference,
+    toolchains: &'a ToolchainsConfig,
+}
+
 async fn run_compile_command_sharded_indexer(
-    binary: Option<&Path>,
-    entry: &IndexerEntry,
-    project_root: &Path,
-    lang: &Language,
+    runtime: CompileCommandRuntime<'_>,
     planned_shards: Vec<PlannedShard>,
-    backend_preference: &BackendPreference,
-    toolchains: &ToolchainsConfig,
 ) -> Result<PathBuf> {
-    run_compile_command_sharded_indexer_with_plan(
-        binary,
-        entry,
-        project_root,
-        lang,
-        planned_shards,
-        backend_preference,
-        toolchains,
-    )
-    .await
+    run_compile_command_sharded_indexer_with_plan(runtime, planned_shards).await
+}
+
+async fn run_merged_compile_command_indexer(
+    runtime: CompileCommandRuntime<'_>,
+    compile_databases: &[PathBuf],
+) -> Result<PathBuf> {
+    let output_file = runtime
+        .project_root
+        .join(format!("{}.scip", runtime.lang.name()));
+    let temp_dir = tempfile::Builder::new()
+        .prefix("scip-io-compile-databases-")
+        .tempdir()
+        .context("Failed to create temporary directory for merged compile database")?;
+    let merged_compile_commands = temp_dir.path().join("compile_commands-merged.json");
+    let report =
+        planner::merge_compile_command_databases(compile_databases, &merged_compile_commands)?;
+    let skipped_database_details = discover_compile_command_databases(runtime.project_root)
+        .map(|discovery| {
+            discovery
+                .skipped
+                .into_iter()
+                .map(|skip| format!("{}: {}", skip.path.display(), skip.reason))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let database_paths = compile_databases
+        .iter()
+        .map(|path| path.display().to_string())
+        .collect::<Vec<_>>();
+
+    tracing::info!(
+        indexer = %runtime.entry.indexer_name,
+        lang = runtime.lang.name(),
+        databases = report.selected_databases,
+        database_paths = ?database_paths,
+        skipped_databases = skipped_database_details.len(),
+        skipped_database_details = ?skipped_database_details,
+        input_commands = report.input_commands,
+        merged_commands = report.output_commands,
+        duplicate_commands = report.duplicate_commands,
+        unique_files = report.unique_files,
+        new_files_vs_primary = report.new_files_vs_primary,
+        "merged compile command databases"
+    );
+
+    let shards = planner::plan_compile_command_shards(
+        &merged_compile_commands,
+        COMPILE_COMMANDS_SHARD_COMMAND_LIMIT,
+    )?;
+    if !shards.is_empty() {
+        return run_compile_command_sharded_indexer(runtime, shards).await;
+    }
+
+    let started = Instant::now();
+    let output_name = format!("{}-compile-database-merged.scip", runtime.lang.name());
+    let temp_output = temp_dir.path().join(&output_name);
+    let args = build_compile_command_database_args_with_defaults(
+        runtime.entry,
+        &merged_compile_commands,
+        &temp_output,
+        runtime.default_args,
+    );
+    let run = run_indexer_to_temp_output_with_args(ProtectedIndexerRun {
+        binary: runtime.binary,
+        entry: runtime.entry,
+        project_root: runtime.project_root,
+        lang: runtime.lang,
+        temp_dir: temp_dir.path(),
+        output_name: &output_name,
+        args,
+        explicit_output: true,
+        backend_preference: runtime.backend_preference.clone(),
+        toolchains: runtime.toolchains,
+    })
+    .await?;
+    publish_scip_file_atomically(&run.path, &output_file)?;
+
+    tracing::info!(
+        indexer = %runtime.entry.indexer_name,
+        lang = runtime.lang.name(),
+        output = %output_file.display(),
+        elapsed_ms = started.elapsed().as_millis(),
+        output_bytes = run.output_bytes,
+        documents = run.stats.documents,
+        symbols = run.stats.symbols,
+        occurrences = run.stats.occurrences,
+        duplicate_documents = run.compaction.duplicate_documents,
+        duplicate_occurrences = run.compaction.duplicate_occurrences,
+        duplicate_symbols = run.compaction.duplicate_symbols,
+        "finished merged compile database indexer"
+    );
+
+    Ok(output_file)
 }
 
 async fn run_compile_command_sharded_indexer_with_plan(
-    binary: Option<&Path>,
-    entry: &IndexerEntry,
-    project_root: &Path,
-    lang: &Language,
+    runtime: CompileCommandRuntime<'_>,
     planned_shards: Vec<PlannedShard>,
-    backend_preference: &BackendPreference,
-    toolchains: &ToolchainsConfig,
 ) -> Result<PathBuf> {
-    let output_file = project_root.join(format!("{}.scip", lang.name()));
+    let output_file = runtime
+        .project_root
+        .join(format!("{}.scip", runtime.lang.name()));
     let temp_dir = tempfile::Builder::new()
         .prefix("scip-io-compile-command-shards-")
         .tempdir()
@@ -431,25 +532,26 @@ async fn run_compile_command_sharded_indexer_with_plan(
         std::fs::write(&chunk_path, serde_json::to_vec(&chunk)?)
             .with_context(|| format!("Failed to write {}", chunk_path.display()))?;
 
-        let output_name = format!("{}-compile-shard-{index:04}.scip", lang.name());
-        let args = build_compile_command_shard_args(entry, &chunk_path);
+        let output_name = format!("{}-compile-shard-{index:04}.scip", runtime.lang.name());
+        let args =
+            build_compile_command_shard_args_with_defaults(&chunk_path, runtime.default_args);
         let run = run_indexer_to_temp_output_with_args(ProtectedIndexerRun {
-            binary,
-            entry,
-            project_root,
-            lang,
+            binary: runtime.binary,
+            entry: runtime.entry,
+            project_root: runtime.project_root,
+            lang: runtime.lang,
             temp_dir: temp_dir.path(),
             output_name: &output_name,
             args,
             explicit_output: false,
-            backend_preference: backend_preference.clone(),
-            toolchains,
+            backend_preference: runtime.backend_preference.clone(),
+            toolchains: runtime.toolchains,
         })
         .await
         .with_context(|| {
             format!(
                 "{} failed for compile_commands shard {} ({}..{})",
-                entry.indexer_name,
+                runtime.entry.indexer_name,
                 index + 1,
                 start,
                 end
@@ -463,9 +565,9 @@ async fn run_compile_command_sharded_indexer_with_plan(
         ShardPublishContext {
             temp_dir: temp_dir.path(),
             output_file: &output_file,
-            project_root,
-            entry,
-            lang,
+            project_root: runtime.project_root,
+            entry: runtime.entry,
+            lang: runtime.lang,
             shard_kind: "compile_commands chunks",
             elapsed: started.elapsed(),
         },
@@ -1542,14 +1644,21 @@ fn plan_python_shards(project_root: &Path, policy: PythonShardPolicy) -> Result<
     if python_file_count == 0 {
         return Ok(Vec::new());
     }
-    if python_file_count <= policy.trigger_file_limit {
-        return Ok(vec![PythonShard {
-            target: PathBuf::new(),
-            file_count: python_file_count,
-            files: None,
-        }]);
-    }
     if python_file_count <= policy.target_file_limit {
+        let dot_file_shards = plan_python_dot_file_shards(project_root)?;
+        if !dot_file_shards.is_empty() {
+            return Ok(plan_python_root_with_dot_file_shards(
+                python_file_count,
+                dot_file_shards,
+            ));
+        }
+        if python_file_count <= policy.trigger_file_limit {
+            return Ok(vec![PythonShard {
+                target: PathBuf::new(),
+                file_count: python_file_count,
+                files: None,
+            }]);
+        }
         return Ok(vec![PythonShard {
             target: PathBuf::from("."),
             file_count: python_file_count,
@@ -1557,6 +1666,75 @@ fn plan_python_shards(project_root: &Path, policy: PythonShardPolicy) -> Result<
         }]);
     }
     split_python_target(project_root, Path::new(""), policy.target_file_limit)
+}
+
+fn plan_python_root_with_dot_file_shards(
+    python_file_count: usize,
+    mut dot_file_shards: Vec<PythonShard>,
+) -> Vec<PythonShard> {
+    let dot_file_count = dot_file_shards.len();
+    let mut shards = Vec::with_capacity(dot_file_shards.len() + 1);
+    let non_dot_file_count = python_file_count.saturating_sub(dot_file_count);
+    if non_dot_file_count > 0 {
+        shards.push(PythonShard {
+            target: PathBuf::from("."),
+            file_count: non_dot_file_count,
+            files: None,
+        });
+    }
+    shards.append(&mut dot_file_shards);
+    sort_python_shards(&mut shards);
+    shards
+}
+
+fn plan_python_dot_file_shards(project_root: &Path) -> Result<Vec<PythonShard>> {
+    let mut dot_files = Vec::new();
+    collect_python_dot_files(project_root, Path::new(""), &mut dot_files)?;
+    dot_files.sort();
+
+    Ok(dot_files
+        .into_iter()
+        .map(|target| PythonShard {
+            target,
+            file_count: 1,
+            files: None,
+        })
+        .collect())
+}
+
+fn collect_python_dot_files(
+    project_root: &Path,
+    target: &Path,
+    dot_files: &mut Vec<PathBuf>,
+) -> Result<()> {
+    let absolute_target = project_root.join(target);
+    for entry in std::fs::read_dir(&absolute_target)
+        .with_context(|| format!("Failed to read {}", absolute_target.display()))?
+    {
+        let entry = entry
+            .with_context(|| format!("Failed to read entry in {}", absolute_target.display()))?;
+        let file_name = entry.file_name();
+        let child_target = join_python_target(target, &file_name);
+        let file_type = entry.file_type().with_context(|| {
+            format!(
+                "Failed to read file type for {}",
+                project_root.join(&child_target).display()
+            )
+        })?;
+
+        if file_type.is_dir() {
+            if !is_ignored_python_dir(&file_name.to_string_lossy()) {
+                collect_python_dot_files(project_root, &child_target, dot_files)?;
+            }
+        } else if file_type.is_file()
+            && is_python_source_path(&child_target)
+            && is_python_dot_path(&child_target)
+        {
+            dot_files.push(child_target);
+        }
+    }
+
+    Ok(())
 }
 
 fn split_python_target(
@@ -1601,7 +1779,7 @@ fn split_python_target(
             if child_count == 0 {
                 continue;
             }
-            if child_count <= max_files_per_shard {
+            if child_count <= max_files_per_shard && !is_python_dot_path(&child_target) {
                 children.push(PythonShard {
                     target: child_target,
                     file_count: child_count,
@@ -1753,6 +1931,11 @@ fn is_ignored_python_dir(file_name: &str) -> bool {
     IGNORED_PYTHON_DIRS
         .iter()
         .any(|ignored| file_name.eq_ignore_ascii_case(ignored))
+}
+
+fn is_python_dot_path(path: &Path) -> bool {
+    path.components()
+        .any(|component| component.as_os_str().to_string_lossy().starts_with('.'))
 }
 
 fn can_run_python_shard_in_parallel(shard: &PythonShard) -> bool {
@@ -2084,13 +2267,13 @@ fn only_empty_index_errors(errors: &[crate::validate::ValidationError]) -> bool 
             .all(|error| error.kind.as_str() == "empty_index")
 }
 
-fn build_compile_command_shard_args(
-    entry: &IndexerEntry,
+fn build_compile_command_shard_args_with_defaults(
     compile_commands: &Path,
+    default_args: &[String],
 ) -> Vec<OsString> {
-    let mut args = Vec::with_capacity(entry.default_args.len() + 1);
+    let mut args = Vec::with_capacity(default_args.len() + 1);
     let mut replaced = false;
-    for arg in &entry.default_args {
+    for arg in default_args {
         if arg.starts_with("--compdb-path=") {
             args.push(OsString::from(format!(
                 "--compdb-path={}",
@@ -2112,6 +2295,50 @@ fn build_compile_command_shard_args(
         )));
     }
     args
+}
+
+pub fn build_compile_command_database_args(
+    entry: &IndexerEntry,
+    compile_commands: &Path,
+    output_file: &Path,
+) -> Vec<OsString> {
+    build_compile_command_database_args_with_defaults(
+        entry,
+        compile_commands,
+        output_file,
+        &entry.default_args,
+    )
+}
+
+pub fn build_compile_command_database_args_with_defaults(
+    entry: &IndexerEntry,
+    compile_commands: &Path,
+    output_file: &Path,
+    default_args: &[String],
+) -> Vec<OsString> {
+    let mut args = build_compile_command_shard_args_with_defaults(compile_commands, default_args);
+    let output_flag = compile_command_output_flag(entry);
+    let mut has_output_arg = has_arg(&args, output_flag);
+    for arg in &mut args {
+        if arg == "index.scip" {
+            *arg = output_file.as_os_str().to_os_string();
+            has_output_arg = true;
+        } else if arg.to_string_lossy().contains("index.scip") {
+            has_output_arg = true;
+        }
+    }
+    if !has_output_arg {
+        args.push(OsString::from(output_flag));
+        args.push(output_file.as_os_str().to_os_string());
+    }
+    args
+}
+
+fn compile_command_output_flag(entry: &IndexerEntry) -> &'static str {
+    match entry.indexer_name.as_str() {
+        "scip-clang" => "--index-output-path",
+        _ => "--output",
+    }
 }
 
 fn config_path_arg(path: &Path, project_root: Option<&Path>) -> OsString {
@@ -2822,20 +3049,21 @@ fs.writeFileSync("index.scip", Buffer.from(fixtures[key], "hex"));
         let planned = planner::plan_compile_command_shards(&compile_commands, 2)?;
         let backend_preference = BackendPreference::native();
         let toolchains = ToolchainsConfig::default();
-        let output = run_compile_command_sharded_indexer_with_plan(
-            Some(&node),
-            &named_entry(
-                "scip-clang",
-                "cpp",
-                &[fake_arg.as_str(), "--compdb-path=compile_commands.json"],
-            ),
-            dir.path(),
-            &lang,
-            planned,
-            &backend_preference,
-            &toolchains,
-        )
-        .await?;
+        let entry = named_entry(
+            "scip-clang",
+            "cpp",
+            &[fake_arg.as_str(), "--compdb-path=compile_commands.json"],
+        );
+        let runtime = CompileCommandRuntime {
+            binary: Some(&node),
+            entry: &entry,
+            project_root: dir.path(),
+            lang: &lang,
+            default_args: &entry.default_args,
+            backend_preference: &backend_preference,
+            toolchains: &toolchains,
+        };
+        let output = run_compile_command_sharded_indexer_with_plan(runtime, planned).await?;
 
         let index = Index::parse_from_bytes(&std::fs::read(output)?)?;
         let paths = index
@@ -2850,6 +3078,191 @@ fs.writeFileSync("index.scip", Buffer.from(fixtures[key], "hex"));
         );
         assert!(!dir.path().join("index.scip").exists());
 
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn scip_clang_merges_multiple_compile_databases_before_running() -> Result<()> {
+        let Ok(node) = which::which("node") else {
+            return Ok(());
+        };
+        let dir = TempDir::new()?;
+        let primary = dir.path().join("compile_commands.json");
+        std::fs::write(
+            &primary,
+            r#"[{"directory":"src","file":"a.cc","command":"clang++ -c a.cc"}]"#,
+        )?;
+        let secondary = dir.path().join("build-scip-wsl/compile_commands.json");
+        std::fs::create_dir_all(secondary.parent().unwrap())?;
+        std::fs::write(
+            &secondary,
+            r#"[
+              {"directory":"src","file":"a.cc","command":"clang++ -c a.cc"},
+              {"directory":"build-scip-wsl","file":"../src/b.cc","command":"clang++ -c ../src/b.cc"}
+            ]"#,
+        )?;
+
+        let fixture_hex = scip_fixture_hex_for_paths(&["a.cc", "b.cc"])?;
+        let fake_indexer = dir.path().join("fake-scip-clang.js");
+        std::fs::write(
+            &fake_indexer,
+            format!(
+                r#"
+const fs = require("fs");
+const args = process.argv.slice(2);
+const compdbArgs = args.filter((arg) => arg.startsWith("--compdb-path="));
+if (compdbArgs.length !== 1) {{
+  process.stderr.write("expected one merged compdb, got " + compdbArgs.length + "\n");
+  process.exit(2);
+}}
+const commands = JSON.parse(fs.readFileSync(compdbArgs[0].slice("--compdb-path=".length), "utf8"));
+const files = commands.map((command) => command.file).join(",");
+if (files !== "a.cc,../src/b.cc") {{
+  process.stderr.write("unexpected merged files " + files + "\n");
+  process.exit(3);
+}}
+const outputIndex = args.indexOf("--output");
+if (outputIndex !== -1) {{
+  process.stderr.write("unexpected --output\n");
+  process.exit(4);
+}}
+const indexOutput = args.indexOf("--index-output-path");
+if (indexOutput === -1 || !args[indexOutput + 1]) {{
+  process.stderr.write("missing index output\n");
+  process.exit(4);
+}}
+fs.writeFileSync(args[indexOutput + 1], Buffer.from("{fixture_hex}", "hex"));
+"#
+            ),
+        )?;
+
+        let lang = LanguageKind::Cpp.with_evidence("compile_commands.json".into());
+        let fake_arg = fake_indexer.to_string_lossy().to_string();
+        let backend_preference = BackendPreference::native();
+        let toolchains = ToolchainsConfig::default();
+        let output = run_indexer_with_request(IndexerRunRequest {
+            binary: Some(&node),
+            entry: &named_entry(
+                "scip-clang",
+                "cpp",
+                &[fake_arg.as_str(), "--compdb-path=compile_commands.json"],
+            ),
+            project_root: dir.path(),
+            lang: &lang,
+            config_paths: &[primary, secondary],
+            backend_preference,
+            toolchains: &toolchains,
+            args_override: None,
+        })
+        .await?;
+
+        let index = Index::parse_from_bytes(&std::fs::read(output)?)?;
+        let paths = index
+            .documents
+            .iter()
+            .map(|doc| doc.relative_path.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(paths, vec!["a.cc", "b.cc"]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn scip_clang_merged_compile_databases_preserve_args_override() -> Result<()> {
+        let Ok(node) = which::which("node") else {
+            return Ok(());
+        };
+        let dir = TempDir::new()?;
+        let primary = dir.path().join("compile_commands.json");
+        std::fs::write(
+            &primary,
+            r#"[{"directory":"src","file":"a.cc","command":"clang++ -c a.cc"}]"#,
+        )?;
+        let secondary = dir.path().join("build-scip-wsl/compile_commands.json");
+        std::fs::create_dir_all(secondary.parent().unwrap())?;
+        std::fs::write(
+            &secondary,
+            r#"[{"directory":"build-scip-wsl","file":"../src/b.cc","command":"clang++ -c ../src/b.cc"}]"#,
+        )?;
+
+        let fixture_hex = scip_fixture_hex_for_paths(&["a.cc", "b.cc"])?;
+        let fake_indexer = dir.path().join("fake-scip-clang.js");
+        std::fs::write(
+            &fake_indexer,
+            format!(
+                r#"
+const fs = require("fs");
+const args = process.argv.slice(2);
+if (!args.includes("--override-flag")) {{
+  process.stderr.write("missing override flag\n");
+  process.exit(2);
+}}
+if (args.includes("--default-only")) {{
+  process.stderr.write("default args leaked into override run\n");
+  process.exit(3);
+}}
+const compdbArg = args.find((arg) => arg.startsWith("--compdb-path="));
+if (!compdbArg) {{
+  process.stderr.write("missing compdb\n");
+  process.exit(4);
+}}
+const commands = JSON.parse(fs.readFileSync(compdbArg.slice("--compdb-path=".length), "utf8"));
+if (commands.map((command) => command.file).join(",") !== "a.cc,../src/b.cc") {{
+  process.stderr.write("unexpected merged commands\n");
+  process.exit(5);
+}}
+const outputIndex = args.indexOf("--output");
+if (outputIndex !== -1) {{
+  process.stderr.write("unexpected --output\n");
+  process.exit(6);
+}}
+const indexOutput = args.indexOf("--index-output-path");
+if (indexOutput === -1 || !args[indexOutput + 1]) {{
+  process.stderr.write("missing index output\n");
+  process.exit(6);
+}}
+fs.writeFileSync(args[indexOutput + 1], Buffer.from("{fixture_hex}", "hex"));
+"#
+            ),
+        )?;
+
+        let lang = LanguageKind::Cpp.with_evidence("compile_commands.json".into());
+        let fake_arg = fake_indexer.to_string_lossy().to_string();
+        let override_args = vec![
+            fake_arg.clone(),
+            "--override-flag".to_string(),
+            "--compdb-path=compile_commands.json".to_string(),
+        ];
+        let backend_preference = BackendPreference::native();
+        let toolchains = ToolchainsConfig::default();
+        let output = run_indexer_with_request(IndexerRunRequest {
+            binary: Some(&node),
+            entry: &named_entry(
+                "scip-clang",
+                "cpp",
+                &[
+                    fake_arg.as_str(),
+                    "--default-only",
+                    "--compdb-path=compile_commands.json",
+                ],
+            ),
+            project_root: dir.path(),
+            lang: &lang,
+            config_paths: &[primary, secondary],
+            backend_preference,
+            toolchains: &toolchains,
+            args_override: Some(&override_args),
+        })
+        .await?;
+
+        let index = Index::parse_from_bytes(&std::fs::read(output)?)?;
+        let paths = index
+            .documents
+            .iter()
+            .map(|doc| doc.relative_path.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(paths, vec!["a.cc", "b.cc"]);
         Ok(())
     }
 
@@ -2908,6 +3321,66 @@ fs.writeFileSync("index.scip", Buffer.from(fixtures[key], "hex"));
         targets.sort();
 
         assert_eq!(targets, vec!["large", "large/c.pyw", "loose.py", "small"]);
+
+        Ok(())
+    }
+
+    #[test]
+    fn plans_python_dot_path_files_as_explicit_batches() -> Result<()> {
+        let dir = TempDir::new()?;
+
+        touch(dir.path(), ".ci/check.py")?;
+        touch(dir.path(), ".github/workflows/generate.py")?;
+        touch(dir.path(), "pkg/a.py")?;
+        touch(dir.path(), "pkg/b.py")?;
+        touch(dir.path(), "pkg/c.py")?;
+
+        let shards = plan_python_shards(dir.path(), PythonShardPolicy::uniform(3))?;
+        let dot_files = shards
+            .iter()
+            .flat_map(|shard| {
+                shard
+                    .files
+                    .as_deref()
+                    .unwrap_or_else(|| std::slice::from_ref(&shard.target))
+            })
+            .map(|path| path.to_string_lossy().replace('\\', "/"))
+            .filter(|path| path.starts_with('.'))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            dot_files,
+            vec![".ci/check.py", ".github/workflows/generate.py"]
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn plans_python_dot_path_files_even_when_total_count_fits_one_target() -> Result<()> {
+        let dir = TempDir::new()?;
+
+        touch(dir.path(), ".ci/check.py")?;
+        touch(dir.path(), ".github/workflows/generate.py")?;
+        touch(dir.path(), "pkg/a.py")?;
+        touch(dir.path(), "pkg/b.py")?;
+        touch(dir.path(), "pkg/c.py")?;
+
+        let shards = plan_python_shards(
+            dir.path(),
+            PythonShardPolicy {
+                trigger_file_limit: 3,
+                target_file_limit: 10,
+            },
+        )?;
+        let targets = shards
+            .iter()
+            .map(|shard| shard.target.to_string_lossy().replace('\\', "/"))
+            .collect::<Vec<_>>();
+
+        assert!(targets.contains(&".".to_string()));
+        assert!(targets.contains(&".ci/check.py".to_string()));
+        assert!(targets.contains(&".github/workflows/generate.py".to_string()));
 
         Ok(())
     }

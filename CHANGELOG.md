@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Added opt-in multi-`compile_commands.json` consumption for `scip-clang`.
+  `--include-additional-configs` now discovers validated root and build-output
+  compile databases, merges and deduplicates commands before indexing, reports
+  selected/skipped database and coverage-delta counts in dry-run output, and
+  preserves root-only `scip-clang` behavior when the option is not enabled.
+- Added explicit CMake compile database generation for C/C++. The
+  `--generate-cmake-compile-dbs` flag and `[cpp.cmake]` config can run
+  configure-only CMake jobs with `CMAKE_EXPORT_COMPILE_COMMANDS=ON`, including
+  an `llvm-broad` preset for broader LLVM target/project/runtime coverage, then
+  feed those generated databases through the existing C/C++ merge path. On
+  Windows, generation follows the WSL backend when `scip-clang` is WSL-backed so
+  generated compile databases stay Linux-path compatible.
+
 ### Fixed
 
 - Preserved split-index `Metadata.project_root` and
@@ -19,6 +34,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Repaired managed `scip-python` npm installs with the embedded Pyright
   wildcard-import assertion patch so large Python indexes such as LLVM do not
   fail during analysis when import metadata is stale.
+- Preserved input-level SCIP `externalSymbols` while merging split artifacts so
+  merged C/C++ indexes keep the external symbol metadata emitted by
+  `scip-clang`.
+- Planned Python files under dot-path directories such as `.ci/` and
+  `.github/` as explicit shard targets even when the whole Python tree fits in
+  one shard target, so `scip-python` does not skip hidden scan-scope files.
 
 ## [0.1.7] - 2026-06-02
 

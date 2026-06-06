@@ -1,3 +1,5 @@
+pub mod cmake_compile_databases;
+pub mod compile_commands;
 pub mod config;
 pub mod config_discovery;
 pub mod detect;

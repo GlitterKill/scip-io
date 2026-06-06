@@ -5,6 +5,7 @@ use anyhow::{Context, Result};
 use serde_json::Value;
 use walkdir::WalkDir;
 
+pub use crate::compile_commands::merge_compile_command_databases;
 use crate::indexer::IndexerEntry;
 
 /// Conservative sharding capability advertised by an upstream SCIP indexer.
@@ -214,6 +215,15 @@ mod tests {
         Ok(())
     }
 
+    fn write_compile_database(root: &Path, relative_path: &str, contents: &str) -> Result<PathBuf> {
+        let path = root.join(relative_path);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&path, contents)?;
+        Ok(path)
+    }
+
     fn rels(root: &Path, shards: Vec<PlannedShard>) -> Vec<String> {
         shards
             .into_iter()
@@ -346,6 +356,69 @@ mod tests {
         let chunk = read_compile_command_chunk(&compile_commands, 1, 3)?;
 
         assert_eq!(chunk, serde_json::json!([{"file":"b.cc"},{"file":"c.cc"}]));
+        Ok(())
+    }
+
+    #[test]
+    fn merges_compile_databases_and_dedupes_identical_commands() -> Result<()> {
+        let dir = TempDir::new()?;
+        let primary = write_compile_database(
+            dir.path(),
+            "compile_commands.json",
+            r#"[
+              {"directory":"src","file":"a.cc","command":"clang++ -c a.cc"},
+              {"directory":"src","file":"b.cc","arguments":["clang++","-c","b.cc"]}
+            ]"#,
+        )?;
+        let secondary = write_compile_database(
+            dir.path(),
+            "build/compile_commands.json",
+            r#"[
+              {"directory":"src","file":"a.cc","command":"clang++ -c a.cc"},
+              {"directory":"build","file":"../src/c.cc","command":"clang++ -c ../src/c.cc"}
+            ]"#,
+        )?;
+        let merged = dir.path().join("merged-compile_commands.json");
+
+        let report = merge_compile_command_databases(&[primary, secondary], &merged)?;
+        let commands = read_compile_command_chunk(&merged, 0, usize::MAX)?;
+
+        assert_eq!(
+            commands,
+            serde_json::json!([
+                {"directory":"src","file":"a.cc","command":"clang++ -c a.cc"},
+                {"directory":"src","file":"b.cc","arguments":["clang++","-c","b.cc"]},
+                {"directory":"build","file":"../src/c.cc","command":"clang++ -c ../src/c.cc"}
+            ])
+        );
+        assert_eq!(report.input_commands, 4);
+        assert_eq!(report.output_commands, 3);
+        assert_eq!(report.duplicate_commands, 1);
+        assert_eq!(report.unique_files, 3);
+        assert_eq!(report.new_files_vs_primary, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn merge_compile_databases_keeps_same_file_with_different_commands() -> Result<()> {
+        let dir = TempDir::new()?;
+        let debug = write_compile_database(
+            dir.path(),
+            "debug/compile_commands.json",
+            r#"[{"directory":"debug","file":"../src/a.cc","command":"clang++ -DDEBUG -c ../src/a.cc"}]"#,
+        )?;
+        let release = write_compile_database(
+            dir.path(),
+            "release/compile_commands.json",
+            r#"[{"directory":"release","file":"../src/a.cc","command":"clang++ -DNDEBUG -c ../src/a.cc"}]"#,
+        )?;
+        let merged = dir.path().join("merged-compile_commands.json");
+
+        let report = merge_compile_command_databases(&[debug, release], &merged)?;
+
+        assert_eq!(report.output_commands, 2);
+        assert_eq!(report.unique_files, 1);
+        assert_eq!(report.duplicate_commands, 0);
         Ok(())
     }
 }
