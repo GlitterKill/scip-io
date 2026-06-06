@@ -12,7 +12,8 @@ use scip_io_core::cmake_compile_databases::{
     generate_cmake_compile_databases_with_backend, plan_cmake_compile_database_generation,
 };
 use scip_io_core::compile_commands::{
-    discover_compile_command_databases, summarize_compile_command_databases,
+    CompileCommandCoverageOptions, CompileCommandDatabaseSkip, discover_compile_command_databases,
+    select_compile_command_databases, summarize_compile_command_databases,
 };
 use scip_io_core::config::{CmakeCompileDatabaseConfig, IndexScope, ProjectConfig};
 use scip_io_core::config_discovery::{
@@ -547,15 +548,17 @@ fn add_additional_configs_if_requested(
     }
 
     for language in &mut languages {
-        language.additional_configs = discover_additional_configs(root, language.kind)?;
+        language.additional_configs =
+            discover_additional_configs_for_language(root, language.kind, config)?;
     }
-    add_languages_from_additional_configs(args, root, &mut languages)?;
+    add_languages_from_additional_configs(args, config, root, &mut languages)?;
 
     Ok(languages)
 }
 
 fn add_languages_from_additional_configs(
     args: &IndexArgs,
+    config: &ProjectConfig,
     root: &Path,
     languages: &mut Vec<Language>,
 ) -> Result<()> {
@@ -567,7 +570,7 @@ fn add_languages_from_additional_configs(
             continue;
         }
 
-        let configs = discover_additional_configs(root, kind)?;
+        let configs = discover_additional_configs_for_language(root, kind, config)?;
         if let Some(first_config) = configs.first() {
             let evidence = display_project_root(first_config, root);
             let mut language =
@@ -578,6 +581,67 @@ fn add_languages_from_additional_configs(
     }
 
     Ok(())
+}
+
+fn discover_additional_configs_for_language(
+    root: &Path,
+    kind: scip_io_core::LanguageKind,
+    config: &ProjectConfig,
+) -> Result<Vec<PathBuf>> {
+    let configs = discover_additional_configs(root, kind)?;
+    if kind != scip_io_core::LanguageKind::Cpp {
+        return Ok(configs);
+    }
+    if configs.is_empty() {
+        return Ok(configs);
+    }
+
+    let selection =
+        select_compile_command_databases(root, &configs, &cpp_coverage_options(config))?;
+    if selection.configs.is_empty() {
+        bail!("{}", cpp_coverage_empty_selection_error(root, &selection));
+    }
+    Ok(selection.configs)
+}
+
+fn cpp_coverage_options(config: &ProjectConfig) -> CompileCommandCoverageOptions {
+    config
+        .cpp
+        .as_ref()
+        .and_then(|cpp| cpp.coverage.as_ref())
+        .map(|coverage| CompileCommandCoverageOptions {
+            include: coverage.include.clone(),
+            exclude: coverage.exclude.clone(),
+            min_new_files: coverage.min_new_files,
+        })
+        .unwrap_or_default()
+}
+
+fn cpp_coverage_empty_selection_error(
+    root: &Path,
+    selection: &scip_io_core::compile_commands::CompileCommandSelection,
+) -> String {
+    let mut details = selection
+        .databases
+        .iter()
+        .filter_map(|database| {
+            let reason = database.skip_reason.as_ref()?;
+            let path = display_project_root(&database.path, root).replace('\\', "/");
+            Some(format!("{path}: {reason}"))
+        })
+        .collect::<Vec<_>>();
+    let omitted = details.len().saturating_sub(8);
+    details.truncate(8);
+
+    let mut message = "C/C++ coverage profile selected no compile databases; adjust [cpp.coverage] include/exclude/min_new_files or remove C++ from the configured languages".to_string();
+    if !details.is_empty() {
+        message.push_str(". Skipped: ");
+        message.push_str(&details.join("; "));
+        if omitted > 0 {
+            message.push_str(&format!("; ... {omitted} more"));
+        }
+    }
+    message
 }
 
 fn child_prefixes_for_project_root(root: &Path, child_roots: &[PathBuf]) -> Vec<String> {
@@ -744,7 +808,7 @@ fn run_dry_run(
                 let toolchain = indexer
                     .and_then(|entry| toolchain_preflight_for_indexer(entry, &config.toolchains));
                 let compile_database_summary =
-                    dry_run_compile_database_summary(&project.root, lang)?;
+                    dry_run_compile_database_summary(&project.root, lang, config)?;
                 plan.push(serde_json::json!({
                     "root": project.root.display().to_string(),
                     "language": lang.name(),
@@ -860,7 +924,9 @@ fn run_dry_run(
                                 .join(", ")
                         );
                     }
-                    if let Some(summary) = dry_run_compile_database_summary(&project.root, lang)? {
+                    if let Some(summary) =
+                        dry_run_compile_database_summary(&project.root, lang, config)?
+                    {
                         println!(
                             "      compile dbs: {} selected, {} input commands, {} merged commands, {} duplicate commands, {} unique files, {} new files vs primary, {} skipped",
                             json_u64(&summary, "selected_databases"),
@@ -927,15 +993,33 @@ fn dry_run_cmake_compile_database_generation(
 fn dry_run_compile_database_summary(
     root: &Path,
     lang: &Language,
+    config: &ProjectConfig,
 ) -> Result<Option<serde_json::Value>> {
     if lang.kind != scip_io_core::LanguageKind::Cpp || lang.additional_configs.is_empty() {
         return Ok(None);
     }
 
     let discovery = discover_compile_command_databases(root)?;
-    let mut report = summarize_compile_command_databases(&lang.additional_configs)?;
-    report.skipped = discovery.skipped;
+    let selection =
+        select_compile_command_databases(root, &discovery.configs, &cpp_coverage_options(config))?;
+    let mut report = summarize_compile_command_databases(&selection.configs)?;
+    let mut skipped = discovery.skipped;
+    skipped.extend(
+        selection
+            .databases
+            .iter()
+            .filter(|database| !database.selected)
+            .filter_map(|database| {
+                let reason = database.skip_reason.clone()?;
+                Some(CompileCommandDatabaseSkip {
+                    path: database.path.clone(),
+                    reason,
+                })
+            }),
+    );
+    report.skipped = skipped;
     report.skipped_databases = report.skipped.len();
+    report.databases = selection.databases;
     Ok(Some(serde_json::to_value(report)?))
 }
 
@@ -1135,7 +1219,8 @@ mod tests {
     };
     use scip_io_core::LanguageKind;
     use scip_io_core::config::{
-        CmakeCompileDatabaseConfig, CmakeCompileDatabasePreset, CppConfig, ProjectConfig,
+        CmakeCompileDatabaseConfig, CmakeCompileDatabasePreset, CppConfig, CppCoverageConfig,
+        ProjectConfig,
     };
     use scip_io_core::indexer::backend::BackendPreference;
     use scip_io_core::indexer::registry::REGISTRY;
@@ -1401,7 +1486,7 @@ mod tests {
             .iter()
             .find(|language| language.kind == LanguageKind::Cpp)
             .unwrap();
-        let summary = dry_run_compile_database_summary(&root, lang)
+        let summary = dry_run_compile_database_summary(&root, lang, &ProjectConfig::default())
             .unwrap()
             .unwrap();
 
@@ -1457,6 +1542,128 @@ mod tests {
     }
 
     #[test]
+    fn cpp_coverage_config_filters_additional_compile_databases() {
+        let (_dir, root) = fixture(&["src/main.cpp"]);
+        write_compile_database(
+            &root,
+            "compile_commands.json",
+            r#"[{"directory":"src","file":"a.cc","command":"clang++ -c a.cc"}]"#,
+        );
+        write_compile_database(
+            &root,
+            "build-excluded/compile_commands.json",
+            r#"[{"directory":"src","file":"b.cc","command":"clang++ -c b.cc"}]"#,
+        );
+        write_compile_database(
+            &root,
+            "build-large/compile_commands.json",
+            r#"[
+              {"directory":"src","file":"c.cc","command":"clang++ -c c.cc"},
+              {"directory":"src","file":"d.cc","command":"clang++ -c d.cc"}
+            ]"#,
+        );
+        write_compile_database(
+            &root,
+            "build-small/compile_commands.json",
+            r#"[{"directory":"src","file":"e.cc","command":"clang++ -c e.cc"}]"#,
+        );
+        let args = base_args();
+        let config = ProjectConfig {
+            include_additional_configs: Some(true),
+            cpp: Some(CppConfig {
+                coverage: Some(CppCoverageConfig {
+                    exclude: vec!["build-excluded/**".to_string()],
+                    min_new_files: Some(2),
+                    ..CppCoverageConfig::default()
+                }),
+                ..CppConfig::default()
+            }),
+            ..ProjectConfig::default()
+        };
+
+        let projects =
+            detect_languages_for_roots_with_config(&args, std::slice::from_ref(&root), &config)
+                .unwrap();
+
+        let cpp = projects[0]
+            .languages
+            .iter()
+            .find(|language| language.kind == LanguageKind::Cpp)
+            .unwrap();
+        assert_eq!(
+            cpp.additional_configs,
+            vec![
+                root.join("compile_commands.json"),
+                root.join("build-large/compile_commands.json")
+            ]
+        );
+
+        let summary = dry_run_compile_database_summary(&root, cpp, &config)
+            .unwrap()
+            .unwrap();
+        assert_eq!(summary["selected_databases"], 2);
+        assert_eq!(summary["input_commands"], 3);
+        assert_eq!(summary["unique_files"], 3);
+        assert_eq!(summary["new_files_vs_primary"], 2);
+        assert_eq!(summary["skipped_databases"], 2);
+        assert_eq!(summary["databases"].as_array().unwrap().len(), 4);
+
+        let details = skipped_compile_database_details(&root, &summary);
+        assert_eq!(details.len(), 2);
+        assert!(details.iter().any(
+            |detail| detail.contains("build-excluded/compile_commands.json")
+                && detail.contains("excluded by cpp.coverage.exclude")
+        ));
+        assert!(details.iter().any(
+            |detail| detail.contains("build-small/compile_commands.json")
+                && detail.contains("below cpp.coverage.min_new_files=2")
+        ));
+    }
+
+    #[test]
+    fn cpp_coverage_config_errors_when_all_compile_databases_filtered() {
+        let (_dir, root) = fixture(&["src/main.cpp"]);
+        write_compile_database(
+            &root,
+            "compile_commands.json",
+            r#"[{"directory":"src","file":"a.cc","command":"clang++ -c a.cc"}]"#,
+        );
+        write_compile_database(
+            &root,
+            "build-extra/compile_commands.json",
+            r#"[{"directory":"src","file":"b.cc","command":"clang++ -c b.cc"}]"#,
+        );
+        let args = base_args();
+        let config = ProjectConfig {
+            include_additional_configs: Some(true),
+            cpp: Some(CppConfig {
+                coverage: Some(CppCoverageConfig {
+                    include: vec!["missing-*/compile_commands.json".to_string()],
+                    ..CppCoverageConfig::default()
+                }),
+                ..CppConfig::default()
+            }),
+            ..ProjectConfig::default()
+        };
+
+        let error = match detect_languages_for_roots_with_config(
+            &args,
+            std::slice::from_ref(&root),
+            &config,
+        ) {
+            Ok(_) => panic!("expected all-filtered C/C++ coverage profile to be a config error"),
+            Err(error) => error.to_string(),
+        };
+
+        assert!(error.contains("C/C++ coverage profile selected no compile databases"));
+        assert!(error.contains("compile_commands.json: not matched by cpp.coverage.include"));
+        assert!(
+            error
+                .contains("build-extra/compile_commands.json: not matched by cpp.coverage.include")
+        );
+    }
+
+    #[test]
     fn cmake_generation_implies_additional_config_discovery() {
         let (_dir, root) = fixture(&["llvm/CMakeLists.txt", "src/main.cpp"]);
         write_compile_database(
@@ -1472,6 +1679,7 @@ mod tests {
                     preset: Some(CmakeCompileDatabasePreset::LlvmBroad),
                     ..CmakeCompileDatabaseConfig::default()
                 }),
+                ..CppConfig::default()
             }),
             ..ProjectConfig::default()
         };

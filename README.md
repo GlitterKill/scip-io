@@ -565,6 +565,19 @@ unique file, and net-new-file counts in dry-run output. This can increase real
 semantic coverage only when the extra databases contain compile commands that
 the primary database does not already cover.
 
+Large C/C++ repositories can produce many overlapping compile databases. Use
+`[cpp.coverage]` to curate them before a full index run: `include` and
+`exclude` match repo-relative `compile_commands.json` paths, and
+`min_new_files` skips additional databases that do not add enough new source
+files beyond databases already selected. The first selected database is kept as
+the primary baseline; the threshold applies to later databases. Dry-run JSON
+includes a `compile_database_summary.databases` entry for each discovered
+database with selected/skipped state, skip reason, input command count,
+duplicate command count, unique file count, and new unique file gain. If the
+coverage profile filters out every discovered C/C++ compile database, SCIP-IO
+treats that as a configuration error so a typo in `include` or `exclude` cannot
+fall back to root-only `compile_commands.json` indexing.
+
 For CMake projects, SCIP-IO can also generate build-output compile databases
 before discovery. This is configure-only: it runs `cmake -S ... -B ...` with
 `CMAKE_EXPORT_COMPILE_COMMANDS=ON` and never runs `cmake --build`. Existing
@@ -728,6 +741,13 @@ preset = "llvm-broad"
 generator = "Ninja"
 # Optional. Without build_root, the preset uses build-scip-io-* directories.
 build_root = "out/scip-io-cmake"
+
+[cpp.coverage]
+# Optional path filters for discovered compile_commands.json files.
+include = ["compile_commands.json", "build-*/compile_commands.json"]
+exclude = ["build-old/**", "out/tmp/**"]
+# Keep later databases only when they add meaningful new C/C++ file coverage.
+min_new_files = 25
 
 [settings]
 parallel = 4
