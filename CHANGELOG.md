@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.9] - 2026-06-17
+
 ### Added
 
 - Added explicit source-file indexing for both the CLI and GUI. `scip-io index`
@@ -14,6 +16,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   selected repo root, runs only represented languages, filters SCIP documents to
   those exact files, and filters C/C++ compile databases before invoking
   `scip-clang`.
+
+### Changed
+
+- Consolidated internal indexer-runner helper inputs so source-file filtering
+  stays threaded through project/config sharding and Python sharding without
+  widening helper function signatures past the clippy release gate.
 
 ## [0.1.8] - 2026-06-06
 
@@ -295,7 +303,8 @@ Initial release.
 - **One-line install scripts** for the CLI on Linux/macOS (`install.sh`) and
   Windows (`install.ps1`).
 
-[Unreleased]: https://github.com/GlitterKill/scip-io/compare/v0.1.8...HEAD
+[Unreleased]: https://github.com/GlitterKill/scip-io/compare/v0.1.9...HEAD
+[0.1.9]: https://github.com/GlitterKill/scip-io/compare/v0.1.8...v0.1.9
 [0.1.8]: https://github.com/GlitterKill/scip-io/compare/v0.1.7...v0.1.8
 [0.1.7]: https://github.com/GlitterKill/scip-io/compare/v0.1.6...v0.1.7
 [0.1.6]: https://github.com/GlitterKill/scip-io/compare/v0.1.5...v0.1.6

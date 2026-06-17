@@ -167,17 +167,7 @@ pub struct IndexerRunRequest<'a> {
 
 pub async fn run_indexer_with_request(request: IndexerRunRequest<'_>) -> Result<PathBuf> {
     if request.entry.indexer_name == "scip-python" && request.config_paths.is_empty() {
-        return run_python_indexer_with_policy(
-            request.binary,
-            request.entry,
-            request.project_root,
-            request.lang,
-            DEFAULT_PYTHON_SHARD_POLICY,
-            &request.backend_preference,
-            request.toolchains,
-            request.file_filters,
-        )
-        .await;
+        return run_python_indexer_with_policy(&request, DEFAULT_PYTHON_SHARD_POLICY).await;
     }
 
     if should_shard_project_arguments_upfront(request.entry, request.config_paths) {
@@ -188,17 +178,7 @@ pub async fn run_indexer_with_request(request: IndexerRunRequest<'_>) -> Result<
             config_limit = PROJECT_ARGUMENT_SHARD_CONFIG_LIMIT,
             "running indexer with project/config argument shards"
         );
-        return run_project_argument_sharded_indexer(
-            request.binary,
-            request.entry,
-            request.project_root,
-            request.lang,
-            request.config_paths,
-            &request.backend_preference,
-            request.toolchains,
-            request.file_filters,
-        )
-        .await;
+        return run_project_argument_sharded_indexer(&request).await;
     }
 
     if request.entry.indexer_name == "scip-clang" && !request.config_paths.is_empty() {
@@ -261,24 +241,15 @@ pub async fn run_indexer_with_request(request: IndexerRunRequest<'_>) -> Result<
                 shards = request.config_paths.len(),
                 "retrying indexer with project/config argument shards"
             );
-            run_project_argument_sharded_indexer(
-                request.binary,
-                request.entry,
-                request.project_root,
-                request.lang,
-                request.config_paths,
-                &request.backend_preference,
-                request.toolchains,
-                request.file_filters,
-            )
-            .await
-            .with_context(|| {
-                format!(
-                    "{} failed as a single {} run before project/config sharding: {error:#}",
-                    request.entry.indexer_name,
-                    request.lang.name()
-                )
-            })
+            run_project_argument_sharded_indexer(&request)
+                .await
+                .with_context(|| {
+                    format!(
+                        "{} failed as a single {} run before project/config sharding: {error:#}",
+                        request.entry.indexer_name,
+                        request.lang.name()
+                    )
+                })
         }
         Err(error) => Err(error),
     }
@@ -333,33 +304,26 @@ async fn run_indexer_once_with_configs(request: &IndexerRunRequest<'_>) -> Resul
     Ok(output_file)
 }
 
-async fn run_project_argument_sharded_indexer(
-    binary: Option<&Path>,
-    entry: &IndexerEntry,
-    project_root: &Path,
-    lang: &Language,
-    config_paths: &[PathBuf],
-    backend_preference: &BackendPreference,
-    toolchains: &ToolchainsConfig,
-    file_filters: &[PathBuf],
-) -> Result<PathBuf> {
-    let planned_shards = planner::plan_project_argument_shards(entry, config_paths);
+async fn run_project_argument_sharded_indexer(request: &IndexerRunRequest<'_>) -> Result<PathBuf> {
+    let planned_shards = planner::plan_project_argument_shards(request.entry, request.config_paths);
     if planned_shards.is_empty() {
         return run_indexer_once_with_configs(&IndexerRunRequest {
-            binary,
-            entry,
-            project_root,
-            lang,
-            config_paths,
-            backend_preference: backend_preference.clone(),
-            toolchains,
+            binary: request.binary,
+            entry: request.entry,
+            project_root: request.project_root,
+            lang: request.lang,
+            config_paths: request.config_paths,
+            backend_preference: request.backend_preference.clone(),
+            toolchains: request.toolchains,
             args_override: None,
-            file_filters,
+            file_filters: request.file_filters,
         })
         .await;
     }
 
-    let output_file = project_root.join(format!("{}.scip", lang.name()));
+    let output_file = request
+        .project_root
+        .join(format!("{}.scip", request.lang.name()));
     let temp_dir = tempfile::Builder::new()
         .prefix("scip-io-project-shards-")
         .tempdir()
@@ -371,26 +335,26 @@ async fn run_project_argument_sharded_indexer(
         let PlannedShard::ProjectArgument(config_path) = shard else {
             continue;
         };
-        let output_name = format!("{}-project-shard-{index:04}.scip", lang.name());
+        let output_name = format!("{}-project-shard-{index:04}.scip", request.lang.name());
         let run = run_indexer_to_temp_output(TempOutputRequest {
-            binary,
-            entry,
-            project_root,
-            lang,
+            binary: request.binary,
+            entry: request.entry,
+            project_root: request.project_root,
+            lang: request.lang,
             config_paths: std::slice::from_ref(config_path),
             temp_dir: temp_dir.path(),
             output_name: &output_name,
-            backend_preference,
-            toolchains,
+            backend_preference: &request.backend_preference,
+            toolchains: request.toolchains,
             args_override: None,
-            file_filters,
+            file_filters: request.file_filters,
         })
         .await
         .with_context(|| {
             format!(
                 "{} failed for {} shard {} ({})",
-                entry.indexer_name,
-                lang.name(),
+                request.entry.indexer_name,
+                request.lang.name(),
                 index + 1,
                 config_path.display()
             )
@@ -403,12 +367,12 @@ async fn run_project_argument_sharded_indexer(
         ShardPublishContext {
             temp_dir: temp_dir.path(),
             output_file: &output_file,
-            project_root,
-            entry,
-            lang,
+            project_root: request.project_root,
+            entry: request.entry,
+            lang: request.lang,
             shard_kind: "project/config argument shards",
             elapsed: started.elapsed(),
-            file_filters,
+            file_filters: request.file_filters,
         },
     )
 }
@@ -1121,26 +1085,20 @@ async fn run_python_indexer_with_file_limit(
 }
 
 async fn run_python_indexer_with_policy(
-    binary: Option<&Path>,
-    entry: &IndexerEntry,
-    project_root: &Path,
-    lang: &Language,
+    request: &IndexerRunRequest<'_>,
     policy: PythonShardPolicy,
-    backend_preference: &BackendPreference,
-    toolchains: &ToolchainsConfig,
-    file_filters: &[PathBuf],
 ) -> Result<PathBuf> {
     run_python_indexer_with_policy_and_hints(
-        binary,
-        entry,
-        project_root,
-        lang,
+        request.binary,
+        request.entry,
+        request.project_root,
+        request.lang,
         PythonIndexerOptions {
             policy,
             use_persistent_hints: true,
-            backend_preference,
-            toolchains,
-            file_filters,
+            backend_preference: &request.backend_preference,
+            toolchains: request.toolchains,
+            file_filters: request.file_filters,
         },
     )
     .await
