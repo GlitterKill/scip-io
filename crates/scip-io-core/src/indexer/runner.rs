@@ -10,7 +10,9 @@ use futures_util::future::{BoxFuture, FutureExt};
 use futures_util::stream::{FuturesUnordered, StreamExt};
 use sha2::{Digest, Sha256};
 
-use crate::compile_commands::discover_compile_command_databases;
+use crate::compile_commands::{
+    discover_compile_command_databases, filter_compile_command_database_to_files,
+};
 use crate::detect::Language;
 use crate::indexer::IndexerEntry;
 use crate::indexer::backend::{self, BackendExecutionRequest, BackendPreference};
@@ -21,6 +23,7 @@ use crate::scip_language::{
     ScipCompactionStats, compact_scip_file, normalize_path_component,
     normalize_scip_file_languages, prefix_scip_file_document_paths, publish_scip_file_atomically,
     relativize_scip_file_document_paths, replace_empty_scip_document_paths,
+    retain_scip_file_document_paths,
 };
 use crate::toolchain::{ToolchainsConfig, require_toolchain_environment_for_indexer};
 use crate::validate::{IndexStats, validate_scip_file};
@@ -145,6 +148,7 @@ pub async fn run_indexer_with_configs_backend_and_toolchains(
         backend_preference,
         toolchains,
         args_override: None,
+        file_filters: &[],
     })
     .await
 }
@@ -158,6 +162,7 @@ pub struct IndexerRunRequest<'a> {
     pub backend_preference: BackendPreference,
     pub toolchains: &'a ToolchainsConfig,
     pub args_override: Option<&'a [String]>,
+    pub file_filters: &'a [PathBuf],
 }
 
 pub async fn run_indexer_with_request(request: IndexerRunRequest<'_>) -> Result<PathBuf> {
@@ -170,6 +175,7 @@ pub async fn run_indexer_with_request(request: IndexerRunRequest<'_>) -> Result<
             DEFAULT_PYTHON_SHARD_POLICY,
             &request.backend_preference,
             request.toolchains,
+            request.file_filters,
         )
         .await;
     }
@@ -190,6 +196,7 @@ pub async fn run_indexer_with_request(request: IndexerRunRequest<'_>) -> Result<
             request.config_paths,
             &request.backend_preference,
             request.toolchains,
+            request.file_filters,
         )
         .await;
     }
@@ -203,6 +210,7 @@ pub async fn run_indexer_with_request(request: IndexerRunRequest<'_>) -> Result<
             default_args: request.args_override.unwrap_or(&request.entry.default_args),
             backend_preference: &request.backend_preference,
             toolchains: request.toolchains,
+            file_filters: request.file_filters,
         };
         return run_merged_compile_command_indexer(runtime, request.config_paths).await;
     }
@@ -210,20 +218,28 @@ pub async fn run_indexer_with_request(request: IndexerRunRequest<'_>) -> Result<
     if request.entry.indexer_name == "scip-clang" && request.config_paths.is_empty() {
         let compile_commands = request.project_root.join("compile_commands.json");
         if compile_commands.exists() {
+            let runtime = CompileCommandRuntime {
+                binary: request.binary,
+                entry: request.entry,
+                project_root: request.project_root,
+                lang: request.lang,
+                default_args: request.args_override.unwrap_or(&request.entry.default_args),
+                backend_preference: &request.backend_preference,
+                toolchains: request.toolchains,
+                file_filters: request.file_filters,
+            };
+            if !request.file_filters.is_empty() {
+                return run_merged_compile_command_indexer(
+                    runtime,
+                    std::slice::from_ref(&compile_commands),
+                )
+                .await;
+            }
             let shards = planner::plan_compile_command_shards(
                 &compile_commands,
                 COMPILE_COMMANDS_SHARD_COMMAND_LIMIT,
             )?;
             if !shards.is_empty() {
-                let runtime = CompileCommandRuntime {
-                    binary: request.binary,
-                    entry: request.entry,
-                    project_root: request.project_root,
-                    lang: request.lang,
-                    default_args: request.args_override.unwrap_or(&request.entry.default_args),
-                    backend_preference: &request.backend_preference,
-                    toolchains: request.toolchains,
-                };
                 return run_compile_command_sharded_indexer(runtime, shards).await;
             }
         }
@@ -253,6 +269,7 @@ pub async fn run_indexer_with_request(request: IndexerRunRequest<'_>) -> Result<
                 request.config_paths,
                 &request.backend_preference,
                 request.toolchains,
+                request.file_filters,
             )
             .await
             .with_context(|| {
@@ -294,6 +311,7 @@ async fn run_indexer_once_with_configs(request: &IndexerRunRequest<'_>) -> Resul
         backend_preference: &request.backend_preference,
         toolchains: request.toolchains,
         args_override: request.args_override,
+        file_filters: request.file_filters,
     })
     .await?;
     publish_scip_file_atomically(&run.path, &output_file)?;
@@ -323,6 +341,7 @@ async fn run_project_argument_sharded_indexer(
     config_paths: &[PathBuf],
     backend_preference: &BackendPreference,
     toolchains: &ToolchainsConfig,
+    file_filters: &[PathBuf],
 ) -> Result<PathBuf> {
     let planned_shards = planner::plan_project_argument_shards(entry, config_paths);
     if planned_shards.is_empty() {
@@ -335,6 +354,7 @@ async fn run_project_argument_sharded_indexer(
             backend_preference: backend_preference.clone(),
             toolchains,
             args_override: None,
+            file_filters,
         })
         .await;
     }
@@ -363,6 +383,7 @@ async fn run_project_argument_sharded_indexer(
             backend_preference,
             toolchains,
             args_override: None,
+            file_filters,
         })
         .await
         .with_context(|| {
@@ -387,6 +408,7 @@ async fn run_project_argument_sharded_indexer(
             lang,
             shard_kind: "project/config argument shards",
             elapsed: started.elapsed(),
+            file_filters,
         },
     )
 }
@@ -400,6 +422,7 @@ struct CompileCommandRuntime<'a> {
     default_args: &'a [String],
     backend_preference: &'a BackendPreference,
     toolchains: &'a ToolchainsConfig,
+    file_filters: &'a [PathBuf],
 }
 
 async fn run_compile_command_sharded_indexer(
@@ -452,8 +475,41 @@ async fn run_merged_compile_command_indexer(
         "merged compile command databases"
     );
 
+    let compile_commands_for_run = if runtime.file_filters.is_empty() {
+        merged_compile_commands.clone()
+    } else {
+        let filtered_compile_commands = temp_dir.path().join("compile_commands-filtered.json");
+        let filter_report = filter_compile_command_database_to_files(
+            &merged_compile_commands,
+            &filtered_compile_commands,
+            runtime.project_root,
+            runtime.file_filters,
+        )?;
+        if filter_report.commands_after == 0 {
+            let selected_files = runtime
+                .file_filters
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            anyhow::bail!(
+                "No C/C++ compile commands matched explicit file list: {}",
+                selected_files
+            );
+        }
+        tracing::info!(
+            indexer = %runtime.entry.indexer_name,
+            lang = runtime.lang.name(),
+            commands_before = filter_report.commands_before,
+            commands_after = filter_report.commands_after,
+            removed_commands = filter_report.removed_commands,
+            "filtered compile command database to explicit file list"
+        );
+        filtered_compile_commands
+    };
+
     let shards = planner::plan_compile_command_shards(
-        &merged_compile_commands,
+        &compile_commands_for_run,
         COMPILE_COMMANDS_SHARD_COMMAND_LIMIT,
     )?;
     if !shards.is_empty() {
@@ -465,7 +521,7 @@ async fn run_merged_compile_command_indexer(
     let temp_output = temp_dir.path().join(&output_name);
     let args = build_compile_command_database_args_with_defaults(
         runtime.entry,
-        &merged_compile_commands,
+        &compile_commands_for_run,
         &temp_output,
         runtime.default_args,
     );
@@ -480,6 +536,7 @@ async fn run_merged_compile_command_indexer(
         explicit_output: true,
         backend_preference: runtime.backend_preference.clone(),
         toolchains: runtime.toolchains,
+        file_filters: runtime.file_filters,
     })
     .await?;
     publish_scip_file_atomically(&run.path, &output_file)?;
@@ -546,6 +603,7 @@ async fn run_compile_command_sharded_indexer_with_plan(
             explicit_output: false,
             backend_preference: runtime.backend_preference.clone(),
             toolchains: runtime.toolchains,
+            file_filters: runtime.file_filters,
         })
         .await
         .with_context(|| {
@@ -570,6 +628,7 @@ async fn run_compile_command_sharded_indexer_with_plan(
             lang: runtime.lang,
             shard_kind: "compile_commands chunks",
             elapsed: started.elapsed(),
+            file_filters: runtime.file_filters,
         },
     )
 }
@@ -582,6 +641,7 @@ struct ShardPublishContext<'a> {
     lang: &'a Language,
     shard_kind: &'a str,
     elapsed: Duration,
+    file_filters: &'a [PathBuf],
 }
 
 fn merge_postprocess_and_publish_shards(
@@ -597,6 +657,7 @@ fn merge_postprocess_and_publish_shards(
         context.project_root,
         context.entry,
         context.lang,
+        context.file_filters,
     )?;
     let output_bytes = std::fs::metadata(&merged_output)
         .map(|metadata| metadata.len())
@@ -642,6 +703,7 @@ struct TempOutputRequest<'a> {
     backend_preference: &'a BackendPreference,
     toolchains: &'a ToolchainsConfig,
     args_override: Option<&'a [String]>,
+    file_filters: &'a [PathBuf],
 }
 
 async fn run_indexer_to_temp_output(
@@ -686,6 +748,7 @@ async fn run_indexer_to_temp_output(
         explicit_output,
         backend_preference: request.backend_preference.clone(),
         toolchains: request.toolchains,
+        file_filters: request.file_filters,
     })
     .await
 }
@@ -745,6 +808,7 @@ struct ProtectedIndexerRun<'a> {
     explicit_output: bool,
     backend_preference: BackendPreference,
     toolchains: &'a ToolchainsConfig,
+    file_filters: &'a [PathBuf],
 }
 
 struct PythonIndexerOptions<'a> {
@@ -752,6 +816,7 @@ struct PythonIndexerOptions<'a> {
     use_persistent_hints: bool,
     backend_preference: &'a BackendPreference,
     toolchains: &'a ToolchainsConfig,
+    file_filters: &'a [PathBuf],
 }
 
 async fn run_indexer_to_temp_output_with_args(
@@ -849,6 +914,7 @@ async fn run_indexer_to_temp_output_with_args(
         request.project_root,
         request.entry,
         request.lang,
+        request.file_filters,
     )?;
     let output_bytes = std::fs::metadata(&temp_output)
         .map(|metadata| metadata.len())
@@ -887,6 +953,7 @@ fn postprocess_scip_output(
     project_root: &Path,
     entry: &IndexerEntry,
     lang: &Language,
+    file_filters: &[PathBuf],
 ) -> Result<PostprocessedScipOutput> {
     let updated_languages = normalize_scip_file_languages(output_file, Some(lang.name()))?;
     if updated_languages > 0 {
@@ -902,6 +969,16 @@ fn postprocess_scip_output(
             path = %output_file.display(),
             docs = updated_paths,
             "relativized SCIP document paths"
+        );
+    }
+    let filtered_paths = retain_scip_file_document_paths(output_file, file_filters)?;
+    if filtered_paths.removed_documents > 0 {
+        tracing::info!(
+            path = %output_file.display(),
+            documents_before = filtered_paths.documents_before,
+            documents_after = filtered_paths.documents_after,
+            removed_documents = filtered_paths.removed_documents,
+            "filtered SCIP documents to explicit file list"
         );
     }
     let compaction = compact_scip_file(output_file)?;
@@ -1037,6 +1114,7 @@ async fn run_python_indexer_with_file_limit(
             use_persistent_hints: false,
             backend_preference: &backend_preference,
             toolchains: &toolchains,
+            file_filters: &[],
         },
     )
     .await
@@ -1050,6 +1128,7 @@ async fn run_python_indexer_with_policy(
     policy: PythonShardPolicy,
     backend_preference: &BackendPreference,
     toolchains: &ToolchainsConfig,
+    file_filters: &[PathBuf],
 ) -> Result<PathBuf> {
     run_python_indexer_with_policy_and_hints(
         binary,
@@ -1061,6 +1140,7 @@ async fn run_python_indexer_with_policy(
             use_persistent_hints: true,
             backend_preference,
             toolchains,
+            file_filters,
         },
     )
     .await
@@ -1087,6 +1167,7 @@ async fn run_python_indexer_with_policy_and_hints(
             backend_preference: options.backend_preference.clone(),
             toolchains: options.toolchains,
             args_override: None,
+            file_filters: options.file_filters,
         })
         .await;
     }
@@ -1233,32 +1314,14 @@ async fn run_python_indexer_with_policy_and_hints(
     }
     let merged_output = temp_dir.path().join("python-merged.scip");
     merge_scip_files(&shard_output_paths, &merged_output)?;
-    let compaction = compact_scip_file(&merged_output)?;
-    if compaction.changed() {
-        tracing::info!(
-            path = %merged_output.display(),
-            duplicate_documents = compaction.duplicate_documents,
-            duplicate_occurrences = compaction.duplicate_occurrences,
-            duplicate_symbols = compaction.duplicate_symbols,
-            "compacted duplicate SCIP facts after sharded merge"
-        );
-    }
-    let validation = validate_scip_file(&merged_output)?;
-    if !validation.valid {
-        let errors = validation
-            .errors
-            .iter()
-            .map(|error| format!("{}: {}", error.kind, error.message))
-            .collect::<Vec<_>>()
-            .join("; ");
-        anyhow::bail!(
-            "{} produced invalid {} SCIP output after sharded merge: {}",
-            entry.indexer_name,
-            lang.name(),
-            errors
-        );
-    }
-    let final_stats = validation.stats.unwrap_or_default();
+    let postprocess = postprocess_scip_output(
+        &merged_output,
+        project_root,
+        entry,
+        lang,
+        options.file_filters,
+    )?;
+    let final_stats = postprocess.stats;
     let output_bytes = std::fs::metadata(&merged_output)
         .map(|metadata| metadata.len())
         .unwrap_or(0);
@@ -3062,6 +3125,7 @@ fs.writeFileSync("index.scip", Buffer.from(fixtures[key], "hex"));
             default_args: &entry.default_args,
             backend_preference: &backend_preference,
             toolchains: &toolchains,
+            file_filters: &[],
         };
         let output = run_compile_command_sharded_indexer_with_plan(runtime, planned).await?;
 
@@ -3153,6 +3217,7 @@ fs.writeFileSync(args[indexOutput + 1], Buffer.from("{fixture_hex}", "hex"));
             backend_preference,
             toolchains: &toolchains,
             args_override: None,
+            file_filters: &[],
         })
         .await?;
 
@@ -3252,6 +3317,7 @@ fs.writeFileSync(args[indexOutput + 1], Buffer.from("{fixture_hex}", "hex"));
             backend_preference,
             toolchains: &toolchains,
             args_override: Some(&override_args),
+            file_filters: &[],
         })
         .await?;
 

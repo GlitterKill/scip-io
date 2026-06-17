@@ -82,6 +82,14 @@ pub struct IndexArgs {
     #[arg(short, long, value_delimiter = ',')]
     pub lang: Vec<String>,
 
+    /// Explicit source file(s) to index, repo-root-relative or absolute
+    #[arg(long, value_delimiter = ',', value_name = "FILE")]
+    pub files: Vec<PathBuf>,
+
+    /// Read explicit source files to index from a newline-delimited file
+    #[arg(long, value_name = "PATH")]
+    pub files_from: Option<PathBuf>,
+
     /// Output file for the merged SCIP index
     #[arg(short, long, default_value = "index.scip")]
     pub output: PathBuf,
@@ -294,6 +302,7 @@ pub struct UpdateRegistryArgs {
 mod tests {
     use super::{Cli, Command};
     use clap::Parser;
+    use std::path::PathBuf;
 
     #[test]
     fn parses_interactive_update_command() {
@@ -330,6 +339,29 @@ mod tests {
 
         assert!(args.all);
         assert!(args.target.is_none());
+    }
+
+    #[test]
+    fn parses_index_file_list_arguments() {
+        let cli = Cli::try_parse_from([
+            "scip-io",
+            "index",
+            "--files",
+            "src/main.rs,src/lib.rs",
+            "--files-from",
+            "files.txt",
+        ])
+        .unwrap();
+
+        let Some(Command::Index(args)) = cli.command else {
+            panic!("expected index command");
+        };
+
+        assert_eq!(
+            args.files,
+            vec![PathBuf::from("src/main.rs"), PathBuf::from("src/lib.rs")]
+        );
+        assert_eq!(args.files_from, Some(PathBuf::from("files.txt")));
     }
 
     #[test]

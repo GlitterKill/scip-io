@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Added explicit source-file indexing for both the CLI and GUI. `scip-io index`
+  now accepts `--files` and `--files-from`, validates listed files under the
+  selected repo root, runs only represented languages, filters SCIP documents to
+  those exact files, and filters C/C++ compile databases before invoking
+  `scip-clang`.
+
 ## [0.1.8] - 2026-06-06
 
 ### Added

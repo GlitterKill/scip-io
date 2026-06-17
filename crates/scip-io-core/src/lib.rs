@@ -3,6 +3,7 @@ pub mod compile_commands;
 pub mod config;
 pub mod config_discovery;
 pub mod detect;
+pub mod file_filter;
 pub mod indexer;
 pub mod merge;
 pub mod process;

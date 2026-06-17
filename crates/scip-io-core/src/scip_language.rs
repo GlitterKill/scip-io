@@ -537,6 +537,58 @@ pub fn prune_scip_file_document_paths_with_prefixes(
     })
 }
 
+/// Retain only documents whose normalized relative path exactly matches one of
+/// the explicit source files selected for this project root.
+pub fn retain_scip_file_document_paths(
+    path: &Path,
+    allowed_paths: &[PathBuf],
+) -> Result<ScipDocumentPruneStats> {
+    let allowed_paths = allowed_paths
+        .iter()
+        .map(|path| normalize_path_component(&path.to_string_lossy()))
+        .filter(|path| !path.is_empty())
+        .collect::<HashSet<_>>();
+    if allowed_paths.is_empty() {
+        return Ok(ScipDocumentPruneStats::default());
+    }
+
+    let bytes =
+        std::fs::read(path).with_context(|| format!("Failed to read {}", path.display()))?;
+    let mut index = Index::parse_from_bytes(&bytes)
+        .with_context(|| format!("Failed to parse SCIP index from {}", path.display()))?;
+
+    let documents_before = index.documents.len();
+    let mut normalized_paths = 0;
+    index.documents.retain_mut(|document| {
+        let normalized_path = normalize_path_component(&document.relative_path);
+        if normalized_path != document.relative_path {
+            document.relative_path = normalized_path.clone();
+            normalized_paths += 1;
+        }
+        allowed_paths.contains(&normalized_path)
+    });
+    let documents_after = index.documents.len();
+    let removed_documents = documents_before.saturating_sub(documents_after);
+    if removed_documents == 0 && normalized_paths == 0 {
+        return Ok(ScipDocumentPruneStats {
+            documents_before,
+            documents_after,
+            removed_documents,
+        });
+    }
+
+    let bytes = index
+        .write_to_bytes()
+        .context("Failed to serialize filtered SCIP index")?;
+    std::fs::write(path, bytes).with_context(|| format!("Failed to write {}", path.display()))?;
+
+    Ok(ScipDocumentPruneStats {
+        documents_before,
+        documents_after,
+        removed_documents,
+    })
+}
+
 /// Rewrite empty document paths when an indexer reports facts for a known
 /// single-file target without naming the target in `Document.relative_path`.
 pub fn replace_empty_scip_document_paths(path: &Path, replacement: &str) -> Result<usize> {
@@ -854,6 +906,48 @@ mod tests {
         assert_eq!(stats.documents_after, 2);
         assert_eq!(stats.removed_documents, 2);
         assert_eq!(paths, vec!["src/root.py", "services/api-extra/src/main.rs"]);
+        Ok(())
+    }
+
+    #[test]
+    fn retains_only_explicit_document_paths() -> Result<()> {
+        let mut index = Index::new();
+        for path in [
+            "src/keep.py",
+            "src/skip.py",
+            "src\\windows_style.py",
+            "./src/dotted.py",
+        ] {
+            let mut doc = Document::new();
+            doc.relative_path = path.into();
+            index.documents.push(doc);
+        }
+
+        let file = NamedTempFile::new()?;
+        std::fs::write(file.path(), index.write_to_bytes()?)?;
+
+        let stats = retain_scip_file_document_paths(
+            file.path(),
+            &[
+                PathBuf::from("src/keep.py"),
+                PathBuf::from("src/windows_style.py"),
+                PathBuf::from("src/dotted.py"),
+            ],
+        )?;
+        let retained = Index::parse_from_bytes(&std::fs::read(file.path())?)?;
+        let paths = retained
+            .documents
+            .iter()
+            .map(|document| document.relative_path.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(stats.documents_before, 4);
+        assert_eq!(stats.documents_after, 3);
+        assert_eq!(stats.removed_documents, 1);
+        assert_eq!(
+            paths,
+            vec!["src/keep.py", "src/windows_style.py", "src/dotted.py"]
+        );
         Ok(())
     }
 

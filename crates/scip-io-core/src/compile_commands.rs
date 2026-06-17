@@ -47,6 +47,13 @@ pub struct CompileCommandSelection {
     pub databases: Vec<CompileCommandDatabaseCoverage>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Default)]
+pub struct CompileCommandFilterReport {
+    pub commands_before: usize,
+    pub commands_after: usize,
+    pub removed_commands: usize,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct CompileCommandDatabaseCoverage {
     pub path: PathBuf,
@@ -202,6 +209,41 @@ pub fn merge_compile_command_databases(
     Ok(report)
 }
 
+pub fn filter_compile_command_database_to_files(
+    input: &Path,
+    output: &Path,
+    project_root: &Path,
+    files: &[PathBuf],
+) -> Result<CompileCommandFilterReport> {
+    let commands = read_compile_database(input)?;
+    let commands_before = commands.len();
+    let allowed_files = compile_command_file_filter_keys(project_root, files);
+    let filtered = if allowed_files.is_empty() {
+        commands
+    } else {
+        commands
+            .into_iter()
+            .filter(|command| {
+                compile_command_file_key(command)
+                    .is_some_and(|file_key| allowed_files.contains(&file_key))
+            })
+            .collect::<Vec<_>>()
+    };
+    let commands_after = filtered.len();
+    if let Some(parent) = output.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("Failed to create {}", parent.display()))?;
+    }
+    fs::write(output, serde_json::to_vec(&Value::Array(filtered))?)
+        .with_context(|| format!("Failed to write {}", output.display()))?;
+
+    Ok(CompileCommandFilterReport {
+        commands_before,
+        commands_after,
+        removed_commands: commands_before.saturating_sub(commands_after),
+    })
+}
+
 fn merge_compile_command_database_entries(
     compile_databases: &[PathBuf],
 ) -> Result<(Vec<Value>, CompileCommandMergeReport)> {
@@ -327,6 +369,15 @@ fn compile_command_file_key(command: &Value) -> Option<String> {
         PathBuf::from(file)
     };
     Some(normalize_path_key(&path))
+}
+
+fn compile_command_file_filter_keys(project_root: &Path, files: &[PathBuf]) -> BTreeSet<String> {
+    let mut keys = BTreeSet::new();
+    for file in files {
+        keys.insert(normalize_path_key(file));
+        keys.insert(normalize_path_key(&project_root.join(file)));
+    }
+    keys
 }
 
 fn path_text_is_absolute(path: &str) -> bool {
@@ -505,6 +556,60 @@ mod tests {
         assert_eq!(report.output_commands, 2);
         assert_eq!(report.duplicate_commands, 0);
         assert_eq!(report.unique_files, 1);
+    }
+
+    #[test]
+    fn filter_compile_database_keeps_only_explicit_files() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path().to_string_lossy().replace('\\', "\\\\");
+        let nested = dir
+            .path()
+            .join("nested.cc")
+            .to_string_lossy()
+            .replace('\\', "\\\\");
+        write_compile_database(
+            dir.path(),
+            "compile_commands.json",
+            &format!(
+                r#"[
+                    {{ "directory": "{root}", "file": "src/keep.cc", "command": "clang++ -c src/keep.cc" }},
+                    {{ "directory": "{root}", "file": "src/skip.cc", "command": "clang++ -c src/skip.cc" }},
+                    {{ "directory": "{root}", "file": "{nested}", "command": "clang++ -c nested.cc" }}
+                ]"#,
+            ),
+        );
+
+        let output = dir.path().join("compile_commands.filtered.json");
+        let stats = filter_compile_command_database_to_files(
+            &dir.path().join("compile_commands.json"),
+            &output,
+            dir.path(),
+            &[PathBuf::from("src/keep.cc"), PathBuf::from("nested.cc")],
+        )
+        .unwrap();
+
+        assert_eq!(stats.commands_before, 3);
+        assert_eq!(stats.commands_after, 2);
+        assert_eq!(stats.removed_commands, 1);
+
+        let filtered = read_compile_database(&output).unwrap();
+        let files = filtered
+            .iter()
+            .map(|entry| {
+                entry
+                    .get("file")
+                    .and_then(Value::as_str)
+                    .unwrap()
+                    .to_string()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            files,
+            vec![
+                "src/keep.cc".to_string(),
+                dir.path().join("nested.cc").to_string_lossy().to_string()
+            ]
+        );
     }
 
     #[test]

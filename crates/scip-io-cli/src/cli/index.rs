@@ -7,6 +7,7 @@ use anyhow::{Context, Result, bail};
 use console::style;
 use futures_util::stream::{self, StreamExt};
 
+use scip_io_core::LanguageKind;
 use scip_io_core::cmake_compile_databases::{
     CmakeCompileDatabaseGenerationPlan, cmake_compile_database_generation_enabled,
     generate_cmake_compile_databases_with_backend, plan_cmake_compile_database_generation,
@@ -21,6 +22,9 @@ use scip_io_core::config_discovery::{
 };
 use scip_io_core::detect::{
     DetectionEvidenceKind, Language, LanguageScanOptions, scan_languages_with_options,
+};
+use scip_io_core::file_filter::{
+    ExplicitFileSelection, read_explicit_file_list, resolve_explicit_file_selection,
 };
 use scip_io_core::indexer::backend::{BackendPreference, ExecutionBackendKind};
 use scip_io_core::indexer::registry::REGISTRY;
@@ -44,6 +48,7 @@ struct IndexerTask {
     project_root: PathBuf,
     additional_configs: Vec<PathBuf>,
     owned_child_prefixes: Vec<String>,
+    file_filters: Vec<PathBuf>,
     backend_preference: BackendPreference,
     args_override: Option<Vec<String>>,
     /// Additional detected languages whose indexing is handled by the same
@@ -57,6 +62,7 @@ struct ProjectLanguages {
     root: PathBuf,
     languages: Vec<Language>,
     owned_child_prefixes: Vec<String>,
+    file_filters: Vec<PathBuf>,
 }
 
 /// Result of running a single indexer.
@@ -67,11 +73,10 @@ struct IndexerResult {
 }
 
 pub async fn run(args: IndexArgs) -> Result<()> {
-    let path = args
-        .path
-        .clone()
-        .unwrap_or_else(|| std::env::current_dir().unwrap());
+    let invocation_cwd = std::env::current_dir().context("Failed to read current directory")?;
+    let path = args.path.clone().unwrap_or_else(|| invocation_cwd.clone());
     let path = path.canonicalize()?;
+    let explicit_files = resolve_index_file_selection(&args, &path, &invocation_cwd)?;
     let config = ProjectConfig::load(&path)?;
 
     let project_roots = resolve_project_roots_with_config(&args, &path, &config)?;
@@ -81,7 +86,8 @@ pub async fn run(args: IndexArgs) -> Result<()> {
     if !args.dry_run {
         generate_cmake_compile_databases_for_roots(&args, &config, &project_roots, is_json).await?;
     }
-    let projects = detect_languages_for_roots_with_config(&args, &project_roots, &config)?;
+    let projects =
+        detect_languages_for_roots_with_config(&args, &project_roots, &config, &explicit_files)?;
     let total_languages = projects
         .iter()
         .map(|project| project.languages.len())
@@ -137,6 +143,7 @@ pub async fn run(args: IndexArgs) -> Result<()> {
                 project_root: project.root.clone(),
                 additional_configs: lang.additional_configs.clone(),
                 owned_child_prefixes: project.owned_child_prefixes.clone(),
+                file_filters: project.file_filters.clone(),
                 backend_preference,
                 args_override,
                 covers: Vec::new(),
@@ -186,6 +193,7 @@ pub async fn run(args: IndexArgs) -> Result<()> {
                         backend_preference: task.backend_preference.clone(),
                         toolchains: &toolchains,
                         args_override: task.args_override.as_deref(),
+                        file_filters: &task.file_filters,
                     }),
                 )
                 .await;
@@ -356,6 +364,23 @@ pub async fn run(args: IndexArgs) -> Result<()> {
     Ok(())
 }
 
+fn resolve_index_file_selection(
+    args: &IndexArgs,
+    repo_root: &Path,
+    invocation_cwd: &Path,
+) -> Result<ExplicitFileSelection> {
+    let mut inputs = args.files.clone();
+    if let Some(files_from) = &args.files_from {
+        let list_path = if files_from.is_absolute() {
+            files_from.clone()
+        } else {
+            invocation_cwd.join(files_from)
+        };
+        inputs.extend(read_explicit_file_list(&list_path)?);
+    }
+    resolve_explicit_file_selection(repo_root, &inputs)
+}
+
 /// Resolve which project roots the index command should operate on.
 #[cfg(test)]
 fn resolve_project_roots(args: &IndexArgs, base_path: &Path) -> Result<Vec<PathBuf>> {
@@ -487,13 +512,24 @@ fn detect_languages_for_roots(
     args: &IndexArgs,
     project_roots: &[PathBuf],
 ) -> Result<Vec<ProjectLanguages>> {
-    detect_languages_for_roots_with_config(args, project_roots, &ProjectConfig::default())
+    let explicit_files = if let Some(repo_root) = project_roots.first() {
+        resolve_index_file_selection(args, repo_root, &std::env::current_dir()?)?
+    } else {
+        ExplicitFileSelection::default()
+    };
+    detect_languages_for_roots_with_config(
+        args,
+        project_roots,
+        &ProjectConfig::default(),
+        &explicit_files,
+    )
 }
 
 fn detect_languages_for_roots_with_config(
     args: &IndexArgs,
     project_roots: &[PathBuf],
     config: &ProjectConfig,
+    explicit_files: &ExplicitFileSelection,
 ) -> Result<Vec<ProjectLanguages>> {
     let mut projects = Vec::new();
 
@@ -504,6 +540,12 @@ fn detect_languages_for_roots_with_config(
             .cloned()
             .collect();
         let owned_child_prefixes = child_prefixes_for_project_root(root, &excluded_roots);
+        let file_filters = explicit_files.project_relative_files(root, &owned_child_prefixes);
+        if !explicit_files.is_empty() && file_filters.is_empty() {
+            continue;
+        }
+        let explicit_language_kinds =
+            explicit_files.project_language_kinds(root, &owned_child_prefixes);
         let detected = scan_languages_with_options(
             root,
             LanguageScanOptions {
@@ -523,7 +565,20 @@ fn detect_languages_for_roots_with_config(
                 })
                 .collect()
         };
+        let mut languages = languages;
+        if !explicit_files.is_empty() {
+            add_languages_from_explicit_files(args, &file_filters, &mut languages);
+            languages.retain(|language| explicit_language_kinds.contains(&language.kind));
+        }
         let languages = add_additional_configs_if_requested(args, config, root, languages)?;
+        let languages = if explicit_files.is_empty() {
+            languages
+        } else {
+            languages
+                .into_iter()
+                .filter(|language| explicit_language_kinds.contains(&language.kind))
+                .collect()
+        };
         if languages.is_empty() {
             continue;
         }
@@ -531,10 +586,31 @@ fn detect_languages_for_roots_with_config(
             root: root.clone(),
             languages,
             owned_child_prefixes,
+            file_filters,
         });
     }
 
     Ok(projects)
+}
+
+fn add_languages_from_explicit_files(
+    args: &IndexArgs,
+    file_filters: &[PathBuf],
+    languages: &mut Vec<Language>,
+) {
+    for file in file_filters {
+        let Some(kind) = LanguageKind::from_source_path(file) else {
+            continue;
+        };
+        if !language_filter_allows(args, kind) {
+            continue;
+        }
+        if languages.iter().any(|language| language.kind == kind) {
+            continue;
+        }
+        let evidence = file.to_string_lossy().replace('\\', "/");
+        languages.push(kind.with_detected_evidence(evidence, DetectionEvidenceKind::SourceFile));
+    }
 }
 
 fn add_additional_configs_if_requested(
@@ -1222,6 +1298,7 @@ mod tests {
         CmakeCompileDatabaseConfig, CmakeCompileDatabasePreset, CppConfig, CppCoverageConfig,
         ProjectConfig,
     };
+    use scip_io_core::file_filter::ExplicitFileSelection;
     use scip_io_core::indexer::backend::BackendPreference;
     use scip_io_core::indexer::registry::REGISTRY;
     use std::fs;
@@ -1232,6 +1309,8 @@ mod tests {
         IndexArgs {
             path: None,
             lang: Vec::new(),
+            files: Vec::new(),
+            files_from: None,
             output: PathBuf::from("index.scip"),
             no_merge: false,
             parallel: None,
@@ -1263,6 +1342,10 @@ mod tests {
         let path = root.join(relative_path);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(path, contents).unwrap();
+    }
+
+    fn no_explicit_files() -> ExplicitFileSelection {
+        ExplicitFileSelection::default()
     }
 
     #[test]
@@ -1523,9 +1606,13 @@ mod tests {
             ..ProjectConfig::default()
         };
 
-        let projects =
-            detect_languages_for_roots_with_config(&args, std::slice::from_ref(&root), &config)
-                .unwrap();
+        let projects = detect_languages_for_roots_with_config(
+            &args,
+            std::slice::from_ref(&root),
+            &config,
+            &no_explicit_files(),
+        )
+        .unwrap();
 
         let cpp = projects[0]
             .languages
@@ -1581,9 +1668,13 @@ mod tests {
             ..ProjectConfig::default()
         };
 
-        let projects =
-            detect_languages_for_roots_with_config(&args, std::slice::from_ref(&root), &config)
-                .unwrap();
+        let projects = detect_languages_for_roots_with_config(
+            &args,
+            std::slice::from_ref(&root),
+            &config,
+            &no_explicit_files(),
+        )
+        .unwrap();
 
         let cpp = projects[0]
             .languages
@@ -1650,6 +1741,7 @@ mod tests {
             &args,
             std::slice::from_ref(&root),
             &config,
+            &no_explicit_files(),
         ) {
             Ok(_) => panic!("expected all-filtered C/C++ coverage profile to be a config error"),
             Err(error) => error.to_string(),
@@ -1685,9 +1777,13 @@ mod tests {
         };
 
         assert!(effective_include_additional_configs(&args, &config));
-        let projects =
-            detect_languages_for_roots_with_config(&args, std::slice::from_ref(&root), &config)
-                .unwrap();
+        let projects = detect_languages_for_roots_with_config(
+            &args,
+            std::slice::from_ref(&root),
+            &config,
+            &no_explicit_files(),
+        )
+        .unwrap();
 
         let cpp = projects[0]
             .languages
@@ -1746,6 +1842,30 @@ mod tests {
     }
 
     #[test]
+    fn explicit_files_limit_detected_languages_and_project_filters() {
+        let (_dir, root) = fixture(&[
+            "Cargo.toml",
+            "src/lib.rs",
+            "src/main.py",
+            "web/package.json",
+            "web/app.js",
+        ]);
+        let mut args = base_args();
+        args.files = vec![PathBuf::from("src/main.py")];
+
+        let projects = detect_languages_for_roots(&args, std::slice::from_ref(&root)).unwrap();
+
+        assert_eq!(projects.len(), 1);
+        assert_eq!(projects[0].file_filters, vec![PathBuf::from("src/main.py")]);
+        let kinds = projects[0]
+            .languages
+            .iter()
+            .map(|language| language.kind)
+            .collect::<Vec<_>>();
+        assert_eq!(kinds, vec![LanguageKind::Python]);
+    }
+
+    #[test]
     fn javascript_and_typescript_tasks_remain_separate_by_default() {
         let (_dir, root) = fixture(&[
             "tools/vscode/tsconfig.json",
@@ -1776,6 +1896,7 @@ mod tests {
                 project_root: root.clone(),
                 additional_configs: Vec::new(),
                 owned_child_prefixes: Vec::new(),
+                file_filters: Vec::new(),
                 backend_preference: BackendPreference::auto(),
                 args_override: None,
                 covers: Vec::new(),
@@ -1787,6 +1908,7 @@ mod tests {
                 project_root: root,
                 additional_configs: Vec::new(),
                 owned_child_prefixes: Vec::new(),
+                file_filters: Vec::new(),
                 backend_preference: BackendPreference::auto(),
                 args_override: None,
                 covers: Vec::new(),

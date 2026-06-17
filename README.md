@@ -153,6 +153,14 @@ true`; SCIP-IO runs CMake configure commands to produce more
 `compile_commands.json` files, then indexes only the compile database entries
 that `scip-clang` can consume.
 
+For targeted runs, both the CLI and GUI can accept an explicit source-file
+list. SCIP-IO validates that every listed file exists under the selected repo
+root, runs only the represented languages, and filters SCIP documents to those
+exact repo-relative files. C/C++ still requires matching `compile_commands.json`
+entries; when explicit files are supplied, SCIP-IO filters the compile database
+before invoking `scip-clang` and fails clearly if no command covers a selected
+C/C++ file.
+
 ### Indexer installation strategy
 
 SCIP-IO supports several install methods because no two SCIP indexers ship the same way:
@@ -510,6 +518,10 @@ scip-io index --all-roots
 # Include supported secondary config files such as tsconfig.test.json
 scip-io index --include-additional-configs
 
+# Index only explicit source files under the repo
+scip-io index --files src/main.rs,tools/check.py
+scip-io index --files-from changed-files.txt
+
 # Index specific sub-project roots
 scip-io index --roots ./services/api,./services/web
 scip-io index --path ./repo --roots ./services/api,./services/web
@@ -527,6 +539,8 @@ scip-io index --parallel 4 --timeout 600
 |-------------------|-----------------------------------------------------------------------|
 | `-p, --path`      | Project root                                                          |
 | `-l, --lang`      | Comma-separated language filter (case-insensitive)                    |
+| `--files`         | Comma-separated explicit source files to index; relative paths resolve from `--path` |
+| `--files-from`    | Read explicit source files from a newline-delimited list file         |
 | `-o, --output`    | Merged output path (default `index.scip`)                             |
 | `--no-merge`      | Keep individual `.scip` files, skip the merge step                    |
 | `--parallel`      | Max concurrent indexer processes                                      |
@@ -548,6 +562,15 @@ is pruned from parent runs. Use `--roots` when you want an explicit subset. Use
 `--all-roots` when you specifically want the older discovered-config-root sweep.
 `--roots`, `--scope configs`, and `--all-roots` merge generated `.scip` files
 into the requested output unless `--no-merge` is set.
+
+Use `--files` or `--files-from` for a targeted index over known source files,
+for example from a changed-files list. Listed files can be repo-relative or
+absolute, must exist under `--path`, and must use a supported source extension.
+`--files-from` accepts one file per line and ignores blank lines plus lines that
+start with `#`. Explicit file lists restrict language planning and final SCIP
+documents to the selected files. For C/C++, selected files must also appear in a
+compile database entry; raw `.cc`/`.cpp` paths without compile commands are not
+enough for `scip-clang`.
 
 By default, SCIP-IO indexes the primary project config for a root. Use
 `--include-additional-configs` when a repository keeps support scripts, test
@@ -721,6 +744,10 @@ Launch the Tauri GUI (when the GUI crate is built).
 scip-io gui
 scip-io gui --path ./my-project
 ```
+
+The GUI dashboard exposes the same targeting through the optional **Files**
+field. Enter repo-relative or absolute source files separated by new lines or
+commas before starting indexing.
 
 ---
 

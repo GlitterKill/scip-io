@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Relative strength of the file that proved a language is present.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -20,7 +20,7 @@ impl DetectionEvidenceKind {
 }
 
 /// A programming language that SCIP-IO can detect and index.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum LanguageKind {
     TypeScript,
     JavaScript,
@@ -94,6 +94,15 @@ impl LanguageKind {
             Self::Cpp => "cpp",
             Self::Scala => "scala",
         }
+    }
+
+    /// Return the SCIP-IO language kind for a source file path.
+    pub fn from_source_path(path: &Path) -> Option<Self> {
+        let filename = path.file_name()?.to_string_lossy();
+        Language::ALL
+            .iter()
+            .copied()
+            .find(|kind| kind.matches_source_file(&filename))
     }
 
     /// Return true if the given filename is a manifest/config file for this language.

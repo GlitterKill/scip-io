@@ -73,6 +73,10 @@ export function renderDashboard(container: HTMLElement): void {
     if (scopeSelect) {
       scopeSelect.value = state.settings.scope;
     }
+    const filesInput = wrapper.querySelector('#explicit-files-input') as HTMLTextAreaElement | null;
+    if (filesInput && document.activeElement !== filesInput) {
+      filesInput.value = state.settings.explicitFiles;
+    }
   });
 
   // Fetch initial data
@@ -161,6 +165,21 @@ function renderProjectPathSection(): HTMLElement {
   optionHint.textContent = 'Include supported secondary config files';
   optionRow.appendChild(optionHint);
   panel.appendChild(optionRow);
+
+  const filesField = document.createElement('div');
+  filesField.className = 'form-field mt-md';
+  filesField.innerHTML = `
+    <label class="form-label" for="explicit-files-input">Files</label>
+    <textarea class="textarea" id="explicit-files-input" rows="3"
+      placeholder="src/main.rs&#10;pkg/app.py">${escapeHtml(store.getState().settings.explicitFiles)}</textarea>
+    <span class="form-hint">Optional repo-relative or absolute source files; separate with new lines or commas</span>
+  `;
+  const filesInput = filesField.querySelector('#explicit-files-input') as HTMLTextAreaElement | null;
+  filesInput?.addEventListener('input', () => {
+    const current = store.getState().settings;
+    store.setState({ settings: { ...current, explicitFiles: filesInput.value } });
+  });
+  panel.appendChild(filesField);
 
   // Action buttons
   const actions = document.createElement('div');
@@ -705,6 +724,7 @@ function refreshIndexerRows(): void {
 async function handleIndexAll() {
   const state = store.getState();
   const selectedLangs = state.languages.filter((l) => l.selected).map((l) => l.name);
+  const explicitFiles = parseExplicitFiles(state.settings.explicitFiles);
 
   if (selectedLangs.length === 0) {
     addLog('warning', 'No languages selected for indexing');
@@ -733,7 +753,7 @@ async function handleIndexAll() {
     'info',
     `Starting ${state.settings.scope} indexing for: ${selectedLangs.join(', ')}${
       state.settings.includeAdditionalConfigs ? ' with extra configs' : ''
-    }`
+    }${explicitFiles.length > 0 ? ` (${explicitFiles.length} explicit file${explicitFiles.length === 1 ? '' : 's'})` : ''}`
   );
 
   try {
@@ -742,7 +762,8 @@ async function handleIndexAll() {
       selectedLangs,
       state.settings.outputFile,
       state.settings.includeAdditionalConfigs,
-      state.settings.scope
+      state.settings.scope,
+      explicitFiles
     );
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
@@ -759,6 +780,13 @@ function escapeHtml(str: string): string {
   const div = document.createElement('div');
   div.textContent = str;
   return div.innerHTML;
+}
+
+function parseExplicitFiles(value: string): string[] {
+  return value
+    .split(/[\n,]/)
+    .map((file) => file.trim())
+    .filter(Boolean);
 }
 
 function formatLanguageEvidenceTitle(

@@ -1,3 +1,4 @@
+use scip_io_core::LanguageKind;
 use scip_io_core::config::{IndexScope, ProjectConfig};
 use scip_io_core::config_discovery::{
     discover_additional_configs, supported_additional_config_languages,
@@ -5,6 +6,7 @@ use scip_io_core::config_discovery::{
 use scip_io_core::detect::{
     DetectionEvidenceKind, Language, LanguageScanOptions, scan_languages_with_options,
 };
+use scip_io_core::file_filter::{ExplicitFileSelection, resolve_explicit_file_selection};
 use scip_io_core::indexer::backend::{
     BackendPreference, BackendProbeResult, ExecutionBackendKind, probe_docker,
     probe_wsl_with_distro,
@@ -86,6 +88,7 @@ struct IndexingProject {
     root: PathBuf,
     languages: Vec<Language>,
     owned_child_prefixes: Vec<String>,
+    file_filters: Vec<PathBuf>,
 }
 
 struct TauriProgressHandler {
@@ -287,7 +290,13 @@ pub async fn detect_languages(
     let include_additional_configs = include_additional_configs
         .or(config_ref.include_additional_configs)
         .unwrap_or(false);
-    let projects = discover_gui_indexing_projects(&root, &[], include_additional_configs, scope)?;
+    let projects = discover_gui_indexing_projects(
+        &root,
+        &[],
+        include_additional_configs,
+        scope,
+        &ExplicitFileSelection::default(),
+    )?;
     let mut languages_by_name = BTreeMap::<String, LanguageInfo>::new();
 
     for project in projects {
@@ -322,18 +331,27 @@ pub async fn start_indexing(
     output: String,
     include_additional_configs: bool,
     scope: Option<String>,
+    files: Vec<String>,
 ) -> Result<(), String> {
     CANCEL_FLAG.store(false, Ordering::SeqCst);
 
-    let root = PathBuf::from(&path);
+    let root = PathBuf::from(&path)
+        .canonicalize()
+        .map_err(|e| format!("Failed to resolve project path {}: {}", path, e))?;
+    let explicit_files = resolve_gui_file_selection(&root, &files)?;
     let handler = TauriProgressHandler { app: app.clone() };
     let config = ProjectConfig::load(&root).map_err(|e| e.to_string())?;
     let scope = parse_gui_scope(scope.as_deref(), &config)?;
 
     // Detect languages
     handler.on_event(ProgressEvent::DetectStart { path: root.clone() });
-    let projects =
-        discover_gui_indexing_projects(&root, &languages, include_additional_configs, scope)?;
+    let projects = discover_gui_indexing_projects(
+        &root,
+        &languages,
+        include_additional_configs,
+        scope,
+        &explicit_files,
+    )?;
     let lang_names = unique_project_language_names(&projects);
     handler.on_event(ProgressEvent::DetectResult {
         languages: lang_names,
@@ -354,6 +372,7 @@ pub async fn start_indexing(
                 &project.root,
                 &ready_languages,
                 &project.owned_child_prefixes,
+                &project.file_filters,
             )
         })
         .collect::<Vec<_>>();
@@ -411,6 +430,7 @@ pub async fn start_indexing(
             covers: plan.covers,
             project_root: plan.project_root,
             owned_child_prefixes: plan.owned_child_prefixes,
+            file_filters: plan.file_filters,
             binary,
             backend_preference,
             args_override,
@@ -460,6 +480,7 @@ pub async fn start_indexing(
                 backend_preference: plan.backend_preference.clone(),
                 toolchains: &config.toolchains,
                 args_override: plan.args_override.as_deref(),
+                file_filters: &plan.file_filters,
             },
         )
         .await
@@ -890,6 +911,7 @@ struct IndexingPlan {
     entry: &'static IndexerEntry,
     covers: Vec<Language>,
     owned_child_prefixes: Vec<String>,
+    file_filters: Vec<PathBuf>,
 }
 
 struct PreparedIndexingPlan {
@@ -898,6 +920,7 @@ struct PreparedIndexingPlan {
     entry: &'static IndexerEntry,
     covers: Vec<Language>,
     owned_child_prefixes: Vec<String>,
+    file_filters: Vec<PathBuf>,
     binary: Option<PathBuf>,
     backend_preference: BackendPreference,
     args_override: Option<Vec<String>>,
@@ -908,6 +931,7 @@ fn discover_gui_indexing_projects(
     language_filters: &[String],
     include_additional_configs: bool,
     scope: IndexScope,
+    explicit_files: &ExplicitFileSelection,
 ) -> Result<Vec<IndexingProject>, String> {
     let roots = resolve_indexing_roots(IndexScopeResolution {
         base_path: root,
@@ -922,6 +946,13 @@ fn discover_gui_indexing_projects(
     let mut projects = Vec::new();
     for resolved in &roots {
         let project_root = &resolved.root;
+        let file_filters =
+            explicit_files.project_relative_files(project_root, &resolved.owned_child_prefixes);
+        if !explicit_files.is_empty() && file_filters.is_empty() {
+            continue;
+        }
+        let explicit_language_kinds =
+            explicit_files.project_language_kinds(project_root, &resolved.owned_child_prefixes);
         let detected = scan_languages_with_options(
             project_root,
             LanguageScanOptions {
@@ -943,8 +974,17 @@ fn discover_gui_indexing_projects(
                 .collect()
         };
 
+        if !explicit_files.is_empty() {
+            add_languages_from_explicit_files(language_filters, &file_filters, &mut languages);
+            languages.retain(|language| explicit_language_kinds.contains(&language.kind));
+        }
+
         if include_additional_configs {
             apply_additional_configs(project_root, language_filters, &mut languages)?;
+        }
+
+        if !explicit_files.is_empty() {
+            languages.retain(|language| explicit_language_kinds.contains(&language.kind));
         }
 
         if languages.is_empty() {
@@ -955,6 +995,7 @@ fn discover_gui_indexing_projects(
             root: project_root.clone(),
             languages,
             owned_child_prefixes: resolved.owned_child_prefixes.clone(),
+            file_filters,
         });
     }
 
@@ -974,6 +1015,18 @@ fn parse_gui_scope(scope: Option<&str>, config: &ProjectConfig) -> Result<IndexS
         Some(value) => IndexScope::from_str(value).map_err(|error| error.to_string()),
         None => Ok(config.scope.unwrap_or_default()),
     }
+}
+
+fn resolve_gui_file_selection(
+    root: &Path,
+    files: &[String],
+) -> Result<ExplicitFileSelection, String> {
+    let inputs = files
+        .iter()
+        .map(|file| PathBuf::from(file.trim()))
+        .filter(|file| !file.as_os_str().is_empty())
+        .collect::<Vec<_>>();
+    resolve_explicit_file_selection(root, &inputs).map_err(|error| error.to_string())
 }
 
 fn unique_project_language_names(projects: &[IndexingProject]) -> Vec<String> {
@@ -1025,13 +1078,14 @@ fn build_indexing_plans(languages: &[Language]) -> Vec<IndexingPlan> {
 /// `--infer-tsconfig` command so the shared run does not index an empty root.
 #[cfg(test)]
 fn build_indexing_plans_for_root(project_root: &Path, languages: &[Language]) -> Vec<IndexingPlan> {
-    build_indexing_plans_for_project(project_root, languages, &[])
+    build_indexing_plans_for_project(project_root, languages, &[], &[])
 }
 
 fn build_indexing_plans_for_project(
     project_root: &Path,
     languages: &[Language],
     owned_child_prefixes: &[String],
+    file_filters: &[PathBuf],
 ) -> Vec<IndexingPlan> {
     let mut plans: Vec<IndexingPlan> = Vec::new();
 
@@ -1074,6 +1128,7 @@ fn build_indexing_plans_for_project(
                 entry,
                 covers: Vec::new(),
                 owned_child_prefixes: owned_child_prefixes.to_vec(),
+                file_filters: file_filters.to_vec(),
             });
         }
     }
@@ -1181,6 +1236,26 @@ fn apply_additional_configs(
     }
 
     Ok(())
+}
+
+fn add_languages_from_explicit_files(
+    filters: &[String],
+    file_filters: &[PathBuf],
+    languages: &mut Vec<Language>,
+) {
+    for file in file_filters {
+        let Some(kind) = LanguageKind::from_source_path(file) else {
+            continue;
+        };
+        if !language_filter_allows(filters, kind) {
+            continue;
+        }
+        if languages.iter().any(|language| language.kind == kind) {
+            continue;
+        }
+        let evidence = file.to_string_lossy().replace('\\', "/");
+        languages.push(kind.with_detected_evidence(evidence, DetectionEvidenceKind::SourceFile));
+    }
 }
 
 fn language_filter_allows(filters: &[String], kind: scip_io_core::LanguageKind) -> bool {
@@ -1464,8 +1539,14 @@ mod tests {
             "apps/web/tsconfig.json",
         ]);
 
-        let projects =
-            discover_gui_indexing_projects(&root, &[], false, IndexScope::RepoTree).unwrap();
+        let projects = discover_gui_indexing_projects(
+            &root,
+            &[],
+            false,
+            IndexScope::RepoTree,
+            &ExplicitFileSelection::default(),
+        )
+        .unwrap();
         let roots = projects
             .iter()
             .map(|project| project.root.clone())
@@ -1492,8 +1573,14 @@ mod tests {
             "cmake-only/CMakeLists.txt",
         ]);
 
-        let projects =
-            discover_gui_indexing_projects(&root, &[], false, IndexScope::Configs).unwrap();
+        let projects = discover_gui_indexing_projects(
+            &root,
+            &[],
+            false,
+            IndexScope::Configs,
+            &ExplicitFileSelection::default(),
+        )
+        .unwrap();
         let roots = projects
             .iter()
             .map(|project| project.root.clone())
@@ -1529,8 +1616,14 @@ mod tests {
             "apps/web/src/main.ts",
         ]);
 
-        let projects =
-            discover_gui_indexing_projects(&root, &[], false, IndexScope::RepoTree).unwrap();
+        let projects = discover_gui_indexing_projects(
+            &root,
+            &[],
+            false,
+            IndexScope::RepoTree,
+            &ExplicitFileSelection::default(),
+        )
+        .unwrap();
 
         let root_project = projects
             .iter()
@@ -1547,6 +1640,32 @@ mod tests {
     }
 
     #[test]
+    fn gui_explicit_files_limit_detected_languages_and_project_filters() {
+        let (_dir, root) = fixture(&[
+            "src/root.py",
+            "services/api/Cargo.toml",
+            "services/api/src/main.rs",
+            "apps/web/package.json",
+            "apps/web/app.js",
+        ]);
+        let selection =
+            resolve_explicit_file_selection(&root, &[PathBuf::from("src/root.py")]).unwrap();
+
+        let projects =
+            discover_gui_indexing_projects(&root, &[], false, IndexScope::RepoTree, &selection)
+                .unwrap();
+
+        assert_eq!(projects.len(), 1);
+        assert_eq!(projects[0].file_filters, vec![PathBuf::from("src/root.py")]);
+        let names = projects[0]
+            .languages
+            .iter()
+            .map(|language| language.kind.name())
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec!["python"]);
+    }
+
+    #[test]
     fn gui_config_scope_detection_assigns_child_prefixes_to_parent_project() {
         let (_dir, root) = fixture(&[
             "package.json",
@@ -1555,8 +1674,14 @@ mod tests {
             "packages/web/src/index.js",
         ]);
 
-        let projects =
-            discover_gui_indexing_projects(&root, &[], false, IndexScope::Configs).unwrap();
+        let projects = discover_gui_indexing_projects(
+            &root,
+            &[],
+            false,
+            IndexScope::Configs,
+            &ExplicitFileSelection::default(),
+        )
+        .unwrap();
 
         let root_project = projects
             .iter()
@@ -1571,6 +1696,7 @@ mod tests {
             &root_project.root,
             &root_project.languages,
             &root_project.owned_child_prefixes,
+            &root_project.file_filters,
         );
         assert_eq!(plans[0].owned_child_prefixes, vec!["packages/web"]);
     }
@@ -1641,10 +1767,16 @@ mod tests {
             "native/src/main.cpp",
             "src/root.py",
         ]);
-        let projects =
-            discover_gui_indexing_projects(&root, &[], false, IndexScope::RepoTree).unwrap();
+        let projects = discover_gui_indexing_projects(
+            &root,
+            &[],
+            false,
+            IndexScope::RepoTree,
+            &ExplicitFileSelection::default(),
+        )
+        .unwrap();
         let ready = ready_indexing_languages(&projects[0].languages);
-        let plans = build_indexing_plans_for_project(&projects[0].root, &ready, &[]);
+        let plans = build_indexing_plans_for_project(&projects[0].root, &ready, &[], &[]);
 
         assert!(
             projects[0]

@@ -109,6 +109,7 @@ export interface AppState {
     cacheDir: string;
     scope: 'repo-tree' | 'configs';
     includeAdditionalConfigs: boolean;
+    explicitFiles: string;
     goHome: string;
     javaHome: string;
   };
@@ -132,6 +133,7 @@ export const store = new Store<AppState>({
     cacheDir: '',
     scope: 'repo-tree',
     includeAdditionalConfigs: false,
+    explicitFiles: '',
     goHome: '',
     javaHome: '',
   },

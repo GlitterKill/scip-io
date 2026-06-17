@@ -72,9 +72,17 @@ export async function startIndexing(
   languages: string[],
   output: string,
   includeAdditionalConfigs: boolean,
-  scope: 'repo-tree' | 'configs'
+  scope: 'repo-tree' | 'configs',
+  files: string[] = []
 ): Promise<void> {
-  return invoke('start_indexing', { path, languages, output, includeAdditionalConfigs, scope });
+  return invoke('start_indexing', {
+    path,
+    languages,
+    output,
+    includeAdditionalConfigs,
+    scope,
+    files,
+  });
 }
 
 export async function cancelIndexing(): Promise<void> {

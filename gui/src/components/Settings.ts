@@ -447,6 +447,7 @@ async function loadConfig() {
             c.scope === 'configs' || c.scope === 'repo-tree'
               ? c.scope
               : current.scope,
+          explicitFiles: current.explicitFiles,
           goHome: typeof goConfig.home === 'string' ? goConfig.home : current.goHome,
           javaHome: typeof javaConfig.home === 'string' ? javaConfig.home : current.javaHome,
         },
@@ -494,6 +495,7 @@ async function handleSave() {
         ? scopeSelect.value
         : current.scope,
     includeAdditionalConfigs: current.includeAdditionalConfigs,
+    explicitFiles: current.explicitFiles,
     goHome: goHomeInput ? goHomeInput.value : current.goHome,
     javaHome: javaHomeInput ? javaHomeInput.value : current.javaHome,
   };
@@ -550,6 +552,7 @@ function handleReset() {
       cacheDir: '',
       scope: 'repo-tree',
       includeAdditionalConfigs: false,
+      explicitFiles: '',
       goHome: '',
       javaHome: '',
     },
