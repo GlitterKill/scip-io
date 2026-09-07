@@ -1,0 +1,196 @@
+diff --git a/scip-java/src/main/scala/com/sourcegraph/scip_java/buildtools/GradleBuildTool.scala b/scip-java/src/main/scala/com/sourcegraph/scip_java/buildtools/GradleBuildTool.scala
+index 572befa..6748474 100644
+--- a/scip-java/src/main/scala/com/sourcegraph/scip_java/buildtools/GradleBuildTool.scala
++++ b/scip-java/src/main/scala/com/sourcegraph/scip_java/buildtools/GradleBuildTool.scala
+@@ -112,17 +112,17 @@ class GradleBuildTool(index: IndexCommand) extends BuildTool("Gradle", index) {
+       s"""
+          | initscript {
+          |     dependencies{ 
+-         |         classpath(files("${gradlePluginPath}"))
++         |         classpath(files(${groovyString(gradlePluginPath.toString)}))
+          |     }
+          | }
+          |
+          | import com.sourcegraph.gradle.semanticdb.SemanticdbGradlePlugin
+          |
+          | allprojects {
+-         |   project.ext["semanticdbTarget"] = "$targetroot"
+-         |   project.ext["javacPluginJar"] = "$pluginpath"
+-         |   project.ext["dependenciesOut"] = "$dependenciesPath"
+-         |   project.ext["javacAgentPath"] = "$agentpath"
++         |   project.ext["semanticdbTarget"] = ${groovyString(targetroot.toString)}
++         |   project.ext["javacPluginJar"] = ${groovyString(pluginpath.toString)}
++         |   project.ext["dependenciesOut"] = ${groovyString(dependenciesPath.toString)}
++         |   project.ext["javacAgentPath"] = ${groovyString(agentpath.toString)}
+          |   apply plugin: SemanticdbGradlePlugin
+          | }
+       """.stripMargin.trim
+@@ -133,6 +133,10 @@ class GradleBuildTool(index: IndexCommand) extends BuildTool("Gradle", index) {
+     )
+   }
+ 
++  // JSON quotes paths and escapes control characters; Groovy also needs literal dollars.
++  private def groovyString(value: String): String =
++    ujson.write(value).replace("$", "\\$")
++
+   def semanticdbScalacGroovySyntax(): String = BuildInfo
+     .semanticdbScalacVersions
+     .removed(
+diff --git a/tests/gradle-init-script/Regression.scala b/tests/gradle-init-script/Regression.scala
+new file mode 100644
+index 0000000..13ae255
+--- /dev/null
++++ b/tests/gradle-init-script/Regression.scala
+@@ -0,0 +1,62 @@
++import java.nio.charset.StandardCharsets.UTF_8
++import java.nio.file.Files
++import java.nio.file.Path
++
++import com.sourcegraph.scip_java.buildtools.GradleBuildTool
++import com.sourcegraph.scip_java.commands.IndexCommand
++import groovy.lang.GroovyShell
++
++/** Standalone regression: use the Groovy jar shipped with the Gradle under test. */
++object Regression {
++  def main(args: Array[String]): Unit = {
++    val tmp = Files.createTempDirectory("scip init ' $ paths ")
++    try {
++      val target = tmp.resolve("target ' $ space")
++      val tool = new GradleBuildTool(IndexCommand(targetroot = Some(target)))
++      val init = classOf[GradleBuildTool].getDeclaredMethod("initScript", classOf[Path])
++      init.setAccessible(true)
++      val file = init.invoke(tool, tmp).asInstanceOf[Path]
++      val shell = new GroovyShell()
++      // Stub Gradle's DSL, but let the real Groovy compiler parse the entire file.
++      shell.getClassLoader.parseClass(
++        "package com.sourcegraph.gradle.semanticdb; class SemanticdbGradlePlugin {}"
++      )
++      shell.evaluate("""
++        def initscript(Closure c) { c() }
++        def dependencies(Closure c) { c() }
++        def files(Object p) { p }
++        def classpath(Object p) { binding.setVariable('plugin', p) }
++        def allprojects(Closure c) { c() }
++        def apply(Map p) {}
++        project = [ext: [:]]
++      """ + new String(Files.readAllBytes(file), UTF_8))
++      assert(shell.getVariable("plugin") == tmp.resolve("gradle-plugin.jar").toString)
++      val ext = shell.evaluate("project.ext").asInstanceOf[java.util.Map[String, String]]
++      assert(ext.get("semanticdbTarget") == target.toString)
++      assert(ext.get("dependenciesOut") == target.resolve("dependencies.txt").toString)
++      assert(ext.get("javacPluginJar") == tmp.resolve("semanticdb-plugin.jar").toString)
++      assert(ext.get("javacAgentPath") == tmp.resolve("semanticdb-agent.jar").toString)
++
++      // Double quotes are illegal in Windows filenames: test serialization without IO.
++      val quote = classOf[GradleBuildTool].getDeclaredMethod("groovyString", classOf[String])
++      quote.setAccessible(true)
++      val paths = List(
++        "C:\\Users\\test\\gradle-plugin.jar",
++        "C:\\with spaces\\it's a plugin.jar",
++        "C:\\quotes\\\"plugin\".jar",
++        "C:\\${notAnExpression}\\$name.jar",
++        "\\\\server\\share\\trailing\\",
++        "/tmp/quotes'\"\\\t\n\r\b\f\u0001.jar"
++      )
++      paths.foreach { path =>
++        val literal = quote.invoke(tool, path).asInstanceOf[String]
++        assert(shell.evaluate(literal) == path, literal)
++      }
++      println("PASS: generated init script and all five path values; six escaping cases")
++    } finally {
++      val entries = Files.walk(tmp)
++      try entries.sorted(java.util.Comparator.reverseOrder[Path]()).forEach(p => Files.delete(p))
++      finally entries.close()
++    }
++  }
++}
+diff --git a/tests/gradle-init-script/run.ps1 b/tests/gradle-init-script/run.ps1
+new file mode 100644
+index 0000000..5479179
+--- /dev/null
++++ b/tests/gradle-init-script/run.ps1
+@@ -0,0 +1,39 @@
++param(
++    [Parameter(Mandatory)] [string] $Launcher,
++    [Parameter(Mandatory)] [string] $GradleHome,
++    [switch] $Original
++)
++$ErrorActionPreference = 'Stop'
++$repo = (Resolve-Path "$PSScriptRoot/../..").Path
++$work = Join-Path $repo '.verification'
++$jars = Join-Path $work 'jars'
++$classes = Join-Path $work $(if ($Original) { 'original-test-classes' } else { 'patched-test-classes' })
++New-Item -ItemType Directory -Force $jars, $classes | Out-Null
++
++# Coursier launchers contain the release's complete dependency classpath.
++@'
++import pathlib, sys, zipfile
++with zipfile.ZipFile(sys.argv[1]) as z:
++    for name in z.namelist():
++        if name.endswith('.jar'):
++            (pathlib.Path(sys.argv[2]) / pathlib.PurePosixPath(name).name).write_bytes(z.read(name))
++'@ | python - $Launcher $jars
++if ($LASTEXITCODE -ne 0) { throw 'Launcher extraction failed' }
++
++foreach ($artifact in @('scala-compiler', 'scala-reflect', 'scala-library')) {
++    $destination = Join-Path $work "$artifact.jar"
++    if (!(Test-Path $destination)) {
++        Invoke-WebRequest "https://repo.maven.apache.org/maven2/org/scala-lang/$artifact/2.13.13/$artifact-2.13.13.jar" -OutFile $destination
++    }
++}
++$groovy = Get-ChildItem "$GradleHome/lib/groovy-[0-9]*.jar" | Select-Object -First 1 -ExpandProperty FullName
++if (!$groovy) { throw 'Gradle Groovy jar not found' }
++$dependencies = ((Get-ChildItem "$jars/*.jar" | ForEach-Object FullName) + $groovy) -join ';'
++$sources = @("$PSScriptRoot/Regression.scala")
++if (!$Original) {
++    $sources += "$repo/scip-java/src/main/scala/com/sourcegraph/scip_java/buildtools/GradleBuildTool.scala"
++}
++& java -cp "$work/*" scala.tools.nsc.Main -classpath $dependencies -d $classes @sources
++if ($LASTEXITCODE -ne 0) { throw 'Regression compilation failed' }
++& java -cp "$classes;$dependencies" Regression
++if ($LASTEXITCODE -ne 0) { throw 'Gradle init script regression failed' }
+diff --git a/tests/gradle-init-script/README.md b/tests/gradle-init-script/README.md
+new file mode 100644
+index 0000000..37de406
+--- /dev/null
++++ b/tests/gradle-init-script/README.md
+@@ -0,0 +1,39 @@
++# Gradle initialization-script path regression
++
++`GradleBuildTool.initScript` must serialize filesystem paths as Groovy string
++literals. Raw Windows backslashes fail parsing or become escapes; double quotes
++can end the literal, and dollar signs can trigger interpolation. All five paths
++in the script need the same encoding. The existing JSON serializer handles
++quotes, backslashes and control characters; escaping dollars prevents Groovy
++interpolation.
++
++This standalone test compiles the actual modified `GradleBuildTool.scala`
++against the dependencies embedded in the scip-java 0.12.3 release. It evaluates
++the complete generated script using Gradle's own Groovy compiler with a stub
++Gradle DSL and checks all five resulting path values. Synthetic cases also
++cover Windows/UNC backslashes, spaces, both quote types, dollars, trailing
++backslashes and control characters. Double quotes cannot occur in actual
++Windows filenames, so that case intentionally uses no filesystem operations.
++
++On Windows with Java 21, Python 3 and Gradle 9.5.1 available:
++
++```powershell
++$launcher = "$env:LOCALAPPDATA/scip-io/bin/scip-java" # companion payload, not .bat
++$gradleHome = 'C:/path/to/gradle-9.5.1'
++./tests/gradle-init-script/run.ps1 -Launcher $launcher -GradleHome $gradleHome -Original
++# Expected failure: Unexpected character at the unescaped classpath string.
++./tests/gradle-init-script/run.ps1 -Launcher $launcher -GradleHome $gradleHome
++# Expected: PASS: generated init script and all five path values; six escaping cases
++```
++
++The runner downloads Scala 2.13.13 compiler jars into `.verification/` and does
++not install or replace the launcher. This is a focused regression, not the full
++sbt test suite or release build. Actual indexing must additionally demonstrate
++usable SCIP documents and occurrences and zero generator failures.
++
++Moshi commit `889013ec2edb8d8034902662a1dc8c4f3b3f8111` on Windows gets past script
++compilation with this fix, but its Kotlin 2.3.21 compiler rejects the bundled
++`semanticdb-kotlinc:0.5.0` with `AbstractMethodError` for
++`CompilerPluginRegistrar.getPluginId()`. Fixing path serialization alone does
++not make that repository indexable. Preserve `OS=Windows_NT` when reproducing;
++without it, the batch launcher has an earlier, separate argument-shifting failure.

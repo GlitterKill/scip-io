@@ -61,6 +61,13 @@ SCIP-IO currently orchestrates **11 languages** across **9 different indexers**:
 
 SCIP-IO will also pick up any of these binaries already on your system `PATH` before downloading a fresh copy.
 
+**Windows Gradle compatibility:** stock `scip-java` 0.12.3 writes unescaped
+Windows paths into its initialization script and bundles a Kotlin 2.1 plugin.
+The [upstream patches and verification](docs/windows-scip-java-gradle.md) fix
+path serialization and add Kotlin 2.3.21 compatibility. Both Java and Kotlin
+generation pass on pinned Moshi with the patched builds; these changes are
+local and unpublished. Detection readiness alone does not guarantee successful SCIP generation.
+
 When you opt in with `--include-additional-configs` or the GUI's Extra configs
 option, SCIP-IO also discovers secondary config files for indexers that accept
 multiple config inputs. Today that includes root-level `tsconfig.json` and
@@ -795,9 +802,13 @@ args = ["index", "--output", "index.scip", "--targetroot", "/tmp/scip-java-seman
 
 Indexer override tables can be keyed by SCIP-IO language name
 (`typescript`, `python`, `kotlin`) or by indexer name (`scip-typescript`,
-`scip-java`). CLI and GUI indexing both use the same config loader and runner,
-so backend, binary, version, and args overrides apply consistently in both
-surfaces.
+`scip-java`). CLI and GUI indexing share the config loader and runner.
+CLI native indexing honors `binary` before consulting the managed installation.
+Relative binary paths resolve from the directory containing the loaded config;
+a missing file is an error, without fallback to the installed indexer. Language
+tables take precedence over indexer-name tables. This fixes the ignored override
+in released 0.1.9. JSON and text dry-run commands show the configured executable
+path as well; see the [Windows Gradle investigation](docs/windows-scip-java-gradle.md).
 
 ---
 

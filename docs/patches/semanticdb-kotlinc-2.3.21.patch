@@ -1,0 +1,2224 @@
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+index b65aa7d..4a359ad 100644
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -9,8 +9,10 @@ jobs:
+       - uses: actions/checkout@v4
+       - uses: actions/setup-java@v4
+         with:
+-          java-version: '8'
+-          distribution: 'adopt'
++          java-version: |
++            8
++            21
++          distribution: 'temurin'
+           cache: 'gradle'
+       - name: Test
+-        run: ./gradlew test
++        run: ./gradlew spotlessCheck test
+diff --git a/.github/workflows/release.yml b/.github/workflows/release.yml
+index f1243a9..df79c00 100644
+--- a/.github/workflows/release.yml
++++ b/.github/workflows/release.yml
+@@ -15,8 +15,10 @@ jobs:
+         run: echo "version=${GITHUB_REF/refs\/tags\/v/}" >> $GITHUB_OUTPUT
+       - uses: actions/setup-java@v4
+         with:
+-          java-version: '8'
+-          distribution: 'adopt'
++          java-version: |
++            8
++            21
++          distribution: 'temurin'
+           cache: 'gradle'
+       - name: Publish ${{ github.ref }}
+         run: ./gradlew -Pversion=${{ steps.tag.outputs.version }} publish
+diff --git a/README.md b/README.md
+index a0c518c..076d369 100644
+--- a/README.md
++++ b/README.md
+@@ -15,7 +15,7 @@ even if you have no Java code.
+ 
+ ## Kotlin version compatibility
+ 
+-Any given release of scip-kotlin only supports one major version of Kotlin.
++This plugin uses compiler internals and must match the Kotlin compiler version.
+ Use the table below to find the version of scip-kotlin that matches the Kotlin
+ version you are using in your project.
+ 
+@@ -23,6 +23,33 @@ version you are using in your project.
+ |----------------|---------------------|
+ | 1.8.x          | 0.3.2               |
+ | 1.9.x          | 0.4.0               |
++| 2.1.20         | 0.5.0               |
++| 2.3.21         | 0.5.1-kotlin-2.3.21-SNAPSHOT (local build) |
++
++The compatibility patch adds the registrar plugin ID and updates FIR checker
++context parameters, containing-symbol lookup, and override lookup for Kotlin
++2.3.21. It preserves the earlier local/global symbol classification. Source
++streams are closed after reading, multi-line ranges use the end offset's line
++and column, and rendered documentation uses LF on Windows.
++
++Spotless 7.0.4 and ktfmt 0.55 support the context-parameter syntax. The
++formatter uses Kotlin style because ktfmt removed Dropbox style. CI installs
++JDK 8 and JDK 21, runs Gradle on 21, and checks formatting before tests.
++
++Build and run the regression suite with Gradle 8.10.2 using a JDK 17+ to run
++Gradle and a JDK 8 toolchain for the existing Java 8 output target:
++
++```powershell
++$env:OS = 'Windows_NT'
++./gradlew.bat --no-daemon '-Porg.gradle.java.installations.paths=C:/path/to/jdk8' spotlessCheck :semanticdb-kotlinc:test :semanticdb-kotlinc:shadowJar '-Pversion=0.5.1-kotlin-2.3.21-SNAPSHOT'
++```
++
++The suite includes an actual compiler invocation that checks emitted symbols,
++references and multi-line ranges. This patch was also verified with scip-java
++0.12.3 plus its Windows Gradle path-serialization fix against Moshi commit
++`889013ec2edb8d8034902662a1dc8c4f3b3f8111`, Kotlin 2.3.21 and Gradle 9.5.1.
++It does not establish compatibility with other Kotlin compiler versions and
++does not publish or replace an installed release automatically.
+ 
+ ## SemanticDB support
+ 
+@@ -75,3 +102,19 @@ If you have Coursier installed, you can run scip-java directly like this
+ cd $SOURCEROOT_DIRECTORY
+ ./coursier launch --contrib scip-java -- index-semanticdb TARGETROOT_DIRECTORY
+ ```
++
++### Local scip-java integration
++
++Stage the versioned snapshot in a disposable Maven repository; this does not
++publish remotely or replace `0.5.0`:
++
++```powershell
++./gradlew.bat --no-daemon '-Porg.gradle.java.installations.paths=C:/path/to/jdk8' '-Pversion=0.5.1-kotlin-2.3.21-SNAPSHOT' '-Dmaven.repo.local=C:/path/to/disposable-maven' :semanticdb-kotlinc:publishShadowPublicationToMavenLocal
++```
++
++Build scip-java with `semanticdbKotlin = "0.5.1-kotlin-2.3.21-SNAPSHOT"`
++and `kotlinVersion = "2.3.21"` in `build.sbt`. Its existing Gradle plugin
++resolves from `mavenLocal()`. For the isolated generation process, set
++`JAVA_TOOL_OPTIONS=-Dmaven.repo.local=C:/path/to/disposable-maven`.
++This compatibility build targets Kotlin 2.3.21; retain the released build for
++Kotlin 2.1.20. Do not overwrite an existing release coordinate.
+diff --git a/build.gradle.kts b/build.gradle.kts
+index 97a0f99..4e18b75 100644
+--- a/build.gradle.kts
++++ b/build.gradle.kts
+@@ -4,11 +4,11 @@ import groovy.lang.Closure
+ import org.gradle.jvm.toolchain.internal.CurrentJvmToolchainSpec
+ 
+ plugins {
+-    kotlin("jvm") version "2.1.20"
++    kotlin("jvm") version "2.3.21"
+     id("com.github.johnrengelman.shadow") version "8.1.1"
+     id("com.palantir.git-version") version "3.1.0"
+     id("io.github.gradle-nexus.publish-plugin") version "1.1.0"
+-    id("com.diffplug.spotless") version "5.17.1"
++    id("com.diffplug.spotless") version "7.0.4"
+ }
+ 
+ val versionDetails: Closure<VersionDetails> by extra
+@@ -18,7 +18,7 @@ allprojects {
+         apply(plugin = "com.diffplug.spotless")
+         spotless {
+             kotlin {
+-                ktfmt().dropboxStyle()
++                ktfmt("0.55").kotlinlangStyle()
+             }
+         }
+     }
+@@ -66,7 +66,7 @@ subprojects {
+ allprojects {
+     afterEvaluate {
+         tasks.withType<KotlinCompile> {
+-            kotlinOptions.jvmTarget = "1.8"
++            compilerOptions.jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_1_8)
+         }
+ 
+         kotlin {
+diff --git a/debug-project/build.gradle.kts b/debug-project/build.gradle.kts
+index 5f9fe2c..59926cb 100644
+--- a/debug-project/build.gradle.kts
++++ b/debug-project/build.gradle.kts
+@@ -24,12 +24,12 @@ dependencies {
+ }
+ 
+ tasks.withType<KotlinCompile> {
+-    kotlinOptions.jvmTarget = "1.8"
++    compilerOptions.jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_1_8)
+     dependsOn(":${projects.semanticdbKotlinc.name}:shadowJar")
+     val targetroot = File(project.buildDir, "semanticdb-targetroot")
+-    kotlinOptions {
+-        jvmTarget = "11"
+-        freeCompilerArgs = freeCompilerArgs + listOf(
++    compilerOptions {
++        jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_11)
++        freeCompilerArgs.addAll(
+             "-Xplugin=${semanticdbJar.first()}",
+             "-P",
+             "plugin:semanticdb-kotlinc:sourceroot=${projectDir.path}",
+diff --git a/semanticdb-kotlinc/build.gradle.kts b/semanticdb-kotlinc/build.gradle.kts
+index d641f93..88357d4 100644
+--- a/semanticdb-kotlinc/build.gradle.kts
++++ b/semanticdb-kotlinc/build.gradle.kts
+@@ -40,24 +40,19 @@ dependencies {
+     //   https://github.com/tschuchortdev/kotlin-compile-testing/issues/390
+     // Until then, we use the fork from https://github.com/ZacSweers/kotlin-compile-testing instead.
+     // testImplementation("com.github.tschuchortdev", "kotlin-compile-testing", "1.5.0")
+-    testImplementation("dev.zacsweers.kctfork", "core", "0.7.0")
++    testImplementation("dev.zacsweers.kctfork", "core", "0.12.1")
+ 
+     testImplementation("org.junit.jupiter", "junit-jupiter-params", "5.8.1")
+-    testImplementation("org.jetbrains.kotlin", "kotlin-stdlib-jdk8", "1.5.0") {
+-        version {
+-            strictly("1.5.0")
+-        }
+-    }.because("transitive dependencies introduce 1.4.31 to the classpath which conflicts, can't use testRuntimeOnly")
+     testImplementation(kotlin("reflect"))
+-    testImplementation(kotlin("script-runtime", "1.5.0"))
++    testImplementation(kotlin("script-runtime"))
+ 
+     snapshotsImplementation("com.sourcegraph", "scip-java_2.13", "0.8.24")
+ }
+ 
+ tasks.withType<KotlinCompile> {
+     dependsOn(":${projects.semanticdbKotlin.name}:build")
+-    kotlinOptions {
+-        freeCompilerArgs = freeCompilerArgs + listOf("-Xinline-classes")
++    compilerOptions {
++        freeCompilerArgs.addAll("-Xinline-classes", "-Xcontext-parameters")
+     }
+ }
+ 
+@@ -204,9 +199,9 @@ subprojects {
+             dependsOn(projects.semanticdbKotlinc.dependencyProject.tasks.shadowJar.get().path)
+             outputs.upToDateWhen { false }
+             val pluginJar = semanticdbJar.incoming.artifacts.artifactFiles.first().path
+-            kotlinOptions {
+-                jvmTarget = "1.8"
+-                freeCompilerArgs = freeCompilerArgs + listOf(
++            compilerOptions {
++                jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_1_8)
++                freeCompilerArgs.addAll(
+                     "-Xplugin=$pluginJar",
+                     "-P",
+                     "plugin:semanticdb-kotlinc:sourceroot=${sourceroot}",
+diff --git a/semanticdb-kotlinc/src/main/kotlin/com/sourcegraph/semanticdb_kotlinc/AnalyzerCheckers.kt b/semanticdb-kotlinc/src/main/kotlin/com/sourcegraph/semanticdb_kotlinc/AnalyzerCheckers.kt
+index b3cbe85..2c43650 100644
+--- a/semanticdb-kotlinc/src/main/kotlin/com/sourcegraph/semanticdb_kotlinc/AnalyzerCheckers.kt
++++ b/semanticdb-kotlinc/src/main/kotlin/com/sourcegraph/semanticdb_kotlinc/AnalyzerCheckers.kt
+@@ -12,13 +12,13 @@ import org.jetbrains.kotlin.fir.analysis.checkers.context.CheckerContext
+ import org.jetbrains.kotlin.fir.analysis.checkers.declaration.*
+ import org.jetbrains.kotlin.fir.analysis.checkers.expression.ExpressionCheckers
+ import org.jetbrains.kotlin.fir.analysis.checkers.expression.FirQualifiedAccessExpressionChecker
+-import org.jetbrains.kotlin.fir.analysis.checkers.getContainingClassSymbol
+ import org.jetbrains.kotlin.fir.analysis.checkers.toClassLikeSymbol
+ import org.jetbrains.kotlin.fir.analysis.extensions.FirAdditionalCheckersExtension
+ import org.jetbrains.kotlin.fir.declarations.*
+ import org.jetbrains.kotlin.fir.expressions.FirQualifiedAccessExpression
+ import org.jetbrains.kotlin.fir.references.FirResolvedNamedReference
+ import org.jetbrains.kotlin.fir.resolve.calls.FirSyntheticFunctionSymbol
++import org.jetbrains.kotlin.fir.resolve.getContainingClassSymbol
+ import org.jetbrains.kotlin.fir.resolve.providers.symbolProvider
+ import org.jetbrains.kotlin.fir.resolve.toClassLikeSymbol
+ import org.jetbrains.kotlin.fir.symbols.impl.FirAnonymousObjectSymbol
+@@ -33,11 +33,11 @@ open class AnalyzerCheckers(session: FirSession) : FirAdditionalCheckersExtensio
+         val visitors: MutableMap<KtSourceFile, SemanticdbVisitor> = mutableMapOf()
+ 
+         private fun getIdentifier(element: KtSourceElement): KtSourceElement =
+-            element
+-                .treeStructure
++            element.treeStructure
+                 .findChildByType(element.lighterASTNode, KtTokens.IDENTIFIER)
+                 ?.toKtLightSourceElement(element.treeStructure) ?: element
+     }
++
+     override val declarationCheckers: DeclarationCheckers
+         get() = AnalyzerDeclarationCheckers(session.analyzerParamsProvider.sourceroot)
+ 
+@@ -52,8 +52,7 @@ open class AnalyzerCheckers(session: FirSession) : FirAdditionalCheckersExtensio
+     open class AnalyzerDeclarationCheckers(sourceroot: Path) : DeclarationCheckers() {
+         override val fileCheckers: Set<FirFileChecker> =
+             setOf(SemanticFileChecker(sourceroot), SemanticImportsChecker())
+-        override val classLikeCheckers: Set<FirClassLikeChecker> =
+-            setOf(SemanticClassLikeChecker())
++        override val classLikeCheckers: Set<FirClassLikeChecker> = setOf(SemanticClassLikeChecker())
+         override val constructorCheckers: Set<FirConstructorChecker> =
+             setOf(SemanticConstructorChecker())
+         override val simpleFunctionCheckers: Set<FirSimpleFunctionChecker> =
+@@ -77,11 +76,8 @@ open class AnalyzerCheckers(session: FirSession) : FirAdditionalCheckersExtensio
+         }
+ 
+         @OptIn(ExperimentalContracts::class)
+-        override fun check(
+-            declaration: FirFile,
+-            context: CheckerContext,
+-            reporter: DiagnosticReporter
+-        ) {
++        context(context: CheckerContext, reporter: DiagnosticReporter)
++        override fun check(declaration: FirFile) {
+             val ktFile = declaration.sourceFile ?: return
+             val lineMap = LineMap(declaration)
+             val visitor = SemanticdbVisitor(sourceroot, ktFile, lineMap, globals)
+@@ -91,44 +87,48 @@ open class AnalyzerCheckers(session: FirSession) : FirAdditionalCheckersExtensio
+ 
+     class SemanticImportsChecker : FirFileChecker(MppCheckerKind.Common) {
+         @OptIn(ExperimentalContracts::class)
+-        override fun check(
+-            declaration: FirFile,
+-            context: CheckerContext,
+-            reporter: DiagnosticReporter
+-        ) {
++        context(context: CheckerContext, reporter: DiagnosticReporter)
++        override fun check(declaration: FirFile) {
+             val ktFile = declaration.sourceFile ?: return
+             val visitor = visitors[ktFile]
+ 
+             val eachFqNameElement =
+                 {
+-                fqName: FqName,
+-                tree: FlyweightCapableTreeStructure<LighterASTNode>,
+-                names: LighterASTNode,
+-                callback: (FqName, KtLightSourceElement) -> Unit ->
+-                val nameList =
+-                    if (names.tokenType == KtNodeTypes.REFERENCE_EXPRESSION) listOf(names)
+-                    else tree.collectDescendantsOfType(names, KtNodeTypes.REFERENCE_EXPRESSION)
++                    fqName: FqName,
++                    tree: FlyweightCapableTreeStructure<LighterASTNode>,
++                    names: LighterASTNode,
++                    callback: (FqName, KtLightSourceElement) -> Unit ->
++                    val nameList =
++                        if (names.tokenType == KtNodeTypes.REFERENCE_EXPRESSION) listOf(names)
++                        else tree.collectDescendantsOfType(names, KtNodeTypes.REFERENCE_EXPRESSION)
+ 
+-                var ancestor = fqName
+-                var depth = 0
++                    var ancestor = fqName
++                    var depth = 0
+ 
+-                while (ancestor != FqName.ROOT) {
+-                    val nameNode = nameList[nameList.lastIndex - depth]
+-                    val nameSource = nameNode.toKtLightSourceElement(tree)
++                    while (ancestor != FqName.ROOT) {
++                        val nameNode = nameList[nameList.lastIndex - depth]
++                        val nameSource = nameNode.toKtLightSourceElement(tree)
+ 
+-                    callback(ancestor, nameSource)
++                        callback(ancestor, nameSource)
+ 
+-                    ancestor = ancestor.parent()
+-                    depth++
++                        ancestor = ancestor.parent()
++                        depth++
++                    }
+                 }
+-            }
+ 
+             val packageDirective = declaration.packageDirective
+             val fqName = packageDirective.packageFqName
+             val source = packageDirective.source
+             if (source != null) {
+-                val names = source.treeStructure.findChildByType(source.lighterASTNode, KtNodeTypes.DOT_QUALIFIED_EXPRESSION) ?:
+-                    source.treeStructure.findChildByType(source.lighterASTNode, KtNodeTypes.REFERENCE_EXPRESSION)
++                val names =
++                    source.treeStructure.findChildByType(
++                        source.lighterASTNode,
++                        KtNodeTypes.DOT_QUALIFIED_EXPRESSION,
++                    )
++                        ?: source.treeStructure.findChildByType(
++                            source.lighterASTNode,
++                            KtNodeTypes.REFERENCE_EXPRESSION,
++                        )
+ 
+                 if (names != null) {
+                     eachFqNameElement(fqName, source.treeStructure, names) { fqName, name ->
+@@ -141,7 +141,11 @@ open class AnalyzerCheckers(session: FirSession) : FirAdditionalCheckersExtensio
+                 val source = import.source ?: return@forEach
+                 val fqName = import.importedFqName ?: return@forEach
+ 
+-                val names = source.treeStructure.findDescendantByType(source.lighterASTNode, KtNodeTypes.DOT_QUALIFIED_EXPRESSION)
++                val names =
++                    source.treeStructure.findDescendantByType(
++                        source.lighterASTNode,
++                        KtNodeTypes.DOT_QUALIFIED_EXPRESSION,
++                    )
+                 if (names != null) {
+                     eachFqNameElement(fqName, source.treeStructure, names) { fqName, name ->
+                         val symbolProvider = context.session.symbolProvider
+@@ -150,7 +154,9 @@ open class AnalyzerCheckers(session: FirSession) : FirAdditionalCheckersExtensio
+                             symbolProvider.getClassLikeSymbolByClassId(ClassId.topLevel(fqName))
+                         val callables =
+                             symbolProvider.getTopLevelCallableSymbols(
+-                                fqName.parent(), fqName.shortName())
++                                fqName.parent(),
++                                fqName.shortName(),
++                            )
+ 
+                         if (klass != null) {
+                             visitor?.visitClassReference(klass, name, context)
+@@ -169,23 +175,24 @@ open class AnalyzerCheckers(session: FirSession) : FirAdditionalCheckersExtensio
+ 
+     private class SemanticClassLikeChecker : FirClassLikeChecker(MppCheckerKind.Common) {
+         @OptIn(ExperimentalContracts::class)
+-        override fun check(
+-            declaration: FirClassLikeDeclaration,
+-            context: CheckerContext,
+-            reporter: DiagnosticReporter
+-        ) {
++        context(context: CheckerContext, reporter: DiagnosticReporter)
++        override fun check(declaration: FirClassLikeDeclaration) {
+             val source = declaration.source ?: return
+-            val ktFile = context.containingFile?.sourceFile ?: return
++            val ktFile = context.containingFileSymbol?.sourceFile ?: return
+             val visitor = visitors[ktFile]
+-            val objectKeyword = if (declaration is FirAnonymousObject) {
+-                source
+-                    .treeStructure
+-                    .findChildByType(source.lighterASTNode, KtTokens.OBJECT_KEYWORD)
+-                    ?.toKtLightSourceElement(source.treeStructure)
+-            } else {
+-                null
+-            }
+-            visitor?.visitClassOrObject(declaration, objectKeyword ?: getIdentifier(source), context)
++            val objectKeyword =
++                if (declaration is FirAnonymousObject) {
++                    source.treeStructure
++                        .findChildByType(source.lighterASTNode, KtTokens.OBJECT_KEYWORD)
++                        ?.toKtLightSourceElement(source.treeStructure)
++                } else {
++                    null
++                }
++            visitor?.visitClassOrObject(
++                declaration,
++                objectKeyword ?: getIdentifier(source),
++                context,
++            )
+ 
+             if (declaration is FirClass) {
+                 for (superType in declaration.superTypeRefs) {
+@@ -201,36 +208,37 @@ open class AnalyzerCheckers(session: FirSession) : FirAdditionalCheckersExtensio
+ 
+     private class SemanticConstructorChecker : FirConstructorChecker(MppCheckerKind.Common) {
+         @OptIn(ExperimentalContracts::class)
+-        override fun check(
+-            declaration: FirConstructor,
+-            context: CheckerContext,
+-            reporter: DiagnosticReporter
+-        ) {
++        context(context: CheckerContext, reporter: DiagnosticReporter)
++        override fun check(declaration: FirConstructor) {
+             val source = declaration.source ?: return
+-            val ktFile = context.containingFile?.sourceFile ?: return
++            val ktFile = context.containingFileSymbol?.sourceFile ?: return
+             val visitor = visitors[ktFile]
+ 
+             if (declaration.isPrimary) {
+-                // if the constructor is not denoted by the 'constructor' keyword, we want to link it to the
++                // if the constructor is not denoted by the 'constructor' keyword, we want to link
++                // it to the
+                 // class identifier
+                 val klass = declaration.symbol.getContainingClassSymbol()
+                 val klassSource = klass?.source ?: source
+                 val constructorKeyboard =
+-                    source
+-                        .treeStructure
++                    source.treeStructure
+                         .findChildByType(source.lighterASTNode, KtTokens.CONSTRUCTOR_KEYWORD)
+                         ?.toKtLightSourceElement(source.treeStructure)
+ 
+-                val objectKeyword = if (klass is FirAnonymousObjectSymbol) {
+-                    source
+-                        .treeStructure
+-                        .findChildByType(source.lighterASTNode, KtTokens.OBJECT_KEYWORD)
+-                        ?.toKtLightSourceElement(source.treeStructure)
+-                } else {
+-                    null
+-                }
++                val objectKeyword =
++                    if (klass is FirAnonymousObjectSymbol) {
++                        source.treeStructure
++                            .findChildByType(source.lighterASTNode, KtTokens.OBJECT_KEYWORD)
++                            ?.toKtLightSourceElement(source.treeStructure)
++                    } else {
++                        null
++                    }
+ 
+-                visitor?.visitPrimaryConstructor(declaration, constructorKeyboard ?: objectKeyword ?: getIdentifier(klassSource), context)
++                visitor?.visitPrimaryConstructor(
++                    declaration,
++                    constructorKeyboard ?: objectKeyword ?: getIdentifier(klassSource),
++                    context,
++                )
+             } else {
+                 visitor?.visitSecondaryConstructor(declaration, getIdentifier(source), context)
+             }
+@@ -239,19 +247,18 @@ open class AnalyzerCheckers(session: FirSession) : FirAdditionalCheckersExtensio
+ 
+     private class SemanticSimpleFunctionChecker : FirSimpleFunctionChecker(MppCheckerKind.Common) {
+         @OptIn(ExperimentalContracts::class)
+-        override fun check(
+-            declaration: FirSimpleFunction,
+-            context: CheckerContext,
+-            reporter: DiagnosticReporter
+-        ) {
++        context(context: CheckerContext, reporter: DiagnosticReporter)
++        override fun check(declaration: FirNamedFunction) {
+             val source = declaration.source ?: return
+-            val ktFile = context.containingFile?.sourceFile ?: return
++            val ktFile = context.containingFileSymbol?.sourceFile ?: return
+             val visitor = visitors[ktFile]
+             visitor?.visitNamedFunction(declaration, getIdentifier(source), context)
+ 
+             val klass = declaration.returnTypeRef.toClassLikeSymbol(context.session)
+             val klassSource = declaration.returnTypeRef.source
+-            if (klass != null && klassSource != null && klassSource.kind !is KtFakeSourceElementKind) {
++            if (
++                klass != null && klassSource != null && klassSource.kind !is KtFakeSourceElementKind
++            ) {
+                 visitor?.visitClassReference(klass, getIdentifier(klassSource), context)
+             }
+         }
+@@ -260,13 +267,10 @@ open class AnalyzerCheckers(session: FirSession) : FirAdditionalCheckersExtensio
+     private class SemanticAnonymousFunctionChecker :
+         FirAnonymousFunctionChecker(MppCheckerKind.Common) {
+         @OptIn(ExperimentalContracts::class)
+-        override fun check(
+-            declaration: FirAnonymousFunction,
+-            context: CheckerContext,
+-            reporter: DiagnosticReporter
+-        ) {
++        context(context: CheckerContext, reporter: DiagnosticReporter)
++        override fun check(declaration: FirAnonymousFunction) {
+             val source = declaration.source ?: return
+-            val ktFile = context.containingFile?.sourceFile ?: return
++            val ktFile = context.containingFileSymbol?.sourceFile ?: return
+             val visitor = visitors[ktFile]
+             visitor?.visitNamedFunction(declaration, source, context)
+         }
+@@ -274,19 +278,18 @@ open class AnalyzerCheckers(session: FirSession) : FirAdditionalCheckersExtensio
+ 
+     private class SemanticPropertyChecker : FirPropertyChecker(MppCheckerKind.Common) {
+         @OptIn(ExperimentalContracts::class)
+-        override fun check(
+-            declaration: FirProperty,
+-            context: CheckerContext,
+-            reporter: DiagnosticReporter
+-        ) {
++        context(context: CheckerContext, reporter: DiagnosticReporter)
++        override fun check(declaration: FirProperty) {
+             val source = declaration.source ?: return
+-            val ktFile = context.containingFile?.sourceFile ?: return
++            val ktFile = context.containingFileSymbol?.sourceFile ?: return
+             val visitor = visitors[ktFile]
+             visitor?.visitProperty(declaration, getIdentifier(source), context)
+ 
+             val klass = declaration.returnTypeRef.toClassLikeSymbol(context.session)
+             val klassSource = declaration.returnTypeRef.source
+-            if (klass != null && klassSource != null && klassSource.kind !is KtFakeSourceElementKind) {
++            if (
++                klass != null && klassSource != null && klassSource.kind !is KtFakeSourceElementKind
++            ) {
+                 visitor?.visitClassReference(klass, getIdentifier(klassSource), context)
+             }
+         }
+@@ -294,19 +297,18 @@ open class AnalyzerCheckers(session: FirSession) : FirAdditionalCheckersExtensio
+ 
+     private class SemanticValueParameterChecker : FirValueParameterChecker(MppCheckerKind.Common) {
+         @OptIn(ExperimentalContracts::class)
+-        override fun check(
+-            declaration: FirValueParameter,
+-            context: CheckerContext,
+-            reporter: DiagnosticReporter
+-        ) {
++        context(context: CheckerContext, reporter: DiagnosticReporter)
++        override fun check(declaration: FirValueParameter) {
+             val source = declaration.source ?: return
+-            val ktFile = context.containingFile?.sourceFile ?: return
++            val ktFile = context.containingFileSymbol?.sourceFile ?: return
+             val visitor = visitors[ktFile]
+             visitor?.visitParameter(declaration, getIdentifier(source), context)
+ 
+             val klass = declaration.returnTypeRef.toClassLikeSymbol(context.session)
+             val klassSource = declaration.returnTypeRef.source
+-            if (klass != null && klassSource != null && klassSource.kind !is KtFakeSourceElementKind) {
++            if (
++                klass != null && klassSource != null && klassSource.kind !is KtFakeSourceElementKind
++            ) {
+                 visitor?.visitClassReference(klass, getIdentifier(klassSource), context)
+             }
+         }
+@@ -314,13 +316,10 @@ open class AnalyzerCheckers(session: FirSession) : FirAdditionalCheckersExtensio
+ 
+     private class SemanticTypeParameterChecker : FirTypeParameterChecker(MppCheckerKind.Common) {
+         @OptIn(ExperimentalContracts::class)
+-        override fun check(
+-            declaration: FirTypeParameter,
+-            context: CheckerContext,
+-            reporter: DiagnosticReporter
+-        ) {
++        context(context: CheckerContext, reporter: DiagnosticReporter)
++        override fun check(declaration: FirTypeParameter) {
+             val source = declaration.source ?: return
+-            val ktFile = context.containingFile?.sourceFile ?: return
++            val ktFile = context.containingFileSymbol?.sourceFile ?: return
+             val visitor = visitors[ktFile]
+             visitor?.visitTypeParameter(declaration, getIdentifier(source), context)
+         }
+@@ -328,13 +327,10 @@ open class AnalyzerCheckers(session: FirSession) : FirAdditionalCheckersExtensio
+ 
+     private class SemanticTypeAliasChecker : FirTypeAliasChecker(MppCheckerKind.Common) {
+         @OptIn(ExperimentalContracts::class)
+-        override fun check(
+-            declaration: FirTypeAlias,
+-            context: CheckerContext,
+-            reporter: DiagnosticReporter
+-        ) {
++        context(context: CheckerContext, reporter: DiagnosticReporter)
++        override fun check(declaration: FirTypeAlias) {
+             val source = declaration.source ?: return
+-            val ktFile = context.containingFile?.sourceFile ?: return
++            val ktFile = context.containingFileSymbol?.sourceFile ?: return
+             val visitor = visitors[ktFile]
+             visitor?.visitTypeAlias(declaration, getIdentifier(source), context)
+         }
+@@ -343,27 +339,20 @@ open class AnalyzerCheckers(session: FirSession) : FirAdditionalCheckersExtensio
+     private class SemanticPropertyAccessorChecker :
+         FirPropertyAccessorChecker(MppCheckerKind.Common) {
+         @OptIn(ExperimentalContracts::class)
+-        override fun check(
+-            declaration: FirPropertyAccessor,
+-            context: CheckerContext,
+-            reporter: DiagnosticReporter
+-        ) {
++        context(context: CheckerContext, reporter: DiagnosticReporter)
++        override fun check(declaration: FirPropertyAccessor) {
+             val source = declaration.source ?: return
+-            val ktFile = context.containingFile?.sourceFile ?: return
++            val ktFile = context.containingFileSymbol?.sourceFile ?: return
+             val visitor = visitors[ktFile]
+             val identifierSource =
+                 if (declaration.isGetter) {
+-                    source
+-                        .treeStructure
++                    source.treeStructure
+                         .findChildByType(source.lighterASTNode, KtTokens.GET_KEYWORD)
+-                        ?.toKtLightSourceElement(source.treeStructure)
+-                        ?: getIdentifier(source)
++                        ?.toKtLightSourceElement(source.treeStructure) ?: getIdentifier(source)
+                 } else if (declaration.isSetter) {
+-                    source
+-                        .treeStructure
++                    source.treeStructure
+                         .findChildByType(source.lighterASTNode, KtTokens.SET_KEYWORD)
+-                        ?.toKtLightSourceElement(source.treeStructure)
+-                        ?: getIdentifier(source)
++                        ?.toKtLightSourceElement(source.treeStructure) ?: getIdentifier(source)
+                 } else {
+                     getIdentifier(source)
+                 }
+@@ -375,36 +364,54 @@ open class AnalyzerCheckers(session: FirSession) : FirAdditionalCheckersExtensio
+     private class SemanticQualifiedAccessExpressionChecker :
+         FirQualifiedAccessExpressionChecker(MppCheckerKind.Common) {
+         @OptIn(ExperimentalContracts::class)
+-        override fun check(
+-            expression: FirQualifiedAccessExpression,
+-            context: CheckerContext,
+-            reporter: DiagnosticReporter
+-        ) {
++        context(context: CheckerContext, reporter: DiagnosticReporter)
++        override fun check(expression: FirQualifiedAccessExpression) {
+             val source = expression.source ?: return
+             val calleeReference = expression.calleeReference
+             if ((calleeReference as? FirResolvedNamedReference) == null) {
+                 return
+             }
+ 
+-            val ktFile = context.containingFile?.sourceFile ?: return
++            val ktFile = context.containingFileSymbol?.sourceFile ?: return
+             val visitor = visitors[ktFile]
+-            visitor?.visitSimpleNameExpression(calleeReference, getIdentifier(calleeReference.source ?: source), context)
++            visitor?.visitSimpleNameExpression(
++                calleeReference,
++                getIdentifier(calleeReference.source ?: source),
++                context,
++            )
+ 
+             val resolvedSymbol = calleeReference.resolvedSymbol
+-            if (resolvedSymbol.origin == FirDeclarationOrigin.SamConstructor && resolvedSymbol is FirSyntheticFunctionSymbol) {
+-                val referencedKlass = resolvedSymbol.resolvedReturnType.toClassLikeSymbol(context.session)
++            if (
++                resolvedSymbol.origin == FirDeclarationOrigin.SamConstructor &&
++                    resolvedSymbol is FirSyntheticFunctionSymbol
++            ) {
++                val referencedKlass =
++                    resolvedSymbol.resolvedReturnType.toClassLikeSymbol(context.session)
+                 if (referencedKlass != null) {
+-                    visitor?.visitClassReference(referencedKlass, getIdentifier(calleeReference.source ?: source), context)
++                    visitor?.visitClassReference(
++                        referencedKlass,
++                        getIdentifier(calleeReference.source ?: source),
++                        context,
++                    )
+                 }
+             }
+ 
+-            // When encountering a reference to a property symbol, emit both getter and setter symbols
++            // When encountering a reference to a property symbol, emit both getter and setter
++            // symbols
+             if (resolvedSymbol is FirPropertySymbol) {
+                 resolvedSymbol.getterSymbol?.let {
+-                    visitor?.visitCallableReference(it, getIdentifier(calleeReference.source ?: source), context)
++                    visitor?.visitCallableReference(
++                        it,
++                        getIdentifier(calleeReference.source ?: source),
++                        context,
++                    )
+                 }
+                 resolvedSymbol.setterSymbol?.let {
+-                    visitor?.visitCallableReference(it, getIdentifier(calleeReference.source ?: source), context)
++                    visitor?.visitCallableReference(
++                        it,
++                        getIdentifier(calleeReference.source ?: source),
++                        context,
++                    )
+                 }
+             }
+         }
+diff --git a/semanticdb-kotlinc/src/main/kotlin/com/sourcegraph/semanticdb_kotlinc/AnalyzerCommandLineProcessor.kt b/semanticdb-kotlinc/src/main/kotlin/com/sourcegraph/semanticdb_kotlinc/AnalyzerCommandLineProcessor.kt
+index 4c67ac7..bdd85db 100644
+--- a/semanticdb-kotlinc/src/main/kotlin/com/sourcegraph/semanticdb_kotlinc/AnalyzerCommandLineProcessor.kt
++++ b/semanticdb-kotlinc/src/main/kotlin/com/sourcegraph/semanticdb_kotlinc/AnalyzerCommandLineProcessor.kt
+@@ -24,17 +24,20 @@ class AnalyzerCommandLineProcessor : CommandLineProcessor {
+                 VAL_SOURCES,
+                 "<path>",
+                 "the absolute path to the root of the Kotlin sources",
+-                required = true),
++                required = true,
++            ),
+             CliOption(
+                 VAL_TARGET,
+                 "<path>",
+                 "the absolute path to the directory where to generate SemanticDB files.",
+-                required = true))
++                required = true,
++            ),
++        )
+ 
+     override fun processOption(
+         option: AbstractCliOption,
+         value: String,
+-        configuration: CompilerConfiguration
++        configuration: CompilerConfiguration,
+     ) {
+         when (option.optionName) {
+             VAL_SOURCES -> configuration.put(KEY_SOURCES, Paths.get(value))
+diff --git a/semanticdb-kotlinc/src/main/kotlin/com/sourcegraph/semanticdb_kotlinc/AnalyzerFirExtensionRegistrar.kt b/semanticdb-kotlinc/src/main/kotlin/com/sourcegraph/semanticdb_kotlinc/AnalyzerFirExtensionRegistrar.kt
+index ec6bdf8..fecd1ef 100644
+--- a/semanticdb-kotlinc/src/main/kotlin/com/sourcegraph/semanticdb_kotlinc/AnalyzerFirExtensionRegistrar.kt
++++ b/semanticdb-kotlinc/src/main/kotlin/com/sourcegraph/semanticdb_kotlinc/AnalyzerFirExtensionRegistrar.kt
+@@ -3,9 +3,7 @@ package com.sourcegraph.semanticdb_kotlinc
+ import java.nio.file.Path
+ import org.jetbrains.kotlin.fir.extensions.FirExtensionRegistrar
+ 
+-class AnalyzerFirExtensionRegistrar(
+-    private val sourceroot: Path,
+-) : FirExtensionRegistrar() {
++class AnalyzerFirExtensionRegistrar(private val sourceroot: Path) : FirExtensionRegistrar() {
+     override fun ExtensionRegistrarContext.configurePlugin() {
+         +AnalyzerParamsProvider.getFactory(sourceroot)
+         +::AnalyzerCheckers
+diff --git a/semanticdb-kotlinc/src/main/kotlin/com/sourcegraph/semanticdb_kotlinc/AnalyzerParamsProvider.kt b/semanticdb-kotlinc/src/main/kotlin/com/sourcegraph/semanticdb_kotlinc/AnalyzerParamsProvider.kt
+index f87fde4..bbb969c 100644
+--- a/semanticdb-kotlinc/src/main/kotlin/com/sourcegraph/semanticdb_kotlinc/AnalyzerParamsProvider.kt
++++ b/semanticdb-kotlinc/src/main/kotlin/com/sourcegraph/semanticdb_kotlinc/AnalyzerParamsProvider.kt
+@@ -5,10 +5,8 @@ import org.jetbrains.kotlin.fir.FirSession
+ import org.jetbrains.kotlin.fir.extensions.FirExtensionSessionComponent
+ import org.jetbrains.kotlin.fir.extensions.FirExtensionSessionComponent.Factory
+ 
+-open class AnalyzerParamsProvider(
+-    session: FirSession,
+-    val sourceroot: Path,
+-) : FirExtensionSessionComponent(session) {
++open class AnalyzerParamsProvider(session: FirSession, val sourceroot: Path) :
++    FirExtensionSessionComponent(session) {
+     companion object {
+         fun getFactory(sourceroot: Path): Factory {
+             return Factory { AnalyzerParamsProvider(it, sourceroot) }
+@@ -16,5 +14,5 @@ open class AnalyzerParamsProvider(
+     }
+ }
+ 
+-val FirSession.analyzerParamsProvider: AnalyzerParamsProvider by FirSession
+-    .sessionComponentAccessor()
++val FirSession.analyzerParamsProvider: AnalyzerParamsProvider by
++    FirSession.sessionComponentAccessor()
+diff --git a/semanticdb-kotlinc/src/main/kotlin/com/sourcegraph/semanticdb_kotlinc/AnalyzerRegistrar.kt b/semanticdb-kotlinc/src/main/kotlin/com/sourcegraph/semanticdb_kotlinc/AnalyzerRegistrar.kt
+index 410dee5..a1bd6dc 100644
+--- a/semanticdb-kotlinc/src/main/kotlin/com/sourcegraph/semanticdb_kotlinc/AnalyzerRegistrar.kt
++++ b/semanticdb-kotlinc/src/main/kotlin/com/sourcegraph/semanticdb_kotlinc/AnalyzerRegistrar.kt
+@@ -19,9 +19,14 @@ class AnalyzerRegistrar(private val callback: (Semanticdb.TextDocument) -> Unit
+             PostAnalysisExtension(
+                 sourceRoot = configuration[KEY_SOURCES]!!,
+                 targetRoot = configuration[KEY_TARGET]!!,
+-                callback = callback))
++                callback = callback,
++            )
++        )
+     }
+ 
++    // Kotlin 2.3 requires registrars to identify the compiler plugin they install.
++    override val pluginId: String = "semanticdb-kotlinc"
++
+     override val supportsK2: Boolean
+         get() = true
+ }
+diff --git a/semanticdb-kotlinc/src/main/kotlin/com/sourcegraph/semanticdb_kotlinc/LineMap.kt b/semanticdb-kotlinc/src/main/kotlin/com/sourcegraph/semanticdb_kotlinc/LineMap.kt
+index b984685..b46ee11 100644
+--- a/semanticdb-kotlinc/src/main/kotlin/com/sourcegraph/semanticdb_kotlinc/LineMap.kt
++++ b/semanticdb-kotlinc/src/main/kotlin/com/sourcegraph/semanticdb_kotlinc/LineMap.kt
+@@ -14,9 +14,14 @@ class LineMap(private val file: FirFile) {
+     fun startCharacter(element: KtSourceElement): Int =
+         offsetToLineAndCol(element.startOffset)?.second ?: 0
+ 
+-    /** Returns the non-0-based end character */
++    /** Map the end offset independently: unnamed declarations can span multiple lines. */
+     fun endCharacter(element: KtSourceElement): Int =
+-        startCharacter(element) + nameForOffset(element).length
++        offsetToLineAndCol(element.startOffset + nameForOffset(element).length)?.second ?: 0
++
++    fun endLineNumber(element: KtSourceElement): Int =
++        offsetToLineAndCol(element.startOffset + nameForOffset(element).length)?.first?.let {
++            it + 1
++        } ?: 0
+ 
+     /** Returns the non-0-based line number */
+     fun lineNumber(element: KtSourceElement): Int =
+diff --git a/semanticdb-kotlinc/src/main/kotlin/com/sourcegraph/semanticdb_kotlinc/PostAnalysisExtension.kt b/semanticdb-kotlinc/src/main/kotlin/com/sourcegraph/semanticdb_kotlinc/PostAnalysisExtension.kt
+index 8d9247e..cc10c89 100644
+--- a/semanticdb-kotlinc/src/main/kotlin/com/sourcegraph/semanticdb_kotlinc/PostAnalysisExtension.kt
++++ b/semanticdb-kotlinc/src/main/kotlin/com/sourcegraph/semanticdb_kotlinc/PostAnalysisExtension.kt
+@@ -19,7 +19,7 @@ import org.jetbrains.kotlin.ir.declarations.IrModuleFragment
+ class PostAnalysisExtension(
+     private val sourceRoot: Path,
+     private val targetRoot: Path,
+-    private val callback: (Semanticdb.TextDocument) -> Unit
++    private val callback: (Semanticdb.TextDocument) -> Unit,
+ ) : IrGenerationExtension {
+     @OptIn(ExperimentalContracts::class)
+     override fun generate(moduleFragment: IrModuleFragment, pluginContext: IrPluginContext) {
+@@ -56,7 +56,8 @@ class PostAnalysisExtension(
+             return semanticdbOutPath
+         }
+         System.err.println(
+-            "given file is not under the sourceroot.\n\tSourceroot: $sourceRoot\n\tFile path: ${file.path}\n\tNormalized file path: $normalizedPath")
++            "given file is not under the sourceroot.\n\tSourceroot: $sourceRoot\n\tFile path: ${file.path}\n\tNormalized file path: $normalizedPath"
++        )
+         return null
+     }
+ 
+@@ -64,26 +65,31 @@ class PostAnalysisExtension(
+         CompilerConfiguration()
+             .get(
+                 CommonConfigurationKeys.MESSAGE_COLLECTOR_KEY,
+-                PrintingMessageCollector(System.err, MessageRenderer.PLAIN_FULL_PATHS, false))
++                PrintingMessageCollector(System.err, MessageRenderer.PLAIN_FULL_PATHS, false),
++            )
+ 
+     private fun handleException(e: Exception) {
+         val writer =
+             PrintWriter(
+                 object : Writer() {
+                     val buf = StringBuffer()
++
+                     override fun close() =
+                         messageCollector.report(CompilerMessageSeverity.EXCEPTION, buf.toString())
+ 
+                     override fun flush() = Unit
++
+                     override fun write(data: CharArray, offset: Int, len: Int) {
+                         buf.append(data, offset, len)
+                     }
+                 },
+-                false)
++                false,
++            )
+         writer.println("Exception in semanticdb-kotlin compiler plugin:")
+         e.printStackTrace(writer)
+         writer.println(
+-            "Please report a bug to https://github.com/sourcegraph/lsif-kotlin with the stack trace above.")
++            "Please report a bug to https://github.com/sourcegraph/lsif-kotlin with the stack trace above."
++        )
+         writer.close()
+     }
+ }
+diff --git a/semanticdb-kotlinc/src/main/kotlin/com/sourcegraph/semanticdb_kotlinc/SemanticdbSymbols.kt b/semanticdb-kotlinc/src/main/kotlin/com/sourcegraph/semanticdb_kotlinc/SemanticdbSymbols.kt
+index 3e60bef..897ca13 100644
+--- a/semanticdb-kotlinc/src/main/kotlin/com/sourcegraph/semanticdb_kotlinc/SemanticdbSymbols.kt
++++ b/semanticdb-kotlinc/src/main/kotlin/com/sourcegraph/semanticdb_kotlinc/SemanticdbSymbols.kt
+@@ -28,7 +28,7 @@ fun String.symbol(): Symbol = Symbol(this)
+ data class SemanticdbSymbolDescriptor(
+     val kind: Kind,
+     val name: String,
+-    val disambiguator: String = "()"
++    val disambiguator: String = "()",
+ ) {
+     companion object {
+         val NONE = SemanticdbSymbolDescriptor(Kind.NONE, "")
+@@ -53,7 +53,7 @@ data class SemanticdbSymbolDescriptor(
+         TYPE,
+         PACKAGE,
+         PARAMETER,
+-        TYPE_PARAMETER
++        TYPE_PARAMETER,
+     }
+ 
+     fun encode() =
+@@ -66,5 +66,6 @@ data class SemanticdbSymbolDescriptor(
+                 Kind.PACKAGE -> "${encodeName(name)}/"
+                 Kind.PARAMETER -> "(${encodeName(name)})"
+                 Kind.TYPE_PARAMETER -> "[${encodeName(name)}]"
+-            })
++            }
++        )
+ }
+diff --git a/semanticdb-kotlinc/src/main/kotlin/com/sourcegraph/semanticdb_kotlinc/SemanticdbTextDocumentBuilder.kt b/semanticdb-kotlinc/src/main/kotlin/com/sourcegraph/semanticdb_kotlinc/SemanticdbTextDocumentBuilder.kt
+index eb371e7..224a4ae 100644
+--- a/semanticdb-kotlinc/src/main/kotlin/com/sourcegraph/semanticdb_kotlinc/SemanticdbTextDocumentBuilder.kt
++++ b/semanticdb-kotlinc/src/main/kotlin/com/sourcegraph/semanticdb_kotlinc/SemanticdbTextDocumentBuilder.kt
+@@ -10,7 +10,7 @@ import org.jetbrains.kotlin.KtSourceFile
+ import org.jetbrains.kotlin.com.intellij.lang.java.JavaLanguage
+ import org.jetbrains.kotlin.fir.FirElement
+ import org.jetbrains.kotlin.fir.analysis.checkers.context.CheckerContext
+-import org.jetbrains.kotlin.fir.analysis.checkers.getDirectOverriddenSymbols
++import org.jetbrains.kotlin.fir.analysis.checkers.directOverriddenSymbolsSafe
+ import org.jetbrains.kotlin.fir.analysis.checkers.toClassLikeSymbol
+ import org.jetbrains.kotlin.fir.analysis.getChild
+ import org.jetbrains.kotlin.fir.renderer.*
+@@ -32,7 +32,7 @@ class SemanticdbTextDocumentBuilder(
+ ) {
+     private val occurrences = mutableListOf<Semanticdb.SymbolOccurrence>()
+     private val symbols = mutableListOf<Semanticdb.SymbolInformation>()
+-    private val fileText = file.getContentsAsStream().reader().readText()
++    private val fileText = file.getContentsAsStream().reader().use { it.readText() }
+     private val semanticMd5 = semanticdbMD5()
+ 
+     fun build() = TextDocument {
+@@ -73,14 +73,14 @@ class SemanticdbTextDocumentBuilder(
+         val supers =
+             when (firBasedSymbol) {
+                 is FirClassSymbol ->
+-                    firBasedSymbol
+-                        .resolvedSuperTypeRefs
++                    firBasedSymbol.resolvedSuperTypeRefs
+                         .filter { it !is FirImplicitAnyTypeRef }
+                         .map { it.toClassLikeSymbol(firBasedSymbol.moduleData.session) }
+                         .filterNotNull()
+                         .flatMap { cache[it] }
+                 is FirFunctionSymbol<*> ->
+-                    firBasedSymbol.fir.getDirectOverriddenSymbols(context).flatMap { cache[it] }
++                    with(context) { firBasedSymbol.directOverriddenSymbolsSafe() }
++                        .flatMap { cache[it] }
+                 else -> emptyList<Symbol>().asIterable()
+             }
+         return SymbolInformation {
+@@ -113,7 +113,7 @@ class SemanticdbTextDocumentBuilder(
+     private fun symbolOccurrence(
+         symbol: Symbol,
+         element: KtSourceElement,
+-        role: Role
++        role: Role,
+     ): Semanticdb.SymbolOccurrence {
+         return SymbolOccurrence {
+             this.symbol = symbol.toString()
+@@ -127,7 +127,7 @@ class SemanticdbTextDocumentBuilder(
+             startCharacter = lineMap.startCharacter(element)
+             startLine = lineMap.lineNumber(element) - 1
+             endCharacter = lineMap.endCharacter(element)
+-            endLine = lineMap.lineNumber(element) - 1
++            endLine = lineMap.endLineNumber(element) - 1
+         }
+     }
+ 
+@@ -139,27 +139,30 @@ class SemanticdbTextDocumentBuilder(
+ 
+     private fun semanticdbMD5(): String =
+         MessageDigest.getInstance("MD5")
+-            .digest(file.getContentsAsStream().readBytes())
++            .digest(file.getContentsAsStream().use { it.readBytes() })
+             .joinToString("") { "%02X".format(it) }
+ 
+-    private fun semanticdbDocumentation(element: FirElement): Semanticdb.Documentation = Documentation {
+-        format = Semanticdb.Documentation.Format.MARKDOWN
+-        // Like FirRenderer().forReadability, but using FirAllModifierRenderer instead of FirPartialModifierRenderer
+-        val renderer = FirRenderer(
+-            typeRenderer = ConeTypeRenderer(),
+-            idRenderer = ConeIdShortRenderer(),
+-            classMemberRenderer = FirNoClassMemberRenderer(),
+-            bodyRenderer = null,
+-            propertyAccessorRenderer = null,
+-            callArgumentsRenderer = FirCallNoArgumentsRenderer(),
+-            modifierRenderer = FirAllModifierRenderer(),
+-            callableSignatureRenderer = FirCallableSignatureRendererForReadability(),
+-            declarationRenderer = FirDeclarationRenderer("local "),
+-        )
+-        val renderOutput = renderer.renderElementAsString(element)
+-        val kdoc = element.source?.getChild(KtTokens.DOC_COMMENT)?.text?.toString() ?: ""
+-        message = "```kotlin\n$renderOutput\n```${stripKDocAsterisks(kdoc)}"
+-    }
++    private fun semanticdbDocumentation(element: FirElement): Semanticdb.Documentation =
++        Documentation {
++            format = Semanticdb.Documentation.Format.MARKDOWN
++            // Like FirRenderer().forReadability, but using FirAllModifierRenderer instead of
++            // FirPartialModifierRenderer
++            val renderer =
++                FirRenderer(
++                    typeRenderer = ConeTypeRenderer(),
++                    idRenderer = ConeIdShortRenderer(),
++                    classMemberRenderer = FirNoClassMemberRenderer(),
++                    bodyRenderer = null,
++                    propertyAccessorRenderer = null,
++                    callArgumentsRenderer = FirCallNoArgumentsRenderer(),
++                    modifierRenderer = FirAllModifierRenderer(),
++                    callableSignatureRenderer = FirCallableSignatureRendererForReadability(),
++                    declarationRenderer = FirDeclarationRenderer("local "),
++                )
++            val renderOutput = renderer.renderElementAsString(element).replace("\r\n", "\n")
++            val kdoc = element.source?.getChild(KtTokens.DOC_COMMENT)?.text?.toString() ?: ""
++            message = "```kotlin\n$renderOutput\n```${stripKDocAsterisks(kdoc)}"
++        }
+ 
+     // Returns the kdoc string with all leading and trailing "/*" tokens removed. Naive
+     // implementation that can
+@@ -204,8 +207,8 @@ class SemanticdbTextDocumentBuilder(
+             when (firBasedSymbol) {
+                 is FirClassSymbol -> firBasedSymbol.classId.shortClassName.asString()
+                 is FirPropertyAccessorSymbol -> firBasedSymbol.fir.propertySymbol.name.asString()
+-                is FirFunctionSymbol -> firBasedSymbol.callableId.callableName.asString()
+-                is FirPropertySymbol -> firBasedSymbol.callableId.callableName.asString()
++                is FirFunctionSymbol -> firBasedSymbol.name.asString()
++                is FirPropertySymbol -> firBasedSymbol.name.asString()
+                 is FirVariableSymbol -> firBasedSymbol.name.asString()
+                 else -> firBasedSymbol.toString()
+             }
+diff --git a/semanticdb-kotlinc/src/main/kotlin/com/sourcegraph/semanticdb_kotlinc/SemanticdbVisitor.kt b/semanticdb-kotlinc/src/main/kotlin/com/sourcegraph/semanticdb_kotlinc/SemanticdbVisitor.kt
+index fc3ef3c..58e2bae 100644
+--- a/semanticdb-kotlinc/src/main/kotlin/com/sourcegraph/semanticdb_kotlinc/SemanticdbVisitor.kt
++++ b/semanticdb-kotlinc/src/main/kotlin/com/sourcegraph/semanticdb_kotlinc/SemanticdbVisitor.kt
+@@ -19,14 +19,14 @@ class SemanticdbVisitor(
+     file: KtSourceFile,
+     lineMap: LineMap,
+     globals: GlobalSymbolsCache,
+-    locals: LocalSymbolsCache = LocalSymbolsCache()
++    locals: LocalSymbolsCache = LocalSymbolsCache(),
+ ) {
+     private val cache = SymbolsCache(globals, locals)
+     private val documentBuilder = SemanticdbTextDocumentBuilder(sourceroot, file, lineMap, cache)
+ 
+     private data class SymbolDescriptorPair(
+         val firBasedSymbol: FirBasedSymbol<*>?,
+-        val symbol: Symbol
++        val symbol: Symbol,
+     )
+ 
+     fun build(): Semanticdb.TextDocument {
+@@ -51,29 +51,57 @@ class SemanticdbVisitor(
+         cache[pkg].with(null).emitAll(element, Role.REFERENCE, context)
+     }
+ 
+-    fun visitClassReference(firClassSymbol: FirClassLikeSymbol<*>, element: KtSourceElement, context: CheckerContext) {
++    fun visitClassReference(
++        firClassSymbol: FirClassLikeSymbol<*>,
++        element: KtSourceElement,
++        context: CheckerContext,
++    ) {
+         cache[firClassSymbol].with(firClassSymbol).emitAll(element, Role.REFERENCE, context)
+     }
+ 
+-    fun visitCallableReference(firClassSymbol: FirCallableSymbol<*>, element: KtSourceElement, context: CheckerContext) {
++    fun visitCallableReference(
++        firClassSymbol: FirCallableSymbol<*>,
++        element: KtSourceElement,
++        context: CheckerContext,
++    ) {
+         cache[firClassSymbol].with(firClassSymbol).emitAll(element, Role.REFERENCE, context)
+     }
+ 
+-    fun visitClassOrObject(firClass: FirClassLikeDeclaration, element: KtSourceElement, context: CheckerContext) {
++    fun visitClassOrObject(
++        firClass: FirClassLikeDeclaration,
++        element: KtSourceElement,
++        context: CheckerContext,
++    ) {
+         cache[firClass.symbol].with(firClass.symbol).emitAll(element, Role.DEFINITION, context)
+     }
+ 
+-    fun visitPrimaryConstructor(firConstructor: FirConstructor, source: KtSourceElement, context: CheckerContext) {
++    fun visitPrimaryConstructor(
++        firConstructor: FirConstructor,
++        source: KtSourceElement,
++        context: CheckerContext,
++    ) {
+         // if the constructor is not denoted by the 'constructor' keyword, we want to link it to the
+         // class ident
+-        cache[firConstructor.symbol].with(firConstructor.symbol).emitAll(source, Role.DEFINITION, context)
++        cache[firConstructor.symbol]
++            .with(firConstructor.symbol)
++            .emitAll(source, Role.DEFINITION, context)
+     }
+ 
+-    fun visitSecondaryConstructor(firConstructor: FirConstructor, source: KtSourceElement, context: CheckerContext) {
+-        cache[firConstructor.symbol].with(firConstructor.symbol).emitAll(source, Role.DEFINITION, context)
++    fun visitSecondaryConstructor(
++        firConstructor: FirConstructor,
++        source: KtSourceElement,
++        context: CheckerContext,
++    ) {
++        cache[firConstructor.symbol]
++            .with(firConstructor.symbol)
++            .emitAll(source, Role.DEFINITION, context)
+     }
+ 
+-    fun visitNamedFunction(firFunction: FirFunction, source: KtSourceElement, context: CheckerContext) {
++    fun visitNamedFunction(
++        firFunction: FirFunction,
++        source: KtSourceElement,
++        context: CheckerContext,
++    ) {
+         cache[firFunction.symbol].with(firFunction.symbol).emitAll(source, Role.DEFINITION, context)
+     }
+ 
+@@ -81,21 +109,41 @@ class SemanticdbVisitor(
+         cache[firProperty.symbol].with(firProperty.symbol).emitAll(source, Role.DEFINITION, context)
+     }
+ 
+-    fun visitParameter(firParameter: FirValueParameter, source: KtSourceElement, context: CheckerContext) {
+-        cache[firParameter.symbol].with(firParameter.symbol).emitAll(source, Role.DEFINITION, context)
++    fun visitParameter(
++        firParameter: FirValueParameter,
++        source: KtSourceElement,
++        context: CheckerContext,
++    ) {
++        cache[firParameter.symbol]
++            .with(firParameter.symbol)
++            .emitAll(source, Role.DEFINITION, context)
+     }
+ 
+-    fun visitTypeParameter(firTypeParameter: FirTypeParameter, source: KtSourceElement, context: CheckerContext) {
++    fun visitTypeParameter(
++        firTypeParameter: FirTypeParameter,
++        source: KtSourceElement,
++        context: CheckerContext,
++    ) {
+         cache[firTypeParameter.symbol]
+             .with(firTypeParameter.symbol)
+             .emitAll(source, Role.DEFINITION, context)
+     }
+ 
+-    fun visitTypeAlias(firTypeAlias: FirTypeAlias, source: KtSourceElement, context: CheckerContext) {
+-        cache[firTypeAlias.symbol].with(firTypeAlias.symbol).emitAll(source, Role.DEFINITION, context)
++    fun visitTypeAlias(
++        firTypeAlias: FirTypeAlias,
++        source: KtSourceElement,
++        context: CheckerContext,
++    ) {
++        cache[firTypeAlias.symbol]
++            .with(firTypeAlias.symbol)
++            .emitAll(source, Role.DEFINITION, context)
+     }
+ 
+-    fun visitPropertyAccessor(firPropertyAccessor: FirPropertyAccessor, source: KtSourceElement, context: CheckerContext) {
++    fun visitPropertyAccessor(
++        firPropertyAccessor: FirPropertyAccessor,
++        source: KtSourceElement,
++        context: CheckerContext,
++    ) {
+         cache[firPropertyAccessor.symbol]
+             .with(firPropertyAccessor.symbol)
+             .emitAll(source, Role.DEFINITION, context)
+@@ -103,11 +151,11 @@ class SemanticdbVisitor(
+ 
+     fun visitSimpleNameExpression(
+         firResolvedNamedReference: FirResolvedNamedReference,
+-        source: KtSourceElement, context: CheckerContext,
++        source: KtSourceElement,
++        context: CheckerContext,
+     ) {
+         cache[firResolvedNamedReference.resolvedSymbol]
+             .with(firResolvedNamedReference.resolvedSymbol)
+             .emitAll(source, Role.REFERENCE, context)
+     }
+ }
+-
+diff --git a/semanticdb-kotlinc/src/main/kotlin/com/sourcegraph/semanticdb_kotlinc/SymbolsCache.kt b/semanticdb-kotlinc/src/main/kotlin/com/sourcegraph/semanticdb_kotlinc/SymbolsCache.kt
+index 24a30e2..d890c95 100644
+--- a/semanticdb-kotlinc/src/main/kotlin/com/sourcegraph/semanticdb_kotlinc/SymbolsCache.kt
++++ b/semanticdb-kotlinc/src/main/kotlin/com/sourcegraph/semanticdb_kotlinc/SymbolsCache.kt
+@@ -4,13 +4,14 @@ import com.sourcegraph.semanticdb_kotlinc.SemanticdbSymbolDescriptor.Kind
+ import java.lang.System.err
+ import kotlin.contracts.ExperimentalContracts
+ import kotlin.contracts.contract
+-import org.jetbrains.kotlin.fir.analysis.checkers.declaration.isLocalMember
+-import org.jetbrains.kotlin.fir.analysis.checkers.getContainingSymbol
++import org.jetbrains.kotlin.fir.analysis.checkers.declaration.isLocalDeclaredInBlock
++import org.jetbrains.kotlin.fir.declarations.DirectDeclarationsAccess
+ import org.jetbrains.kotlin.fir.declarations.FirClass
+ import org.jetbrains.kotlin.fir.declarations.FirDeclarationOrigin
+ import org.jetbrains.kotlin.fir.declarations.utils.memberDeclarationNameOrNull
+ import org.jetbrains.kotlin.fir.packageFqName
+ import org.jetbrains.kotlin.fir.resolve.getContainingDeclaration
++import org.jetbrains.kotlin.fir.resolve.getContainingSymbol
+ import org.jetbrains.kotlin.fir.resolve.providers.symbolProvider
+ import org.jetbrains.kotlin.fir.symbols.FirBasedSymbol
+ import org.jetbrains.kotlin.fir.symbols.SymbolInternals
+@@ -28,8 +29,8 @@ class GlobalSymbolsCache(testing: Boolean = false) : Iterable<Symbol> {
+ 
+     operator fun get(symbol: FirBasedSymbol<*>, locals: LocalSymbolsCache): Sequence<Symbol> =
+         sequence {
+-        emitSymbols(symbol, locals)
+-    }
++            emitSymbols(symbol, locals)
++        }
+ 
+     operator fun get(symbol: FqName): Sequence<Symbol> = sequence { emitSymbols(symbol) }
+ 
+@@ -41,7 +42,7 @@ class GlobalSymbolsCache(testing: Boolean = false) : Iterable<Symbol> {
+     @OptIn(SymbolInternals::class)
+     private suspend fun SequenceScope<Symbol>.emitSymbols(
+         symbol: FirBasedSymbol<*>,
+-        locals: LocalSymbolsCache
++        locals: LocalSymbolsCache,
+     ) {
+         yield(getSymbol(symbol, locals))
+         if (symbol is FirPropertySymbol) {
+@@ -71,6 +72,7 @@ class GlobalSymbolsCache(testing: Boolean = false) : Iterable<Symbol> {
+             if (it.isGlobal()) globals[symbol] = it
+         }
+     }
++
+     private fun getSymbol(symbol: FqName): Symbol {
+         packages[symbol]?.let {
+             return it
+@@ -86,11 +88,17 @@ class GlobalSymbolsCache(testing: Boolean = false) : Iterable<Symbol> {
+     @OptIn(SymbolInternals::class)
+     private fun uncachedSemanticdbSymbol(
+         symbol: FirBasedSymbol<*>?,
+-        locals: LocalSymbolsCache
++        locals: LocalSymbolsCache,
+     ): Symbol {
+         if (skip(symbol)) return Symbol.NONE
+ 
+-        if (symbol.fir.isLocalMember) return locals + symbol
++        // Preserve the old checker's symbol categories; anonymous objects keep global descriptors.
++        if (
++            (symbol is FirPropertySymbol ||
++                symbol is FirRegularClassSymbol ||
++                symbol is FirNamedFunctionSymbol) && symbol.fir.isLocalDeclaredInBlock
++        )
++            return locals + symbol
+ 
+         val owner = getParentSymbol(symbol, locals)
+ 
+@@ -106,7 +114,9 @@ class GlobalSymbolsCache(testing: Boolean = false) : Iterable<Symbol> {
+ 
+         val owner = this.getSymbol(symbol.parent())
+         return Symbol.createGlobal(
+-            owner, SemanticdbSymbolDescriptor(Kind.PACKAGE, symbol.shortName().asString()))
++            owner,
++            SemanticdbSymbolDescriptor(Kind.PACKAGE, symbol.shortName().asString()),
++        )
+     }
+ 
+     /**
+@@ -121,7 +131,8 @@ class GlobalSymbolsCache(testing: Boolean = false) : Iterable<Symbol> {
+         when (symbol) {
+             is FirTypeParameterSymbol ->
+                 return getSymbol(symbol.containingDeclarationSymbol, locals)
+-            is FirValueParameterSymbol -> return getSymbol(symbol.containingDeclarationSymbol, locals)
++            is FirValueParameterSymbol ->
++                return getSymbol(symbol.containingDeclarationSymbol, locals)
+             is FirCallableSymbol -> {
+                 val session = symbol.fir.moduleData.session
+                 return symbol.getContainingSymbol(session)?.let { getSymbol(it, locals) }
+@@ -144,23 +155,31 @@ class GlobalSymbolsCache(testing: Boolean = false) : Iterable<Symbol> {
+         return when {
+             symbol is FirAnonymousObjectSymbol ->
+                 symbol.source?.let { source ->
+-                    SemanticdbSymbolDescriptor(Kind.TYPE, "<anonymous object at ${source.startOffset}>")
++                    SemanticdbSymbolDescriptor(
++                        Kind.TYPE,
++                        "<anonymous object at ${source.startOffset}>",
++                    )
+                 } ?: SemanticdbSymbolDescriptor.NONE
+             symbol is FirClassLikeSymbol ->
+                 SemanticdbSymbolDescriptor(Kind.TYPE, symbol.classId.shortClassName.asString())
+             symbol is FirPropertyAccessorSymbol && symbol.isSetter ->
+                 SemanticdbSymbolDescriptor(
+                     Kind.METHOD,
+-                    "set" + symbol.propertySymbol.fir.name.toString().capitalizeAsciiOnly())
++                    "set" + symbol.propertySymbol.fir.name.toString().capitalizeAsciiOnly(),
++                )
+             symbol is FirPropertyAccessorSymbol && symbol.isGetter ->
+                 SemanticdbSymbolDescriptor(
+                     Kind.METHOD,
+-                    "get" + symbol.propertySymbol.fir.name.toString().capitalizeAsciiOnly())
++                    "get" + symbol.propertySymbol.fir.name.toString().capitalizeAsciiOnly(),
++                )
+             symbol is FirConstructorSymbol ->
+                 SemanticdbSymbolDescriptor(Kind.METHOD, "<init>", methodDisambiguator(symbol))
+             symbol is FirFunctionSymbol ->
+                 SemanticdbSymbolDescriptor(
+-                    Kind.METHOD, symbol.name.toString(), methodDisambiguator(symbol))
++                    Kind.METHOD,
++                    symbol.name.toString(),
++                    methodDisambiguator(symbol),
++                )
+             symbol is FirTypeParameterSymbol ->
+                 SemanticdbSymbolDescriptor(Kind.TYPE_PARAMETER, symbol.name.toString())
+             symbol is FirValueParameterSymbol ->
+@@ -174,7 +193,7 @@ class GlobalSymbolsCache(testing: Boolean = false) : Iterable<Symbol> {
+         }
+     }
+ 
+-    @OptIn(SymbolInternals::class)
++    @OptIn(SymbolInternals::class, DirectDeclarationsAccess::class)
+     private fun methodDisambiguator(symbol: FirFunctionSymbol<*>): String {
+         val session = symbol.moduleData.session
+ 
+@@ -185,7 +204,9 @@ class GlobalSymbolsCache(testing: Boolean = false) : Iterable<Symbol> {
+                 is FirFileSymbol -> containingSymbol.fir.declarations.map { it.symbol }
+                 null ->
+                     symbol.moduleData.session.symbolProvider.getTopLevelCallableSymbols(
+-                        symbol.packageFqName(), symbol.name)
++                        symbol.packageFqName(),
++                        symbol.name,
++                    )
+                 else -> return "()"
+             }
+ 
+@@ -233,5 +254,6 @@ class LocalSymbolsCache : Iterable<Symbol> {
+ @ExperimentalContracts
+ class SymbolsCache(private val globals: GlobalSymbolsCache, private val locals: LocalSymbolsCache) {
+     operator fun get(symbol: FirBasedSymbol<*>) = globals[symbol, locals]
++
+     operator fun get(symbol: FqName) = globals[symbol]
+ }
+diff --git a/semanticdb-kotlinc/src/snapshots/kotlin/com/sourcegraph/lsif_kotlin/Snapshot.kt b/semanticdb-kotlinc/src/snapshots/kotlin/com/sourcegraph/lsif_kotlin/Snapshot.kt
+index 2393cfd..96fb321 100644
+--- a/semanticdb-kotlinc/src/snapshots/kotlin/com/sourcegraph/lsif_kotlin/Snapshot.kt
++++ b/semanticdb-kotlinc/src/snapshots/kotlin/com/sourcegraph/lsif_kotlin/Snapshot.kt
+@@ -16,7 +16,9 @@ fun main() {
+             sourceroot.toString(),
+             "--output",
+             targetroot.resolve("index.scip").toString(),
+-            targetroot.toString()))
++            targetroot.toString(),
++        )
++    )
+     ScipJava.main(
+         arrayOf(
+             "snapshot",
+@@ -24,5 +26,7 @@ fun main() {
+             sourceroot.toString(),
+             "--output",
+             snapshotDir.toString(),
+-            targetroot.toString()))
++            targetroot.toString(),
++        )
++    )
+ }
+diff --git a/semanticdb-kotlinc/src/test/kotlin/com/sourcegraph/semanticdb_kotlinc/test/AnalyzerTest.kt b/semanticdb-kotlinc/src/test/kotlin/com/sourcegraph/semanticdb_kotlinc/test/AnalyzerTest.kt
+index f0e78e3..b636af8 100644
+--- a/semanticdb-kotlinc/src/test/kotlin/com/sourcegraph/semanticdb_kotlinc/test/AnalyzerTest.kt
++++ b/semanticdb-kotlinc/src/test/kotlin/com/sourcegraph/semanticdb_kotlinc/test/AnalyzerTest.kt
+@@ -21,7 +21,6 @@ import kotlin.test.assertEquals
+ import org.intellij.lang.annotations.Language
+ import org.jetbrains.kotlin.compiler.plugin.ExperimentalCompilerApi
+ import org.junit.jupiter.api.io.TempDir
+-import java.nio.file.Paths
+ 
+ @OptIn(ExperimentalCompilerApi::class)
+ @ExperimentalContracts
+@@ -40,7 +39,7 @@ class AnalyzerTest {
+                     pluginOptions =
+                         listOf(
+                             PluginOption("semanticdb-kotlinc", "sourceroot", path.toString()),
+-                            PluginOption("semanticdb-kotlinc", "targetroot", buildPath.toString())
++                            PluginOption("semanticdb-kotlinc", "targetroot", buildPath.toString()),
+                         )
+                     commandLineProcessors = listOf(AnalyzerCommandLineProcessor())
+                     workingDir = path.toFile()
+@@ -52,6 +51,51 @@ class AnalyzerTest {
+         return document
+     }
+ 
++    @Test
++    fun `compiler compatibility preserves semantic content and multiline ranges`(
++        @TempDir path: Path
++    ) {
++        val document =
++            compileSemanticdb(
++                path,
++                """
++            package fixture
++            class Greeter {
++                companion object {
++                    fun create(): Greeter = Greeter()
++                }
++            }
++        """
++                    .trimIndent(),
++            )
++        val lines = document.text.lines()
++        kotlin.test.assertTrue(document.symbolsList.any { it.symbol == "fixture/Greeter#" })
++        kotlin.test.assertTrue(
++            document.occurrencesList.any {
++                it.symbol == "fixture/Greeter#" && it.role == Role.REFERENCE
++            }
++        )
++        kotlin.test.assertTrue(
++            document.occurrencesList.any { it.range.endLine > it.range.startLine }
++        )
++        for (occurrence in document.occurrencesList) {
++            val range = occurrence.range
++            kotlin.test.assertTrue(range.startLine in lines.indices, range.toString())
++            kotlin.test.assertTrue(
++                range.endLine in range.startLine..lines.lastIndex,
++                range.toString(),
++            )
++            kotlin.test.assertTrue(
++                range.startCharacter in 0..lines[range.startLine].length,
++                range.toString(),
++            )
++            kotlin.test.assertTrue(
++                range.endCharacter in 0..lines[range.endLine].length,
++                range.toString(),
++            )
++        }
++    }
++
+     @Test
+     fun `basic test`(@TempDir path: Path) {
+         val document =
+@@ -61,7 +105,7 @@ class AnalyzerTest {
+             package sample
+             class Banana {
+                 fun foo() { }
+-            }"""
++            }""",
+             )
+ 
+         val occurrences =
+@@ -95,7 +139,8 @@ class AnalyzerTest {
+                         endLine = 2
+                         endCharacter = 11
+                     }
+-                })
++                },
++            )
+         assertSoftly(document.occurrencesList) {
+             withClue(this) { occurrences.forEach(::shouldContain) }
+         }
+@@ -106,22 +151,21 @@ class AnalyzerTest {
+                     symbol = "sample/Banana#"
+                     language = KOTLIN
+                     displayName = "Banana"
+-                    documentation =
+-                        Documentation {
+-                            format = Semanticdb.Documentation.Format.MARKDOWN
+-                            message = "```kotlin\npublic final class Banana : Any\n```"
+-                        }
++                    documentation = Documentation {
++                        format = Semanticdb.Documentation.Format.MARKDOWN
++                        message = "```kotlin\npublic final class Banana : Any\n```"
++                    }
+                 },
+                 SymbolInformation {
+                     symbol = "sample/Banana#foo()."
+                     language = KOTLIN
+                     displayName = "foo"
+-                    documentation =
+-                        Documentation {
+-                            format = Semanticdb.Documentation.Format.MARKDOWN
+-                            message = "```kotlin\npublic final fun foo(): Unit\n```"
+-                        }
+-                })
++                    documentation = Documentation {
++                        format = Semanticdb.Documentation.Format.MARKDOWN
++                        message = "```kotlin\npublic final fun foo(): Unit\n```"
++                    }
++                },
++            )
+         assertSoftly(document.symbolsList) { withClue(this) { symbols.forEach(::shouldContain) } }
+     }
+ 
+@@ -135,7 +179,7 @@ class AnalyzerTest {
+ 
+                     import kotlin.Boolean
+                     import kotlin.Int as KInt
+-                """
++                """,
+             )
+ 
+         val occurrences =
+@@ -209,7 +253,7 @@ class AnalyzerTest {
+                         fun localClassMethod() {}
+                       }
+                     }
+-                """
++                """,
+             )
+ 
+         val occurrences =
+@@ -319,7 +363,7 @@ class AnalyzerTest {
+             class Class : Interface {
+                 override fun foo() {}
+             }
+-            """
++            """,
+             )
+ 
+         val occurrences =
+@@ -453,7 +497,7 @@ class AnalyzerTest {
+                     override fun foo() {}
+                 }
+             }
+-            """
++            """,
+             )
+ 
+         val occurrences =
+@@ -637,7 +681,7 @@ class AnalyzerTest {
+             package sample
+ 
+             fun foo(arg: Int): Boolean = true
+-            """
++            """,
+             )
+ 
+         val occurrences =
+@@ -701,7 +745,7 @@ class AnalyzerTest {
+                     pluginOptions =
+                         listOf(
+                             PluginOption("semanticdb-kotlinc", "sourceroot", path.toString()),
+-                            PluginOption("semanticdb-kotlinc", "targetroot", buildPath.toString())
++                            PluginOption("semanticdb-kotlinc", "targetroot", buildPath.toString()),
+                         )
+                     commandLineProcessors = listOf(AnalyzerCommandLineProcessor())
+                     workingDir = path.toFile()
+@@ -1140,7 +1184,7 @@ class AnalyzerTest {
+                     pluginOptions =
+                         listOf(
+                             PluginOption("semanticdb-kotlinc", "sourceroot", path.toString()),
+-                            PluginOption("semanticdb-kotlinc", "targetroot", buildPath.toString())
++                            PluginOption("semanticdb-kotlinc", "targetroot", buildPath.toString()),
+                         )
+                     commandLineProcessors = listOf(AnalyzerCommandLineProcessor())
+                     workingDir = path.toFile()
+@@ -1150,15 +1194,16 @@ class AnalyzerTest {
+         result.exitCode shouldBe KotlinCompilation.ExitCode.OK
+     }
+ 
+-
+     @Test
+     fun `compound package name semicolon test`(@TempDir path: Path) {
+         val document =
+             compileSemanticdb(
+-                path, """
++                path,
++                """
+             package hello.sample;
+             class Apple
+-            """.trimIndent()
++            """
++                    .trimIndent(),
+             )
+ 
+         val occurrences =
+@@ -1215,17 +1260,16 @@ class AnalyzerTest {
+                     symbol = "hello/sample/Apple#"
+                     language = KOTLIN
+                     displayName = "Apple"
+-                    documentation =
+-                        Documentation {
+-                            format = Semanticdb.Documentation.Format.MARKDOWN
+-                            message = "```kotlin\npublic final class Apple : Any\n```"
+-                        }
+-                })
++                    documentation = Documentation {
++                        format = Semanticdb.Documentation.Format.MARKDOWN
++                        message = "```kotlin\npublic final class Apple : Any\n```"
++                    }
++                }
++            )
+ 
+         assertSoftly(document.symbolsList) { withClue(this) { symbols.forEach(::shouldContain) } }
+     }
+ 
+-
+     @Test
+     fun `simple package name semicolon test`(@TempDir path: Path) {
+         val document =
+@@ -1235,7 +1279,7 @@ class AnalyzerTest {
+             package sample;
+             class Banana {
+                 fun foo() { }
+-            }"""
++            }""",
+             )
+ 
+         val occurrences =
+@@ -1291,22 +1335,21 @@ class AnalyzerTest {
+                     symbol = "sample/Banana#"
+                     language = KOTLIN
+                     displayName = "Banana"
+-                    documentation =
+-                        Documentation {
+-                            format = Semanticdb.Documentation.Format.MARKDOWN
+-                            message = "```kotlin\npublic final class Banana : Any\n```"
+-                        }
++                    documentation = Documentation {
++                        format = Semanticdb.Documentation.Format.MARKDOWN
++                        message = "```kotlin\npublic final class Banana : Any\n```"
++                    }
+                 },
+                 SymbolInformation {
+                     symbol = "sample/Banana#foo()."
+                     language = KOTLIN
+                     displayName = "foo"
+-                    documentation =
+-                        Documentation {
+-                            format = Semanticdb.Documentation.Format.MARKDOWN
+-                            message = "```kotlin\npublic final fun foo(): Unit\n```"
+-                        }
+-                })
++                    documentation = Documentation {
++                        format = Semanticdb.Documentation.Format.MARKDOWN
++                        message = "```kotlin\npublic final fun foo(): Unit\n```"
++                    }
++                },
++            )
+         assertSoftly(document.symbolsList) { withClue(this) { symbols.forEach(::shouldContain) } }
+     }
+ 
+@@ -1328,7 +1371,8 @@ class AnalyzerTest {
+                  *
+                  **/
+                inline fun docstrings(msg: String): Int { return msg.length }
+-        """.trimIndent()
++        """
++                    .trimIndent(),
+             )
+         document.assertDocumentation("sample/Docstrings#", "Example class docstring")
+         document.assertDocumentation("sample/docstrings().", "Example method docstring")
+diff --git a/semanticdb-kotlinc/src/test/kotlin/com/sourcegraph/semanticdb_kotlinc/test/SemanticdbSymbolsTest.kt b/semanticdb-kotlinc/src/test/kotlin/com/sourcegraph/semanticdb_kotlinc/test/SemanticdbSymbolsTest.kt
+index 8203a8d..0ef8da2 100644
+--- a/semanticdb-kotlinc/src/test/kotlin/com/sourcegraph/semanticdb_kotlinc/test/SemanticdbSymbolsTest.kt
++++ b/semanticdb-kotlinc/src/test/kotlin/com/sourcegraph/semanticdb_kotlinc/test/SemanticdbSymbolsTest.kt
+@@ -25,18 +25,24 @@ class SemanticdbSymbolsTest {
+                         |    fun sample() {}
+                         |    fun sample(x: Int) {}
+                         |}
+-                        |""".trimMargin()),
++                        |"""
++                            .trimMargin()
++                    ),
+                     symbolsCacheData =
+                         SymbolCacheData(
+-                            listOf("Test#sample().".symbol(), "Test#sample(+1).".symbol()),
+-                        )),
++                            listOf("Test#sample().".symbol(), "Test#sample(+1).".symbol())
++                        ),
++                ),
+                 ExpectedSymbols(
+                     "Inline class constructor",
+                     SourceFile.testKt(
+                         """
+                         |class Test(val x: Int)
+-                        |""".trimMargin()),
+-                    symbolsCacheData = SymbolCacheData(listOf("Test#`<init>`().(x)".symbol()))),
++                        |"""
++                            .trimMargin()
++                    ),
++                    symbolsCacheData = SymbolCacheData(listOf("Test#`<init>`().(x)".symbol())),
++                ),
+                 ExpectedSymbols(
+                     "Inline + secondary class constructors",
+                     SourceFile.testKt(
+@@ -45,13 +51,18 @@ class SemanticdbSymbolsTest {
+                         |    constructor(y: Long): this(y.toInt())
+                         |    constructor(z: String): this(z.toInt())
+                         |}
+-                        |""".trimMargin()),
++                        |"""
++                            .trimMargin()
++                    ),
+                     symbolsCacheData =
+                         SymbolCacheData(
+                             listOf(
+                                 "Test#`<init>`().(x)".symbol(),
+                                 "Test#`<init>`(+1).(y)".symbol(),
+-                                "Test#`<init>`(+2).(z)".symbol()))),
++                                "Test#`<init>`(+2).(z)".symbol(),
++                            )
++                        ),
++                ),
+                 ExpectedSymbols(
+                     "Disambiguator number is not affected by different named methods",
+                     SourceFile.testKt(
+@@ -61,19 +72,24 @@ class SemanticdbSymbolsTest {
+                         |    fun test() {}
+                         |    fun test(x: Int) {}
+                         |}
+-                        |""".trimMargin()),
++                        |"""
++                            .trimMargin()
++                    ),
+                     symbolsCacheData =
+-                        SymbolCacheData(
+-                            listOf("Test#test().".symbol(), "Test#test(+1).".symbol()))),
++                        SymbolCacheData(listOf("Test#test().".symbol(), "Test#test(+1).".symbol())),
++                ),
+                 ExpectedSymbols(
+                     "Top level overloaded functions",
+                     SourceFile.testKt(
+                         """
+                         |fun test() {}
+                         |fun test(x: Int) {}
+-                        |""".trimMargin()),
++                        |"""
++                            .trimMargin()
++                    ),
+                     symbolsCacheData =
+-                        SymbolCacheData(listOf("test().".symbol(), "test(+1).(x)".symbol()))),
++                        SymbolCacheData(listOf("test().".symbol(), "test(+1).(x)".symbol())),
++                ),
+                 ExpectedSymbols(
+                     "Annotations incl annotation type alias",
+                     SourceFile.testKt(
+@@ -86,12 +102,17 @@ class SemanticdbSymbolsTest {
+                         |    @Test
+                         |    fun test() {}
+                         |}
+-                        |""".trimMargin()),
++                        |"""
++                            .trimMargin()
++                    ),
+                     symbolsCacheData =
+                         SymbolCacheData(
+                             listOf(
+                                 "kotlin/contracts/ExperimentalContracts#".symbol(),
+-                                "kotlin/test/Test#".symbol()))),
++                                "kotlin/test/Test#".symbol(),
++                            )
++                        ),
++                ),
+                 // https://kotlinlang.slack.com/archives/C7L3JB43G/p1624995376114900
+                 /*ExpectedSymbols(
+                     "Method call with type parameters",
+@@ -103,10 +124,9 @@ class SemanticdbSymbolsTest {
+                         listOf("kotlin/collection/TypeAliasesKt#LinkedHashMap#`<init>`().".symbol())
+                     )
+                 )*/
+-                )
++            )
+             .mapCheckExpectedSymbols()
+ 
+-
+     @TestFactory
+     fun `check package symbols`() =
+         listOf(
+@@ -117,8 +137,11 @@ class SemanticdbSymbolsTest {
+                         |package main
+                         |
+                         |class Test
+-                        |""".trimMargin()),
+-                    symbolsCacheData = SymbolCacheData(listOf("main/Test#".symbol()), 0)),
++                        |"""
++                            .trimMargin()
++                    ),
++                    symbolsCacheData = SymbolCacheData(listOf("main/Test#".symbol()), 0),
++                ),
+                 ExpectedSymbols(
+                     "multi component package name",
+                     SourceFile.testKt(
+@@ -126,16 +149,22 @@ class SemanticdbSymbolsTest {
+                         |package test.sample.main
+                         |
+                         |class Test
+-                        |""".trimMargin()),
+-                    symbolsCacheData =
+-                        SymbolCacheData(listOf("test/sample/main/Test#".symbol()), 0)),
++                        |"""
++                            .trimMargin()
++                    ),
++                    symbolsCacheData = SymbolCacheData(listOf("test/sample/main/Test#".symbol()), 0),
++                ),
+                 ExpectedSymbols(
+                     "no package name",
+                     SourceFile.testKt(
+                         """
+                         |class Test
+-                        |""".trimMargin()),
+-                    symbolsCacheData = SymbolCacheData(listOf("Test#".symbol()), 0)))
++                        |"""
++                            .trimMargin()
++                    ),
++                    symbolsCacheData = SymbolCacheData(listOf("Test#".symbol()), 0),
++                ),
++            )
+             .mapCheckExpectedSymbols()
+ 
+     @TestFactory
+@@ -149,8 +178,12 @@ class SemanticdbSymbolsTest {
+                         |    val x = "hello"
+                         |    println(x)
+                         |}
+-                        |""".trimMargin()),
+-                    symbolsCacheData = SymbolCacheData(localsCount = 1)))
++                        |"""
++                            .trimMargin()
++                    ),
++                    symbolsCacheData = SymbolCacheData(localsCount = 1),
++                )
++            )
+             .mapCheckExpectedSymbols()
+ 
+     @TestFactory
+@@ -164,14 +197,19 @@ class SemanticdbSymbolsTest {
+                         |lateinit var y: Unit
+                         |lateinit var z: Any
+                         |lateinit var w: Nothing
+-                        |""".trimMargin()),
++                        |"""
++                            .trimMargin()
++                    ),
+                     symbolsCacheData =
+                         SymbolCacheData(
+                             listOf(
+                                 "kotlin/Int#".symbol(),
+                                 "kotlin/Unit#".symbol(),
+                                 "kotlin/Any#".symbol(),
+-                                "kotlin/Nothing#".symbol()))),
++                                "kotlin/Nothing#".symbol(),
++                            )
++                        ),
++                ),
+                 ExpectedSymbols(
+                     "functions",
+                     SourceFile.testKt(
+@@ -180,12 +218,18 @@ class SemanticdbSymbolsTest {
+                         |fun main() {
+                         |    println()
+                         |}
+-                        |""".trimMargin()),
++                        |"""
++                            .trimMargin()
++                    ),
+                     symbolsCacheData =
+                         SymbolCacheData(
+                             listOf(
+                                 "kotlin/collections/mapOf(+2).".symbol(),
+-                                "kotlin/io/println(+10).".symbol()))))
++                                "kotlin/io/println(+10).".symbol(),
++                            )
++                        ),
++                ),
++            )
+             .mapCheckExpectedSymbols()
+ 
+     @TestFactory
+@@ -200,8 +244,12 @@ class SemanticdbSymbolsTest {
+                         |fun main() {
+                         |    System.err
+                         |}
+-                        |""".trimMargin()),
+-                    symbolsCacheData = SymbolCacheData(listOf("java/lang/System#err.".symbol()))))
++                        |"""
++                            .trimMargin()
++                    ),
++                    symbolsCacheData = SymbolCacheData(listOf("java/lang/System#err.".symbol())),
++                )
++            )
+             .mapCheckExpectedSymbols()
+ 
+     @TestFactory
+@@ -212,7 +260,9 @@ class SemanticdbSymbolsTest {
+                     SourceFile.testKt(
+                         """
+                         |var x: Int = 5
+-                        |""".trimMargin()),
++                        |"""
++                            .trimMargin()
++                    ),
+                     semanticdb =
+                         SemanticdbData(
+                             expectedOccurrences =
+@@ -246,7 +296,9 @@ class SemanticdbSymbolsTest {
+                                             endLine = 0
+                                             endCharacter = 5
+                                         }
+-                                    })),
++                                    },
++                                )
++                        ),
+                 ),
+                 ExpectedSymbols(
+                     "top level properties - explicit getter",
+@@ -254,7 +306,9 @@ class SemanticdbSymbolsTest {
+                         """
+                         |var x: Int = 5
+                         |    get() = field + 10
+-                        |""".trimMargin()),
++                        |"""
++                            .trimMargin()
++                    ),
+                     semanticdb =
+                         SemanticdbData(
+                             expectedOccurrences =
+@@ -288,7 +342,9 @@ class SemanticdbSymbolsTest {
+                                             endLine = 1
+                                             endCharacter = 7
+                                         }
+-                                    })),
++                                    },
++                                )
++                        ),
+                 ),
+                 ExpectedSymbols(
+                     "top level properties - explicit setter",
+@@ -296,7 +352,9 @@ class SemanticdbSymbolsTest {
+                         """
+                         |var x: Int = 5
+                         |    set(value) { field = value + 5 }
+-                        |""".trimMargin()),
++                        |"""
++                            .trimMargin()
++                    ),
+                     semanticdb =
+                         SemanticdbData(
+                             expectedOccurrences =
+@@ -330,7 +388,9 @@ class SemanticdbSymbolsTest {
+                                             endLine = 1
+                                             endCharacter = 7
+                                         }
+-                                    })),
++                                    },
++                                )
++                        ),
+                 ),
+                 ExpectedSymbols(
+                     "top level properties - explicit getter & setter",
+@@ -339,7 +399,9 @@ class SemanticdbSymbolsTest {
+                         |var x: Int = 5
+                         |    get() = field + 10
+                         |    set(value) { field = value + 10 }
+-                        |""".trimMargin()),
++                        |"""
++                            .trimMargin()
++                    ),
+                     semanticdb =
+                         SemanticdbData(
+                             expectedOccurrences =
+@@ -373,7 +435,9 @@ class SemanticdbSymbolsTest {
+                                             endLine = 2
+                                             endCharacter = 7
+                                         }
+-                                    })),
++                                    },
++                                )
++                        ),
+                 ),
+                 ExpectedSymbols(
+                     "class constructor properties",
+@@ -384,7 +448,9 @@ class SemanticdbSymbolsTest {
+                         |        println(sample)
+                         |    }
+                         |}
+-                        |""".trimMargin()),
++                        |"""
++                            .trimMargin()
++                    ),
+                     semanticdb =
+                         SemanticdbData(
+                             expectedOccurrences =
+@@ -459,7 +525,10 @@ class SemanticdbSymbolsTest {
+                                             endCharacter = 22
+                                         }
+                                     },
+-                                ))))
++                                )
++                        ),
++                ),
++            )
+             .mapCheckExpectedSymbols()
+ 
+     @TestFactory
+@@ -470,7 +539,9 @@ class SemanticdbSymbolsTest {
+                     SourceFile.testKt(
+                         """
+                         |class Banana
+-                        |""".trimMargin()),
++                        |"""
++                            .trimMargin()
++                    ),
+                     semanticdb =
+                         SemanticdbData(
+                             expectedOccurrences =
+@@ -495,13 +566,17 @@ class SemanticdbSymbolsTest {
+                                             endCharacter = 12
+                                         }
+                                     },
+-                                ))),
++                                )
++                        ),
++                ),
+                 ExpectedSymbols(
+                     "explicit primary constructor without keyword",
+                     SourceFile.testKt(
+                         """
+                         |class Banana(size: Int)
+-                        |""".trimMargin()),
++                        |"""
++                            .trimMargin()
++                    ),
+                     semanticdb =
+                         SemanticdbData(
+                             expectedOccurrences =
+@@ -526,13 +601,17 @@ class SemanticdbSymbolsTest {
+                                             endCharacter = 12
+                                         }
+                                     },
+-                                ))),
++                                )
++                        ),
++                ),
+                 ExpectedSymbols(
+                     "explicit primary constructor with keyword",
+                     SourceFile.testKt(
+                         """
+                         |class Banana constructor(size: Int)
+-                        |""".trimMargin()),
++                        |"""
++                            .trimMargin()
++                    ),
+                     semanticdb =
+                         SemanticdbData(
+                             expectedOccurrences =
+@@ -557,7 +636,10 @@ class SemanticdbSymbolsTest {
+                                             endCharacter = 24
+                                         }
+                                     },
+-                                ))))
++                                )
++                        ),
++                ),
++            )
+             .mapCheckExpectedSymbols()
+ 
+     @TestFactory
+@@ -568,7 +650,9 @@ class SemanticdbSymbolsTest {
+                     SourceFile.testKt(
+                         """
+                         |val x = Runnable { }.run()
+-                        |""".trimMargin()),
++                        |"""
++                            .trimMargin()
++                    ),
+                     semanticdb =
+                         SemanticdbData(
+                             expectedOccurrences =
+@@ -592,7 +676,11 @@ class SemanticdbSymbolsTest {
+                                             endLine = 0
+                                             endCharacter = 24
+                                         }
+-                                    }))))
++                                    },
++                                )
++                        ),
++                )
++            )
+             .mapCheckExpectedSymbols()
+ 
+     @TestFactory
+@@ -608,7 +696,9 @@ class SemanticdbSymbolsTest {
+                     |* test content
+                     |*/
+                     |val x = ""
+-                    |""".trimMargin()),
++                    |"""
++                            .trimMargin()
++                    ),
+                     semanticdb =
+                         SemanticdbData(
+                             expectedSymbols =
+@@ -632,6 +722,10 @@ class SemanticdbSymbolsTest {
+                                                 "```kotlin\npublic get(): String\n```\n\n----\n\n\nhello world\n test content\n"
+                                             format = Format.MARKDOWN
+                                         }
+-                                    }))))
++                                    },
++                                )
++                        ),
++                )
++            )
+             .mapCheckExpectedSymbols()
+ }
+diff --git a/semanticdb-kotlinc/src/test/kotlin/com/sourcegraph/semanticdb_kotlinc/test/Utils.kt b/semanticdb-kotlinc/src/test/kotlin/com/sourcegraph/semanticdb_kotlinc/test/Utils.kt
+index aec3674..f4018c1 100644
+--- a/semanticdb-kotlinc/src/test/kotlin/com/sourcegraph/semanticdb_kotlinc/test/Utils.kt
++++ b/semanticdb-kotlinc/src/test/kotlin/com/sourcegraph/semanticdb_kotlinc/test/Utils.kt
+@@ -34,16 +34,16 @@ data class ExpectedSymbols(
+     val testName: String,
+     val source: SourceFile,
+     val symbolsCacheData: SymbolCacheData? = null,
+-    val semanticdb: SemanticdbData? = null
++    val semanticdb: SemanticdbData? = null,
+ ) {
+     data class SemanticdbData(
+         val expectedOccurrences: List<Semanticdb.SymbolOccurrence>? = null,
+-        val expectedSymbols: List<Semanticdb.SymbolInformation>? = null
++        val expectedSymbols: List<Semanticdb.SymbolInformation>? = null,
+     )
+ 
+     data class SymbolCacheData(
+         val expectedGlobals: List<Symbol>? = null,
+-        val localsCount: Int? = null
++        val localsCount: Int? = null,
+     )
+ }
+ 
+@@ -66,19 +66,20 @@ fun List<ExpectedSymbols>.mapCheckExpectedSymbols(): List<DynamicTest> =
+             dynamicTest("$testName - symbols") {
+                 symbolsData?.apply {
+                     println(
+-                        "checking symbols: ${expectedGlobals?.size ?: 0} globals and presence of $localsCount locals")
++                        "checking symbols: ${expectedGlobals?.size ?: 0} globals and presence of $localsCount locals"
++                    )
+                     checkContainsExpectedSymbols(globals, locals, expectedGlobals, localsCount)
+-                }
+-                    ?: assumeFalse(true)
++                } ?: assumeFalse(true)
+             },
+             dynamicTest("$testName - semanticdb") {
+                 semanticdbData?.apply {
+                     println(
+-                        "checking semanticdb: ${expectedOccurrences?.size ?: 0} occurrences and ${expectedSymbols?.size ?: 0} symbols")
++                        "checking semanticdb: ${expectedOccurrences?.size ?: 0} occurrences and ${expectedSymbols?.size ?: 0} symbols"
++                    )
+                     checkContainsExpectedSemanticdb(document, expectedOccurrences, expectedSymbols)
+-                }
+-                    ?: assumeFalse(true)
+-            })
++                } ?: assumeFalse(true)
++            },
++        )
+     }
+ 
+ @ExperimentalContracts
+@@ -86,7 +87,7 @@ fun checkContainsExpectedSymbols(
+     globals: GlobalSymbolsCache,
+     locals: LocalSymbolsCache,
+     expectedGlobals: List<Symbol>?,
+-    localsCount: Int? = null
++    localsCount: Int? = null,
+ ) {
+     assertSoftly(globals) { expectedGlobals?.let { this.shouldContainInOrder(it) } }
+     localsCount?.also { locals.size shouldBe it }
+@@ -96,7 +97,7 @@ fun checkContainsExpectedSymbols(
+ fun checkContainsExpectedSemanticdb(
+     document: Semanticdb.TextDocument,
+     expectedOccurrences: List<Semanticdb.SymbolOccurrence>?,
+-    expectedSymbols: List<Semanticdb.SymbolInformation>?
++    expectedSymbols: List<Semanticdb.SymbolInformation>?,
+ ) {
+     assertSoftly(document.occurrencesList) {
+         expectedOccurrences?.let { this.shouldContainInOrder(it) }
+@@ -110,7 +111,7 @@ private fun configureTestCompiler(
+     source: SourceFile,
+     globals: GlobalSymbolsCache,
+     locals: LocalSymbolsCache,
+-    hook: (Semanticdb.TextDocument) -> Unit = {}
++    hook: (Semanticdb.TextDocument) -> Unit = {},
+ ): KotlinCompilation {
+     val compilation =
+         KotlinCompilation().apply {
+@@ -128,23 +129,21 @@ private fun configureTestCompiler(
+ private class TestAnalyzerDeclarationCheckers(
+     globals: GlobalSymbolsCache,
+     locals: LocalSymbolsCache,
+-    sourceRoot: Path
++    sourceRoot: Path,
+ ) : AnalyzerCheckers.AnalyzerDeclarationCheckers(sourceRoot) {
+     override val fileCheckers: Set<FirFileChecker> =
+         setOf(
+             object : FirFileChecker(MppCheckerKind.Common) {
+-                override fun check(
+-                    declaration: FirFile,
+-                    context: CheckerContext,
+-                    reporter: DiagnosticReporter
+-                ) {
++                context(context: CheckerContext, reporter: DiagnosticReporter)
++                override fun check(declaration: FirFile) {
+                     val ktFile = declaration.sourceFile ?: return
+                     val lineMap = LineMap(declaration)
+                     val visitor = SemanticdbVisitor(sourceRoot, ktFile, lineMap, globals, locals)
+                     visitors[ktFile] = visitor
+                 }
+             },
+-            AnalyzerCheckers.SemanticImportsChecker())
++            AnalyzerCheckers.SemanticImportsChecker(),
++        )
+ }
+ 
+ private class TestAnalyzerCheckers(session: FirSession) : AnalyzerCheckers(session) {
+@@ -154,7 +153,7 @@ private class TestAnalyzerCheckers(session: FirSession) : AnalyzerCheckers(sessi
+             TestAnalyzerDeclarationCheckers(
+                 session.testAnalyzerParamsProvider.globals,
+                 session.testAnalyzerParamsProvider.locals,
+-                session.testAnalyzerParamsProvider.sourceroot
++                session.testAnalyzerParamsProvider.sourceroot,
+             )
+ }
+ 
+@@ -176,8 +175,8 @@ class TestAnalyzerParamsProvider(
+     }
+ }
+ 
+-val FirSession.testAnalyzerParamsProvider: TestAnalyzerParamsProvider by FirSession
+-    .sessionComponentAccessor()
++val FirSession.testAnalyzerParamsProvider: TestAnalyzerParamsProvider by
++    FirSession.sessionComponentAccessor()
+ 
+ @OptIn(ExperimentalCompilerApi::class)
+ @ExperimentalContracts
+@@ -185,7 +184,7 @@ fun semanticdbVisitorAnalyzer(
+     globals: GlobalSymbolsCache,
+     locals: LocalSymbolsCache,
+     sourceroot: Path,
+-    hook: (Semanticdb.TextDocument) -> Unit = {}
++    hook: (Semanticdb.TextDocument) -> Unit = {},
+ ): CompilerPluginRegistrar {
+     return object : CompilerPluginRegistrar() {
+         override fun ExtensionStorage.registerExtensions(configuration: CompilerConfiguration) {
+@@ -195,12 +194,19 @@ fun semanticdbVisitorAnalyzer(
+                         +TestAnalyzerParamsProvider.getFactory(globals, locals, sourceroot)
+                         +::TestAnalyzerCheckers
+                     }
+-                })
++                }
++            )
+             IrGenerationExtension.registerExtension(
+                 PostAnalysisExtension(
+-                    sourceRoot = sourceroot, targetRoot = Paths.get(""), callback = hook))
++                    sourceRoot = sourceroot,
++                    targetRoot = Paths.get(""),
++                    callback = hook,
++                )
++            )
+         }
+ 
++        override val pluginId: String = "semanticdb-kotlinc-test"
++
+         override val supportsK2: Boolean
+             get() = true
+     }

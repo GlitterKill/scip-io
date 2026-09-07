@@ -1,0 +1,30 @@
+{
+  "prepared": "2026-09-07",
+  "state": "upstream issue opened; no PR",
+  "issue": "https://github.com/scip-code/scip-java/issues/1012",
+  "sha256_encoding": "UTF-8 with LF line endings",
+  "patches": [
+    {
+      "file": "scip-java-gradle-paths.patch",
+      "base_repository": "scip-code/scip-java",
+      "base_tag": "v0.12.3",
+      "base_commit": "4486a05471000ba4e784b72395ebf84207f24af8",
+      "sha256": "bf4f190bb1325f7c8eaf3ce1599f3d68a441b264e6fd19e654950a6cb9c40d3c",
+      "apply_check": "passed --check --whitespace=error-all against clean base"
+    },
+    {
+      "file": "semanticdb-kotlinc-2.3.21.patch",
+      "base_repository": "sourcegraph/scip-kotlin",
+      "base_tag": "v0.5.0",
+      "base_commit": "408df420cbf877c3babc3d7c73d54299f02c038d",
+      "sha256": "85bf536f6de8c784deb839d941fc0f365d99e9dc3d6308cda5cfa2a6ff2f7d86",
+      "apply_check": "passed --check --whitespace=error-all against clean base"
+    }
+  ],
+  "excluded": [
+    "local/scip-java-kotlin-2.3.21.patch",
+    "SCIP-IO source changes",
+    "binaries and machine-specific logs"
+  ],
+  "routing": "Active maintainers: scip-code/scip-java; scip-kotlin is archived; maintenance destinations not selected"
+}

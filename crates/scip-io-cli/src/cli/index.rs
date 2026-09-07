@@ -99,7 +99,14 @@ pub async fn run(args: IndexArgs) -> Result<()> {
 
     // Dry-run mode: show what would be done then exit
     if args.dry_run {
-        return run_dry_run(&args, &projects, is_json, &config, &cmake_generation_plans);
+        return run_dry_run(
+            &args,
+            &projects,
+            is_json,
+            &config,
+            &path,
+            &cmake_generation_plans,
+        );
     }
 
     if !is_json {
@@ -131,7 +138,10 @@ pub async fn run(args: IndexArgs) -> Result<()> {
                 config.backend_preference_for(lang.name(), &entry.indexer_name);
             let args_override = config.args_override_for(lang.name(), &entry.indexer_name);
             let binary_path = if should_prepare_native_binary(entry, &backend_preference) {
-                Some(entry.ensure_installed(progress.as_ref()).await?)
+                Some(
+                    prepare_native_binary(entry, &config, lang.name(), &path, progress.as_ref())
+                        .await?,
+                )
             } else {
                 None
             };
@@ -872,6 +882,7 @@ fn run_dry_run(
     projects: &[ProjectLanguages],
     is_json: bool,
     config: &ProjectConfig,
+    config_root: &Path,
     cmake_generation_plans: &[(PathBuf, CmakeCompileDatabaseGenerationPlan)],
 ) -> Result<()> {
     if is_json {
@@ -902,7 +913,7 @@ fn run_dry_run(
                     "command": if lang.indexer_ready { indexer.map(|e| {
                         format!(
                             "{} {}",
-                            e.binary_name,
+                            dry_run_executable(e, config, lang.name(), config_root),
                             dry_run_command_args(e, &project.root, lang, config).join(" ")
                         )
                     }) } else { None },
@@ -987,7 +998,7 @@ fn run_dry_run(
                     }
                     println!(
                         "      command: {} {}",
-                        e.binary_name,
+                        dry_run_executable(e, config, lang.name(), config_root),
                         dry_run_command_args(e, &project.root, lang, config).join(" ")
                     );
                     if !lang.additional_configs.is_empty() {
@@ -1119,6 +1130,55 @@ fn skipped_compile_database_details(root: &Path, summary: &serde_json::Value) ->
             Some(format!("{display}: {reason}"))
         })
         .collect()
+}
+
+fn dry_run_executable(
+    entry: &IndexerEntry,
+    config: &ProjectConfig,
+    language: &str,
+    config_root: &Path,
+) -> String {
+    let preference = config.backend_preference_for(language, &entry.indexer_name);
+    if should_prepare_native_binary(entry, &preference)
+        && let Some(binary) = configured_binary_path(entry, config, language, config_root)
+    {
+        return format!("\"{}\"", binary.display());
+    }
+    entry.binary_name.clone()
+}
+
+fn configured_binary_path(
+    entry: &IndexerEntry,
+    config: &ProjectConfig,
+    language: &str,
+    config_root: &Path,
+) -> Option<PathBuf> {
+    // Share selection with dry-run; nested projects use the loaded config's root.
+    config
+        .indexer
+        .get(language)
+        .or_else(|| config.indexer.get(&entry.indexer_name))
+        .and_then(|override_config| override_config.binary.as_ref())
+        .map(|binary| config_root.join(binary))
+}
+
+async fn prepare_native_binary(
+    entry: &IndexerEntry,
+    config: &ProjectConfig,
+    language: &str,
+    config_root: &Path,
+    progress: &dyn scip_io_core::progress::ProgressHandler,
+) -> Result<PathBuf> {
+    if let Some(binary) = configured_binary_path(entry, config, language, config_root) {
+        if !binary.is_file() {
+            bail!(
+                "Configured indexer binary is not a file: {}",
+                binary.display()
+            );
+        }
+        return Ok(binary);
+    }
+    entry.ensure_installed(progress).await
 }
 
 fn should_prepare_native_binary(entry: &IndexerEntry, preference: &BackendPreference) -> bool {
@@ -1304,6 +1364,55 @@ mod tests {
     use std::fs;
     use std::path::{Path, PathBuf};
     use tempfile::TempDir;
+
+    #[tokio::test]
+    async fn custom_binary_bypasses_install_and_rejects_missing_paths() {
+        let dir = TempDir::new().unwrap();
+        let binary = dir.path().join("custom indexer.bat");
+        fs::write(&binary, "@echo off").unwrap();
+        let mut config = ProjectConfig::default();
+        config.indexer.insert(
+            "java".into(),
+            scip_io_core::config::IndexerOverride {
+                binary: Some(PathBuf::from("custom indexer.bat")),
+                ..Default::default()
+            },
+        );
+        let entry = REGISTRY
+            .all()
+            .iter()
+            .find(|entry| entry.language == "java")
+            .unwrap();
+        let progress = super::CliProgressHandler::new();
+        let selected = super::prepare_native_binary(entry, &config, "java", dir.path(), &progress)
+            .await
+            .unwrap();
+        assert_eq!(selected, binary);
+        assert_eq!(
+            super::dry_run_executable(entry, &config, "java", dir.path()),
+            format!("\"{}\"", binary.display())
+        );
+        assert_eq!(
+            super::dry_run_executable(entry, &ProjectConfig::default(), "java", dir.path()),
+            entry.binary_name
+        );
+        let override_config = config.indexer.remove("java").unwrap();
+        config
+            .indexer
+            .insert(entry.indexer_name.clone(), override_config);
+        assert_eq!(
+            super::dry_run_executable(entry, &config, "kotlin", dir.path()),
+            format!("\"{}\"", binary.display())
+        );
+        fs::remove_file(&binary).unwrap();
+        assert!(
+            super::prepare_native_binary(entry, &config, "java", dir.path(), &progress,)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("Configured indexer binary")
+        );
+    }
 
     fn base_args() -> IndexArgs {
         IndexArgs {
