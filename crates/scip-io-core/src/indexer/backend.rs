@@ -644,8 +644,10 @@ fn process_output_text(bytes: &[u8]) -> String {
     let nul_count = bytes.iter().filter(|byte| **byte == 0).count();
     if bytes.len() >= 2 && nul_count > bytes.len() / 4 {
         let utf16 = bytes
-            .chunks_exact(2)
-            .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|&chunk| u16::from_le_bytes(chunk))
             .collect::<Vec<_>>();
         String::from_utf16_lossy(&utf16)
     } else {

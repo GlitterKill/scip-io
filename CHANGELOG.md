@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Use fixed-size byte chunks for UTF-16 process output decoding to satisfy the
+  latest stable Clippy lint without changing decoding behavior.
+
 ## [0.1.9] - 2026-06-17
 
 ### Added
