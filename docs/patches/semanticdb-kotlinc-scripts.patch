@@ -1,0 +1,107 @@
+--- a/semanticdb-kotlinc/src/main/kotlin/com/sourcegraph/semanticdb_kotlinc/AnalyzerCheckers.kt
++++ b/semanticdb-kotlinc/src/main/kotlin/com/sourcegraph/semanticdb_kotlinc/AnalyzerCheckers.kt
+@@ -88,9 +88,8 @@
+ 
+     private class SemanticFileChecker(private val sourceroot: Path) :
+         FirFileChecker(MppCheckerKind.Common) {
+-        companion object {
+-            @OptIn(ExperimentalContracts::class) val globals = GlobalSymbolsCache()
+-        }
++        @OptIn(ExperimentalContracts::class)
++        private val globals = GlobalSymbolsCache(sourceroot = sourceroot)
+ 
+         @OptIn(ExperimentalContracts::class)
+         context(context: CheckerContext, reporter: DiagnosticReporter)
+--- a/semanticdb-kotlinc/src/main/kotlin/com/sourcegraph/semanticdb_kotlinc/SymbolsCache.kt
++++ b/semanticdb-kotlinc/src/main/kotlin/com/sourcegraph/semanticdb_kotlinc/SymbolsCache.kt
+@@ -2,6 +2,8 @@
+ 
+ import com.sourcegraph.semanticdb_kotlinc.SemanticdbSymbolDescriptor.Kind
+ import java.lang.System.err
++import java.nio.file.Path
++import java.nio.file.Paths
+ import kotlin.contracts.ExperimentalContracts
+ import kotlin.contracts.contract
+ import org.jetbrains.kotlin.fir.analysis.checkers.declaration.isLocalDeclaredInBlock
+@@ -20,7 +22,8 @@
+ import org.jetbrains.kotlin.util.capitalizeDecapitalize.capitalizeAsciiOnly
+ 
+ @ExperimentalContracts
+-class GlobalSymbolsCache(testing: Boolean = false) : Iterable<Symbol> {
++class GlobalSymbolsCache(testing: Boolean = false, private val sourceroot: Path? = null) :
++    Iterable<Symbol> {
+     private val globals =
+         if (testing) LinkedHashMap<FirBasedSymbol<*>, Symbol>()
+         else HashMap<FirBasedSymbol<*>, Symbol>()
+@@ -91,6 +94,19 @@
+         locals: LocalSymbolsCache,
+     ): Symbol {
+         if (skip(symbol)) return Symbol.NONE
++
++        // Script members belong to an implicit per-file class, not the package namespace.
++        // Include the relative script path because different projects reuse build.gradle.kts.
++        if (symbol is FirFileSymbol) {
++            val filePath = symbol.sourceFile?.path
++            val pkg = getSymbol(symbol.fir.packageFqName)
++            if (filePath != null && filePath.endsWith(".kts") && sourceroot != null) {
++                val relative =
++                    sourceroot.relativize(Paths.get(filePath)).toString().replace('\\', '/')
++                return Symbol.createGlobal(pkg, SemanticdbSymbolDescriptor(Kind.TYPE, relative))
++            }
++            return pkg
++        }
+ 
+         // Preserve the old checker's symbol categories; anonymous objects keep global descriptors.
+         if (
+--- a/semanticdb-kotlinc/src/main/kotlin/com/sourcegraph/semanticdb_kotlinc/SemanticdbTextDocumentBuilder.kt
++++ b/semanticdb-kotlinc/src/main/kotlin/com/sourcegraph/semanticdb_kotlinc/SemanticdbTextDocumentBuilder.kt
+@@ -13,6 +13,7 @@
+ import org.jetbrains.kotlin.fir.analysis.checkers.directOverriddenSymbolsSafe
+ import org.jetbrains.kotlin.fir.analysis.checkers.toClassLikeSymbol
+ import org.jetbrains.kotlin.fir.analysis.getChild
++import org.jetbrains.kotlin.fir.declarations.FirDeclarationOrigin
+ import org.jetbrains.kotlin.fir.renderer.*
+ import org.jetbrains.kotlin.fir.symbols.FirBasedSymbol
+ import org.jetbrains.kotlin.fir.symbols.SymbolInternals
+@@ -46,6 +47,7 @@
+         this.addAllSymbols(symbols)
+     }
+ 
++    @OptIn(SymbolInternals::class)
+     fun emitSemanticdbData(
+         firBasedSymbol: FirBasedSymbol<*>?,
+         symbol: Symbol,
+@@ -53,6 +55,17 @@
+         role: Role,
+         context: CheckerContext,
+     ) {
++        // Filter at the shared emitter so generated accessors cannot reintroduce script
++        // scaffolding.
++        val declaration =
++            if (firBasedSymbol is FirPropertyAccessorSymbol) firBasedSymbol.propertySymbol.fir
++            else firBasedSymbol?.fir
++        if (
++            declaration?.origin == FirDeclarationOrigin.ScriptCustomization.ResultProperty ||
++                declaration?.origin ==
++                    FirDeclarationOrigin.ScriptCustomization.ParameterFromBaseClass
++        )
++            return
+         symbolOccurrence(symbol, element, role).let {
+             if (!occurrences.contains(it)) {
+                 occurrences.add(it)
+@@ -85,6 +98,15 @@
+             }
+         return SymbolInformation {
+             this.symbol = symbol.toString()
++            // Local identifiers have no descriptor suffix; preserve their compiler-declared kind.
++            if (symbol.isLocal() && file.path?.endsWith(".kts") == true) {
++                this.kind =
++                    when (firBasedSymbol) {
++                        is FirNamedFunctionSymbol -> Semanticdb.SymbolInformation.Kind.METHOD
++                        is FirPropertySymbol -> Semanticdb.SymbolInformation.Kind.LOCAL
++                        else -> Semanticdb.SymbolInformation.Kind.UNKNOWN_KIND
++                    }
++            }
+             this.displayName =
+                 if (firBasedSymbol != null) {
+                     displayName(firBasedSymbol)

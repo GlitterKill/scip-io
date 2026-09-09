@@ -1,0 +1,346 @@
+--- a/semanticdb-gradle-plugin/src/main/scala/SemanticdbGradlePlugin.scala
++++ b/semanticdb-gradle-plugin/src/main/scala/SemanticdbGradlePlugin.scala
+@@ -376,6 +376,11 @@
+           }
+       }
+ 
++      if (project == project.getRootProject) {
++        tasks.create("scipCompileKotlinDsl", classOf[CompileKotlinDslScripts])
++        triggers += "scipCompileKotlinDsl"
++      }
++
+       tasks.create(
+         "scipCompileAll",
+         { task =>
+--- /dev/null
++++ b/semanticdb-gradle-plugin/src/main/scala/CompileKotlinDslScripts.scala
+@@ -0,0 +1,200 @@
++package com.sourcegraph.gradle.semanticdb
++
++import java.io.File
++import java.nio.charset.StandardCharsets.UTF_8
++import java.nio.file.{Files, StandardCopyOption}
++import java.{util => ju}
++import scala.jdk.CollectionConverters._
++import scala.language.reflectiveCalls
++import com.sourcegraph.scip_java.BuildInfo
++import org.gradle.api.{DefaultTask, GradleException}
++import org.gradle.api.tasks.TaskAction
++import org.gradle.internal.service.ServiceRegistry
++import org.gradle.tooling.provider.model.ToolingModelBuilderRegistry
++
++/**
++ * Script compilation is separate from KotlinCompile, including when Gradle has
++ * cached scripts.
++ */
++class CompileKotlinDslScripts extends DefaultTask {
++  @TaskAction
++  def compileScripts(): Unit = {
++    val project = getProject
++    val root = project.getRootDir.toPath.toRealPath()
++    val hasScripts =
++      project
++        .getAllprojects
++        .asScala
++        .exists(_.getBuildFile.getName.endsWith(".gradle.kts")) ||
++        Files.isRegularFile(root.resolve("settings.gradle.kts"))
++    if (!hasScripts)
++      return
++
++    type ScriptModel = {
++      def getClassPath(): ju.List[File]
++      def getImplicitImports(): ju.List[String]
++      def getExceptions(): ju.List[String]
++    }
++    type ScriptsModel = {
++      def getScriptModels(): ju.Map[File, ScriptModel]
++    }
++    val services = project
++      .asInstanceOf[{
++        def getServices(): ServiceRegistry
++      }]
++      .getServices()
++    val modelName = "org.gradle.tooling.model.kotlin.dsl.KotlinDslScriptsModel"
++    val model = services
++      .get(classOf[ToolingModelBuilderRegistry])
++      .getBuilder(modelName)
++      .buildAll(modelName, project)
++      .asInstanceOf[ScriptsModel]
++    val scripts = model
++      .getScriptModels()
++      .asScala
++      .toList
++      .filter { case (file, _) =>
++        file.toPath.toRealPath().startsWith(root)
++      }
++      .sortBy(_._1.toString)
++    if (scripts.isEmpty)
++      throw new GradleException("No Kotlin DSL script models returned")
++
++    val lib = new File(project.getGradle.getGradleHomeDir, "lib")
++    val jars = Option(lib.listFiles())
++      .toList
++      .flatten
++      .filter(_.getName.endsWith(".jar"))
++    def pluginJar(prefix: String): String =
++      jars
++        .find(_.getName.startsWith(prefix))
++        .getOrElse(
++          throw new GradleException(
++            s"Missing Gradle embedded compiler component: $prefix"
++          )
++        )
++        .toString
++    val assignment = pluginJar("kotlin-assignment-compiler-plugin-")
++    val sam = pluginJar("kotlin-sam-with-receiver-compiler-plugin-")
++    val dependency = project
++      .getDependencies
++      .create(
++        s"com.sourcegraph:semanticdb-kotlinc:${BuildInfo
++            .semanticdbKotlincVersion}"
++      )
++    val config = project.getConfigurations.detachedConfiguration(dependency)
++    config.setTransitive(false)
++    val semanticdb = config.getSingleFile.toString
++    val target =
++      new File(
++        project
++          .getExtensions
++          .getExtraProperties
++          .get("semanticdbTarget")
++          .toString
++      ).toPath
++    val work = getTemporaryDir.toPath
++    Files.createDirectories(work)
++    val source = work.resolve("ScipGradleScript.kt")
++    val resource = getClass.getResourceAsStream("/ScipGradleScript.kt")
++    if (resource == null)
++      throw new GradleException("Missing SCIP Kotlin DSL compiler helper")
++    try Files.copy(resource, source, StandardCopyOption.REPLACE_EXISTING)
++    finally resource.close()
++    val bridge = work.resolve("script-compiler.jar")
++    val java =
++      new File(
++        System.getProperty("java.home"),
++        "bin/java" +
++          (if (File.separatorChar == '\\')
++             ".exe"
++           else
++             "")
++      ).toString
++    val runtimeClasspath = new File(lib, "*").toString
++    def run(args: List[String]): Unit = {
++      val process =
++        new ProcessBuilder(
++          (
++            List(java, "-cp", runtimeClasspath + File.pathSeparator + bridge) ++
++              args
++          ).asJava
++        ).directory(project.getRootDir).redirectErrorStream(true).start()
++      try {
++        val output = scala
++          .io
++          .Source
++          .fromInputStream(process.getInputStream, "UTF-8")
++        try output.getLines().foreach(line => getLogger.lifecycle(line))
++        finally output.close()
++        val exit = process.waitFor()
++        if (exit != 0)
++          throw new GradleException(
++            s"SCIP Kotlin DSL compiler failed (exit $exit)"
++          )
++      } catch {
++        case interrupted: InterruptedException =>
++          process.destroyForcibly()
++          Thread.currentThread().interrupt()
++          throw interrupted
++      }
++    }
++    // Use an argument file so Windows command-line limits do not depend on Gradle's install path.
++    def quote(value: String): String =
++      "\"" + value.replace("\\", "\\\\").replace("\"", "\\\"") + "\""
++    val compilerArgs = List(
++      "-no-stdlib",
++      "-no-reflect",
++      "-classpath",
++      jars.mkString(File.pathSeparator),
++      "-d",
++      bridge.toString,
++      source.toString
++    )
++    val argfile = work.resolve("compiler.args")
++    Files.write(argfile, compilerArgs.map(quote).asJava, UTF_8)
++    run(List("org.jetbrains.kotlin.cli.jvm.K2JVMCompiler", "@" + argfile))
++
++    scripts
++      .zipWithIndex
++      .foreach { case ((file, script), number) =>
++        if (!script.getExceptions().isEmpty)
++          throw new GradleException(
++            s"Failed to resolve script model for $file: ${script
++                .getExceptions()}"
++          )
++        val imports = work.resolve(s"$number.imports")
++        val classpath = work.resolve(s"$number.classpath")
++        Files.write(imports, script.getImplicitImports(), UTF_8)
++        Files.write(
++          classpath,
++          script.getClassPath().asScala.map(_.toString).asJava,
++          UTF_8
++        )
++        val relative = root.relativize(file.toPath.toRealPath())
++        val output = target
++          .resolve("META-INF/semanticdb")
++          .resolve(relative.toString + ".semanticdb")
++        // Old output must not satisfy this run's proof, even when normal Gradle scripts are cached.
++        Files.deleteIfExists(output)
++        getLogger.lifecycle(s"SCIP Kotlin DSL: $relative")
++        run(
++          List(
++            "ScipGradleScriptKt",
++            file.toString,
++            imports.toString,
++            classpath.toString,
++            semanticdb,
++            root.toString,
++            target.toString,
++            assignment,
++            sam
++          )
++        )
++        if (!Files.isRegularFile(output) || Files.size(output) == 0)
++          throw new GradleException(
++            s"Compiler produced no SemanticDB for $relative"
++          )
++      }
++  }
++}
+--- /dev/null
++++ b/semanticdb-gradle-plugin/src/main/resources/ScipGradleScript.kt
+@@ -0,0 +1,29 @@
++import java.io.File
++import kotlinx.coroutines.runBlocking
++import kotlin.script.experimental.api.*
++import kotlin.script.experimental.host.toScriptSource
++import kotlin.script.experimental.jvm.*
++import kotlin.script.experimental.jvmhost.BasicJvmScriptingHost
++import org.gradle.kotlin.dsl.KotlinProjectScriptTemplateCompilationConfiguration
++import org.gradle.kotlin.dsl.KotlinSettingsScriptTemplateCompilationConfiguration
++
++// Compile against Gradle's IDE script model; never evaluate the script a second time.
++fun main(args: Array<String>) = runBlocking {
++    val script = File(args[0])
++    val base = if (script.name == "settings.gradle.kts")
++        KotlinSettingsScriptTemplateCompilationConfiguration()
++    else KotlinProjectScriptTemplateCompilationConfiguration()
++    val configuration = base.with {
++        defaultImports(File(args[1]).readLines())
++        jvm { updateClasspath(File(args[2]).readLines().map(::File)) }
++        compilerOptions.append(
++            "-Xplugin=${args[6]}", "-Xplugin=${args[7]}", "-Xplugin=${args[3]}",
++            "-P", "plugin:semanticdb-kotlinc:sourceroot=${args[4]}",
++            "-P", "plugin:semanticdb-kotlinc:targetroot=${args[5]}"
++        )
++    }
++    val result = BasicJvmScriptingHost().compiler(script.toScriptSource(), configuration)
++    result.reports.filter { it.severity >= ScriptDiagnostic.Severity.WARNING }
++        .forEach { System.err.println(it) }
++    check(result is ResultWithDiagnostics.Success) { "SCIP script compilation failed: ${script.path}" }
++}
+--- /dev/null
++++ b/tests/gradle-kotlin-dsl/ScriptProof.java
+@@ -0,0 +1,34 @@
++import com.sourcegraph.Scip;
++import java.nio.file.*;
++import java.util.*;
++
++/** End-to-end assertions: process success alone does not prove script indexing. */
++public class ScriptProof {
++  public static void main(String[] args) throws Exception {
++    var index = Scip.Index.parseFrom(Files.readAllBytes(Path.of(args[0])));
++    var documents = new HashMap<String, Scip.Document>();
++    for (var document : index.getDocumentsList()) documents.put(document.getRelativePath(), document);
++    for (String path : List.of("settings.gradle.kts", "build.gradle.kts", "child/build.gradle.kts")) {
++      var document = documents.get(path);
++      if (document == null || document.getOccurrencesCount() == 0)
++        throw new AssertionError("Missing compiler-backed script: " + path);
++      for (var symbol : document.getSymbolsList()) {
++        if (symbol.getDisplayName().equals("host") || symbol.getDisplayName().equals("$$result"))
++          throw new AssertionError("Synthetic script field materialized: " + symbol.getSymbol());
++      }
++    }
++    var build = documents.get("build.gradle.kts");
++    if (build.getOccurrencesList().stream().noneMatch(o -> o.getSymbol().contains("RepositoryHandler#mavenCentral")))
++      throw new AssertionError("Missing resolved Gradle API call");
++    if (build.getSymbolsList().stream().noneMatch(s -> s.getDisplayName().equals("count") && s.getKind() == Scip.SymbolInformation.Kind.Variable))
++      throw new AssertionError("Compiler must identify local variable kinds");
++    var greeting = build.getOccurrencesList().stream().filter(o -> (o.getSymbolRoles() & 1) != 0 && o.getRange(0) == 2 && o.getRange(1) == 4).findFirst().orElseThrow();
++    if (build.getOccurrencesList().stream().noneMatch(o -> (o.getSymbolRoles() & 1) == 0 && o.getSymbol().equals(greeting.getSymbol())))
++      throw new AssertionError("Script property reference does not resolve to its definition");
++    var child = documents.get("child/build.gradle.kts");
++    var childGreeting = child.getOccurrencesList().stream().filter(o -> (o.getSymbolRoles() & 1) != 0 && o.getRange(0) == 0 && o.getRange(1) == 4).findFirst().orElseThrow();
++    if (childGreeting.getSymbol().equals(greeting.getSymbol()))
++      throw new AssertionError("Separate script members collide");
++    System.out.println("PASS: scripts, Gradle API calls, local definition/reference, no synthetic fields");
++  }
++}
+--- /dev/null
++++ b/tests/gradle-kotlin-dsl/run.ps1
+@@ -0,0 +1,40 @@
++param(
++    [Parameter(Mandatory)] [string] $Pack,
++    [Parameter(Mandatory)] [string] $GradleHome,
++    [Parameter(Mandatory)] [string] $MavenRepository
++)
++$ErrorActionPreference = 'Stop'
++$Pack = (Resolve-Path $Pack).Path
++$fixture = Join-Path $env:TEMP ("scip scripts ' regression " + [guid]::NewGuid())
++New-Item -ItemType Directory -Path $fixture | Out-Null
++Copy-Item "$PSScriptRoot/fixture/*" $fixture -Recurse
++$originalJavaOptions = $env:JAVA_TOOL_OPTIONS
++$originalOS = $env:OS
++try {
++    $env:OS = 'Windows_NT'
++    $env:JAVA_TOOL_OPTIONS = '-Dmaven.repo.local="' + (Resolve-Path $MavenRepository).Path + '"'
++    & "$GradleHome/bin/gradle.bat" --no-daemon -p $fixture wrapper --gradle-version 9.5.1
++    if ($LASTEXITCODE -ne 0) { throw 'Fixture wrapper failed' }
++    & javac -proc:none -cp "$Pack/lib/*" -d $fixture "$PSScriptRoot/ScriptProof.java"
++    if ($LASTEXITCODE -ne 0) { throw 'SCIP validator compilation failed' }
++    Push-Location $fixture
++    try {
++        # The second run retains Gradle's compiled-script cache; SCIP must still be regenerated.
++        foreach ($run in 1..2) {
++            & "$Pack/bin/scip-java.bat" index --no-cleanup
++            if ($LASTEXITCODE -ne 0) { throw "Generator failed on run $run" }
++            & java -cp "$fixture;$Pack/lib/*" ScriptProof "$fixture/index.scip"
++            if ($LASTEXITCODE -ne 0) { throw "Invalid script SCIP on run $run" }
++        }
++        Add-Content build.gradle.kts 'unresolvedScipRegressionCall()'
++        Remove-Item -LiteralPath "$fixture/index.scip"
++        & "$Pack/bin/scip-java.bat" index --no-cleanup
++        if ($LASTEXITCODE -eq 0 -or (Test-Path "$fixture/index.scip")) {
++            throw 'Failed script compilation must not produce a successful index'
++        }
++    } finally { Pop-Location }
++    Write-Output "PASS: fresh output, warm script cache, compilation failure propagation. Evidence: $fixture"
++} finally {
++    $env:JAVA_TOOL_OPTIONS = $originalJavaOptions
++    $env:OS = $originalOS
++}
+--- /dev/null
++++ b/tests/gradle-kotlin-dsl/fixture/settings.gradle.kts
+@@ -0,0 +1,2 @@
++rootProject.name = "script-proof"
++include(":child")
+--- /dev/null
++++ b/tests/gradle-kotlin-dsl/fixture/build.gradle.kts
+@@ -0,0 +1,4 @@
++plugins { java }
++repositories { mavenCentral() }
++val greeting = "hello"
++tasks.register("greet") { doLast { val count = 1; println(count); println(greeting) } }
+--- /dev/null
++++ b/tests/gradle-kotlin-dsl/fixture/child/build.gradle.kts
+@@ -0,0 +1,2 @@
++val greeting = "child"
++tasks.register("greet") { doLast { println(greeting) } }

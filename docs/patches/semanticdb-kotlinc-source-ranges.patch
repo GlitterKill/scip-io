@@ -1,0 +1,116 @@
+diff --git a/semanticdb-kotlinc/src/main/kotlin/com/sourcegraph/semanticdb_kotlinc/AnalyzerCheckers.kt b/semanticdb-kotlinc/src/main/kotlin/com/sourcegraph/semanticdb_kotlinc/AnalyzerCheckers.kt
+--- a/semanticdb-kotlinc/src/main/kotlin/com/sourcegraph/semanticdb_kotlinc/AnalyzerCheckers.kt
++++ b/semanticdb-kotlinc/src/main/kotlin/com/sourcegraph/semanticdb_kotlinc/AnalyzerCheckers.kt
+@@ -32,10 +32,27 @@
+         @OptIn(ExperimentalContracts::class)
+         val visitors: MutableMap<KtSourceFile, SemanticdbVisitor> = mutableMapOf()
+ 
+-        private fun getIdentifier(element: KtSourceElement): KtSourceElement =
+-            element.treeStructure
+-                .findChildByType(element.lighterASTNode, KtTokens.IDENTIFIER)
+-                ?.toKtLightSourceElement(element.treeStructure) ?: element
++        private fun getIdentifier(element: KtSourceElement): KtSourceElement {
++            val tree = element.treeStructure
++            var node = element.lighterASTNode
++            // Type references wrap their name; do not descend into type arguments
++            // or a qualified type's receiver when selecting the referenced identifier.
++            while (true) {
++                val type =
++                    when (node.tokenType) {
++                        KtNodeTypes.TYPE_REFERENCE ->
++                            if (tree.findChildByType(node, KtNodeTypes.NULLABLE_TYPE) != null)
++                                KtNodeTypes.NULLABLE_TYPE
++                            else KtNodeTypes.USER_TYPE
++                        KtNodeTypes.NULLABLE_TYPE -> KtNodeTypes.USER_TYPE
++                        KtNodeTypes.USER_TYPE -> KtNodeTypes.REFERENCE_EXPRESSION
++                        else -> break
++                    }
++                node = tree.findChildByType(node, type) ?: break
++            }
++            return tree.findChildByType(node, KtTokens.IDENTIFIER)?.toKtLightSourceElement(tree)
++                ?: element
++        }
+     }
+ 
+     override val declarationCheckers: DeclarationCheckers
+@@ -199,7 +216,11 @@
+                     val superSymbol = superType.toClassLikeSymbol(context.session)
+                     val superSource = superType.source
+                     if (superSymbol != null && superSource != null) {
+-                        visitor?.visitClassReference(superSymbol, superSource, context)
++                        visitor?.visitClassReference(
++                            superSymbol,
++                            getIdentifier(superSource),
++                            context,
++                        )
+                     }
+                 }
+             }
+@@ -367,6 +388,9 @@
+         context(context: CheckerContext, reporter: DiagnosticReporter)
+         override fun check(expression: FirQualifiedAccessExpression) {
+             val source = expression.source ?: return
++            // Generated delegate accessors share the delegate expression's source; they
++            // are not source-level references to the property or its getter/setter.
++            if (source.kind == KtFakeSourceElementKind.DelegatedPropertyAccessor) return
+             val calleeReference = expression.calleeReference
+             if ((calleeReference as? FirResolvedNamedReference) == null) {
+                 return
+diff --git a/semanticdb-kotlinc/src/test/kotlin/com/sourcegraph/semanticdb_kotlinc/test/AnalyzerTest.kt b/semanticdb-kotlinc/src/test/kotlin/com/sourcegraph/semanticdb_kotlinc/test/AnalyzerTest.kt
+--- a/semanticdb-kotlinc/src/test/kotlin/com/sourcegraph/semanticdb_kotlinc/test/AnalyzerTest.kt
++++ b/semanticdb-kotlinc/src/test/kotlin/com/sourcegraph/semanticdb_kotlinc/test/AnalyzerTest.kt
+@@ -97,6 +97,54 @@
+     }
+ 
+     @Test
++    fun `generic supertype and delegated property references use source identifiers`(
++        @TempDir path: Path
++    ) {
++        val document =
++            compileSemanticdb(
++                path,
++                """
++            package fixture
++            open class Base<T>
++            class Child : fixture.Base<String>() {
++                val annotations: Set<String> by lazy {
++                    emptySet<String>()
++                }
++                fun read() = annotations
++            }
++        """
++                    .trimIndent(),
++            )
++        val lines = document.text.lines()
++        val references = document.occurrencesList.filter { it.role == Role.REFERENCE }
++        val base = references.filter { it.symbol == "fixture/Base#" }
++        kotlin.test.assertTrue(base.isNotEmpty())
++        for (occurrence in base) {
++            val range = occurrence.range
++            range.startLine shouldBe range.endLine
++            lines[range.startLine].substring(range.startCharacter, range.endCharacter) shouldBe
++                "Base"
++        }
++        val property = references.filter { it.symbol == "fixture/Child#annotations." }
++        kotlin.test.assertTrue(property.isNotEmpty())
++        for (occurrence in property) {
++            val range = occurrence.range
++            range.startLine shouldBe range.endLine
++            lines[range.startLine].substring(range.startCharacter, range.endCharacter) shouldBe
++                "annotations"
++        }
++        kotlin.test.assertTrue(references.any { it.symbol == "kotlin/lazy()." })
++        val readDefinition =
++            document.occurrencesList
++                .single { it.symbol == "fixture/Child#read()." && it.role == Role.DEFINITION }
++                .range
++        lines[readDefinition.startLine].substring(
++            readDefinition.startCharacter,
++            readDefinition.endCharacter,
++        ) shouldBe "read"
++    }
++
++    @Test
+     fun `basic test`(@TempDir path: Path) {
+         val document =
+             compileSemanticdb(

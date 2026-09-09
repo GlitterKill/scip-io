@@ -1,6 +1,11 @@
 # Windows scip-java Gradle investigation
 
-**Java and Kotlin generation now succeed with the upstream compatibility patches.** Each
+The later [Gradle Kotlin DSL coverage follow-up](patches/README.md#gradle-kotlin-dsl-follow-up)
+adds compiler-backed build/settings scripts, source-range repairs, and typed script
+locals. The counts below describe the earlier compatibility verification.
+
+
+**Original compatibility verification: Java and Kotlin generation succeed with the upstream patches.** Each
 output contains 218 documents and 79,704 occurrences, with valid source ranges
 and cross-file definition/reference links. The patches and tested binaries are
 local and unpublished remotely. The latest verification resolves a distinct
