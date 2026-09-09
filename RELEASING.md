@@ -47,6 +47,10 @@ Edit `Cargo.toml` at the workspace root:
 version = "0.2.0"   # ← bump this
 ```
 
+Also update `gui/package.json`, both root package version entries in
+`gui/package-lock.json`, and `src-tauri/tauri.conf.json` to the same version.
+The Rust crates inherit the workspace version.
+
 Then regenerate the lockfile:
 
 ```sh
@@ -71,7 +75,7 @@ Edit `CHANGELOG.md`:
 ### 4. Commit and tag
 
 ```sh
-git add Cargo.toml Cargo.lock CHANGELOG.md
+git add Cargo.toml Cargo.lock gui/package.json gui/package-lock.json src-tauri/tauri.conf.json CHANGELOG.md RELEASING.md
 git commit -m "Release v0.2.0"
 git tag -a v0.2.0 -m "SCIP-IO v0.2.0"
 git push origin main

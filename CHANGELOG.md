@@ -7,8 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-09-09
+
+### Added
+
+- Added documented upstream backport patches for Windows Gradle path escaping,
+  Kotlin 2.3.21 compiler compatibility, SemanticDB source ranges, and Gradle
+  Kotlin DSL script indexing, with regression fixtures, submission drafts,
+  pinned local integration patches, and verification evidence. These are
+  source patches for separately built indexers; SCIP-IO does not install the
+  unpublished patched indexer or plugin builds automatically.
+
 ### Fixed
 
+- CLI native indexing now honors configured indexer `binary` overrides before
+  consulting managed installations. Relative paths resolve from the loaded
+  config directory, language overrides take precedence over indexer-name
+  overrides, and missing binaries fail without silently falling back.
+- Text and JSON dry runs now show the same configured executable used by CLI
+  indexing, with regression coverage for custom and missing binary paths.
 - Use fixed-size byte chunks for UTF-16 process output decoding to satisfy the
   latest stable Clippy lint without changing decoding behavior.
 
@@ -308,7 +325,8 @@ Initial release.
 - **One-line install scripts** for the CLI on Linux/macOS (`install.sh`) and
   Windows (`install.ps1`).
 
-[Unreleased]: https://github.com/GlitterKill/scip-io/compare/v0.1.9...HEAD
+[Unreleased]: https://github.com/GlitterKill/scip-io/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/GlitterKill/scip-io/compare/v0.1.9...v0.2.0
 [0.1.9]: https://github.com/GlitterKill/scip-io/compare/v0.1.8...v0.1.9
 [0.1.8]: https://github.com/GlitterKill/scip-io/compare/v0.1.7...v0.1.8
 [0.1.7]: https://github.com/GlitterKill/scip-io/compare/v0.1.6...v0.1.7
