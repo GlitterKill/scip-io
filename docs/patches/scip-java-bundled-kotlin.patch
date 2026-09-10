@@ -1,0 +1,108 @@
+--- a/semanticdb-gradle-plugin/src/main/scala/SemanticdbGradlePlugin.scala
++++ b/semanticdb-gradle-plugin/src/main/scala/SemanticdbGradlePlugin.scala
+@@ -341,20 +341,8 @@
+                 }]
+                 .getKotlinOptions()
+ 
+-              val semanticdbkotlincDependency =
+-                s"com.sourcegraph:semanticdb-kotlinc:${BuildInfo
+-                    .semanticdbKotlincVersion}"
+-
+-              val semanticdbKotlinc =
+-                project
+-                  .getConfigurations()
+-                  .detachedConfiguration(
+-                    project.getDependencies.create(semanticdbkotlincDependency)
+-                  )
+-                  .getFiles()
+-                  .asScala
+-                  .toList
+-                  .head
++              // Use the reviewed plugin shipped with this distribution.
++              val semanticdbKotlinc = EmbeddedKotlinPlugin.path
+ 
+               val newArgs =
+                 new ju.ArrayList[String](
+--- a/semanticdb-gradle-plugin/src/main/scala/CompileKotlinDslScripts.scala
++++ b/semanticdb-gradle-plugin/src/main/scala/CompileKotlinDslScripts.scala
+@@ -6,7 +6,6 @@
+ import java.{util => ju}
+ import scala.jdk.CollectionConverters._
+ import scala.language.reflectiveCalls
+-import com.sourcegraph.scip_java.BuildInfo
+ import org.gradle.api.{DefaultTask, GradleException}
+ import org.gradle.api.tasks.TaskAction
+ import org.gradle.internal.service.ServiceRegistry
+@@ -76,15 +75,7 @@
+         .toString
+     val assignment = pluginJar("kotlin-assignment-compiler-plugin-")
+     val sam = pluginJar("kotlin-sam-with-receiver-compiler-plugin-")
+-    val dependency = project
+-      .getDependencies
+-      .create(
+-        s"com.sourcegraph:semanticdb-kotlinc:${BuildInfo
+-            .semanticdbKotlincVersion}"
+-      )
+-    val config = project.getConfigurations.detachedConfiguration(dependency)
+-    config.setTransitive(false)
+-    val semanticdb = config.getSingleFile.toString
++    val semanticdb = EmbeddedKotlinPlugin.path.toString
+     val target =
+       new File(
+         project
+--- a/scip-java/src/main/scala/com/sourcegraph/scip_java/Embedded.scala
++++ b/scip-java/src/main/scala/com/sourcegraph/scip_java/Embedded.scala
+@@ -10,6 +10,15 @@
+ import os.CommandResult
+ 
+ object Embedded {
++
++  // Keep the compiler plugin outside the CLI classloader and alive for this JVM.
++  lazy val kotlinPlugin: Path = {
++    val dir = Files.createTempDirectory("scip-java-kotlin")
++    dir.toFile.deleteOnExit()
++    val jar = copyFile(dir, "semanticdb-kotlinc.jar")
++    jar.toFile.deleteOnExit()
++    jar
++  }
+ 
+   def semanticdbJar(tmpDir: Path): Path = copyFile(
+     tmpDir,
+--- a/scip-java/src/main/scala/com/sourcegraph/scip_java/buildtools/ScipBuildTool.scala
++++ b/scip-java/src/main/scala/com/sourcegraph/scip_java/buildtools/ScipBuildTool.scala
+@@ -238,15 +238,7 @@
+       return Success()
+     val filesPaths = allKotlinFiles.map(_.toString)
+ 
+-    val kotlinPluginVersion = BuildInfo.semanticdbKotlincVersion
+-    val plugin =
+-      Dependencies
+-        .resolveDependencies(
+-          List(s"com.sourcegraph:semanticdb-kotlinc:$kotlinPluginVersion"),
+-          transitive = false
+-        )
+-        .classpath
+-        .head
++    val plugin = Embedded.kotlinPlugin
+ 
+     println(plugin)
+ 
+--- /dev/null
++++ b/semanticdb-gradle-plugin/src/main/scala/EmbeddedKotlinPlugin.scala
+@@ -0,0 +1,16 @@
++package com.sourcegraph.gradle.semanticdb
++
++import java.nio.file.{Files, Path, StandardCopyOption}
++
++/** Extract once per plugin classloader; never resolve an unpublished Maven artifact. */
++object EmbeddedKotlinPlugin {
++  lazy val path: Path = {
++    val resource = getClass.getResourceAsStream("/semanticdb-kotlinc.jar")
++    require(resource != null, "Missing bundled SemanticDB Kotlin plugin")
++    val out = Files.createTempFile("scip-java-kotlin-", ".jar")
++    out.toFile.deleteOnExit()
++    try Files.copy(resource, out, StandardCopyOption.REPLACE_EXISTING)
++    finally resource.close()
++    out
++  }
++}

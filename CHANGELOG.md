@@ -7,7 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.2.1] - 2026-09-09
+### Added
+
+- The current checkout pins `scip-java-v0.12.3-scip-io.2` for its next
+  separately versioned managed distribution. The rebuilt 0.12.3 payload
+  combines the Windows Gradle path repair with the Kotlin 2.3.21 compatibility,
+  SemanticDB source-range, and Gradle Kotlin DSL patches. It embeds the pinned
+  tested `semanticdb-kotlinc` JAR, so the plugin does not need an unpublished
+  Maven snapshot or `JAVA_TOOL_OPTIONS` at index time. The immutable `.1`
+  path-only release remains available for released SCIP-IO 0.2.1 binaries.
+  Application binaries are released separately. This does not establish a
+  full benchmark result.
 
 ## [0.2.1] - 2026-09-09
 

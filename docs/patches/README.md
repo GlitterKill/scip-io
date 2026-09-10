@@ -95,6 +95,25 @@ the old embedded plugin. The standalone Scala helper also passes formatting
 and compilation checks with untracked sources included (`project.git = false`
 in a temporary formatter config).
 
+## Managed distribution assembly
+
+The `.2` managed scip-java distribution consumes the exact tested `scripts4`
+plugin JAR rather than resolving its unpublished Maven coordinate at index time.
+`scripts/stage-scip-java-compat.py` embeds the JAR with SHA-256
+`79e73306593b97ac87ab656ed072e3c3548514d32bfa1b7d8da35c056238c751` while it
+stages the rebuilt scip-java v0.12.3 pack. Its payload SHA-256 is
+`6a348ada3570002344305e3cf20bc61c94e88a2f6220c298ef81b3980ab1f662`; the batch
+launcher retains SHA-256
+`843319e0a3c57e588a0dd25edd2fee4621ec9cd152741d3128a5f5366264a593`.
+
+`scip-java-bundled-kotlin.patch` makes the two bundled plugin resources
+authoritative for Gradle source compilation, Gradle script compilation, and CLI
+dependency compilation. It removes unpublished plugin resolution only. Projects
+can still resolve their ordinary Gradle dependencies from their configured
+repositories. The staging directory includes the patches, Apache-2.0 license,
+`PACK-SHA256SUMS.txt`, and `SHA256SUMS.txt`. This packaging step does not change
+the upstream patch scope or publish the local coordinate.
+
 Final SDLBench verification (`moshi-jvm-2026-09-08T12-23-18-911Z`) freshly generated Java, Kotlin, and merged SCIP in both disposable Moshi tasks with generated-index caching disabled. All six artifacts validate: 231 documents, including all 13 Gradle scripts, 80,852 occurrences, and 14,596 cross-file resolved references each. The first task reports 156/156 provider-primary files and zero uncovered, fallback, incomplete-call-proof, or generator failures, and passes its task verifier. The second passes indexing preflight but later times out in agent verification with an `EBUSY` read error; the overall benchmark is therefore failed. This does not establish a passing full benchmark. Detailed evidence and commands are in `F:/Claude/projects/sdl-mcp/sdl-mcp/sdlbench/docs/index-preflight.md`, under the Gradle Kotlin DSL follow-up.
 
 The follow-up rerun `moshi-jvm-2026-09-09T12-45-46-953Z` passes both Moshi tasks and both verifiers. The remaining defects were in SDL runtime output-drain timeout handling and SDLBench source snapshots reading ignored, locked build caches. Both are repaired with regressions. Each task now reports 156/156 provider-primary files, zero uncovered/fallback/incomplete-call-proof files, zero generator failures, and `semanticDeferred:false`. All six fresh SCIP artifacts validate with the counts above; generated-index caching remains disabled. The final evidence and hashes are in the SDLBench report's 2026-09-09 section. This verification does not publish or change the upstream patch scope.

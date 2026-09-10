@@ -351,3 +351,25 @@ Evidence, the harness, validator and fresh outputs are retained under
 `target/moshi-kotlin-compat/versioned/`. This is a local Kotlin 2.3.21
 compatibility build, not a release for every Kotlin version. Existing released
 artifacts remain available for Kotlin 2.1.20.
+
+## Managed compatibility distribution follow-up
+
+The versioned local verification above uses a disposable Maven repository to
+let the rebuilt scip-java pack resolve the unpublished `scripts4` plugin. That
+is a build-time dependency for the local reproduction, not a requirement for
+the current checkout's managed distribution.
+
+`scip-java-v0.12.3-scip-io.2` packages the rebuilt v0.12.3 pack with the exact
+tested `semanticdb-kotlinc:0.5.1-kotlin-2.3.21-scripts4-SNAPSHOT` JAR. Its
+SHA-256 is `79e73306593b97ac87ab656ed072e3c3548514d32bfa1b7d8da35c056238c751`.
+The installed payload resolves that embedded JAR directly, so users do not need
+an unpublished Maven repository or `JAVA_TOOL_OPTIONS` for the plugin at index
+time. The indexed project can still resolve its own Gradle dependencies.
+
+The `.2` package retains the original `scip-java` and `scip-java.bat` installer
+names, but it has a new versioned cache directory and release tag. It is staged
+by `scripts/stage-scip-java-compat.py`; its payload SHA-256 is
+`6a348ada3570002344305e3cf20bc61c94e88a2f6220c298ef81b3980ab1f662`, while the
+batch-launcher SHA-256 stays
+`843319e0a3c57e588a0dd25edd2fee4621ec9cd152741d3128a5f5366264a593`. The
+released `.1` distribution remains immutable and path-only.

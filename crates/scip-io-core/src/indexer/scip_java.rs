@@ -1,4 +1,4 @@
-//! Pinned distribution of the scip-java Windows path-serialization backport.
+//! Pinned scip-java distribution with bundled Kotlin 2.3.21 compiler compatibility.
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -8,8 +8,8 @@ use super::{IndexerEntry, install};
 use crate::progress::ProgressHandler;
 
 pub const REPOSITORY: &str = "GlitterKill/scip-io";
-pub const VERSION: &str = "scip-java-v0.12.3-scip-io.1";
-pub const PAYLOAD_SHA256: &str = "76b02676b1fceea4627faca0c236213c98595f425af9052f1b0cfb04d2b4d0e2";
+pub const VERSION: &str = "scip-java-v0.12.3-scip-io.2";
+pub const PAYLOAD_SHA256: &str = "6a348ada3570002344305e3cf20bc61c94e88a2f6220c298ef81b3980ab1f662";
 pub const LAUNCHER_SHA256: &str =
     "843319e0a3c57e588a0dd25edd2fee4621ec9cd152741d3128a5f5366264a593";
 
@@ -138,7 +138,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires staged release files in SCIP_JAVA_REPAIR_TEST_ASSETS (129 MB)"]
+    #[ignore = "requires staged release files in SCIP_JAVA_REPAIR_TEST_ASSETS"]
     async fn real_artifact_download_install_and_cache_smoke() {
         use std::io::{Read, Write};
         let assets = PathBuf::from(std::env::var_os("SCIP_JAVA_REPAIR_TEST_ASSETS").unwrap());
@@ -169,12 +169,19 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let legacy = root.path().join("scip-java");
         std::fs::write(&legacy, "old cache").unwrap();
+        let previous = root.path().join("scip-java-v0.12.3-scip-io.1");
+        std::fs::create_dir(&previous).unwrap();
+        std::fs::write(previous.join("scip-java"), "previous pinned release").unwrap();
         let path = install_from(root.path(), true, &NoopHandler, &base_url)
             .await
             .unwrap();
         server.join().unwrap();
         assert_eq!(path, directory(root.path()).join("scip-java.bat"));
         assert_eq!(std::fs::read_to_string(legacy).unwrap(), "old cache");
+        assert_eq!(
+            std::fs::read_to_string(previous.join("scip-java")).unwrap(),
+            "previous pinned release"
+        );
         // Server is gone: the second install must verify and reuse the local pair.
         assert_eq!(
             install_from(root.path(), true, &NoopHandler, &base_url)
