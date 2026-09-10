@@ -8,7 +8,10 @@ pub async fn run(args: UninstallArgs) -> Result<()> {
     let target = args.target_identifier()?;
     let entry = action_entry_for_target(target)?;
 
-    let Some(path) = entry.installed_path() else {
+    let Some(path) = entry
+        .installed_path()
+        .or_else(|| entry.managed_install_path())
+    else {
         println!(
             "{} No installed indexer found for '{}'",
             style("*").yellow(),

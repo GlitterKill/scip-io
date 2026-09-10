@@ -3,6 +3,7 @@ pub mod install;
 pub mod planner;
 pub mod registry;
 pub mod runner;
+mod scip_java;
 pub mod version;
 
 use std::path::{Path, PathBuf};
@@ -134,6 +135,11 @@ impl IndexerEntry {
     }
 
     fn installed_path_from(&self, dir: &Path, include_system_path: bool) -> Option<PathBuf> {
+        if scip_java::applies(self) {
+            // The default repair must not silently reuse stock 0.12.3 from PATH or cache.
+            // Explicit binary overrides are resolved by the caller before installation.
+            return scip_java::installed_path(dir);
+        }
         // 1. Check local install dir
         for path in self.local_binary_candidates(dir) {
             if path.exists() {
@@ -182,9 +188,17 @@ impl IndexerEntry {
     /// install cache. System PATH binaries are intentionally excluded because
     /// the app did not install them and should not remove them.
     pub fn is_managed_installed(&self) -> bool {
+        self.managed_install_path().is_some()
+    }
+
+    /// Locate owned files for cleanup, including an incomplete pinned install.
+    pub fn managed_install_path(&self) -> Option<PathBuf> {
+        let dir = install_dir();
+        if scip_java::applies(self) && scip_java::directory(&dir).exists() {
+            return Some(scip_java::directory(&dir));
+        }
         self.installed_path()
-            .as_deref()
-            .is_some_and(is_managed_install_path)
+            .filter(|path| is_managed_install_path(path))
     }
 
     /// Remove the app-managed install files for this indexer.
@@ -194,6 +208,10 @@ impl IndexerEntry {
     /// binaries found only on the user's PATH.
     pub fn uninstall_managed(&self) -> Result<Option<PathBuf>> {
         let dir = install_dir();
+        if scip_java::applies(self) && scip_java::directory(&dir).exists() {
+            // An incomplete pair is still owned by us and must remain removable.
+            return self.remove_managed_install_from(&dir, scip_java::directory(&dir));
+        }
         let Some(installed_path) = self.installed_path() else {
             return Ok(None);
         };
@@ -211,6 +229,9 @@ impl IndexerEntry {
 
     #[cfg(test)]
     fn uninstall_managed_from(&self, dir: &Path) -> Result<Option<PathBuf>> {
+        if scip_java::applies(self) && scip_java::directory(dir).exists() {
+            return self.remove_managed_install_from(dir, scip_java::directory(dir));
+        }
         let Some(installed_path) = self.installed_path_from(dir, false) else {
             return Ok(None);
         };
@@ -250,6 +271,9 @@ impl IndexerEntry {
 
     /// Ensure the indexer binary is installed, downloading if necessary.
     pub async fn ensure_installed(&self, progress: &dyn ProgressHandler) -> Result<PathBuf> {
+        if scip_java::applies(self) {
+            return self.install_version(scip_java::VERSION, progress).await;
+        }
         if let Some(path) = self.installed_path() {
             install::repair_existing_indexer(self)?;
             if is_managed_install_path(&path) && self.managed_install_metadata().is_none() {
@@ -353,6 +377,9 @@ impl IndexerEntry {
     }
 
     fn managed_removal_candidates(&self, dir: &Path) -> Vec<PathBuf> {
+        if scip_java::applies(self) {
+            return vec![scip_java::directory(dir), self.metadata_path_in(dir)];
+        }
         let mut candidates = self.local_binary_candidates(dir);
         candidates.push(self.metadata_path_in(dir));
 
@@ -555,6 +582,24 @@ mod tests {
     fn create_file(path: &Path) {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, "binary").unwrap();
+    }
+
+    #[test]
+    fn default_java_does_not_reuse_unversioned_launcher() {
+        let entry = registry::REGISTRY
+            .all()
+            .iter()
+            .find(|entry| entry.language == "java")
+            .unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        create_file(&temp.path().join("scip-java"));
+        create_file(&temp.path().join("scip-java.bat"));
+        assert_eq!(entry.installed_path_from(temp.path(), false), None);
+        let pinned = scip_java::directory(temp.path());
+        create_file(&pinned.join("scip-java"));
+        entry.uninstall_managed_from(temp.path()).unwrap();
+        assert!(!pinned.exists());
+        assert!(temp.path().join("scip-java").is_file());
     }
 
     fn managed_binary_path(root: &Path, binary_name: &str) -> PathBuf {

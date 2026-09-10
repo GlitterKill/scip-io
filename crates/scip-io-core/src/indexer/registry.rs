@@ -2,6 +2,7 @@ use std::sync::LazyLock;
 
 use crate::detect::Language;
 use crate::indexer::backend::BackendCapabilities;
+use crate::indexer::scip_java;
 use crate::indexer::{IndexerEntry, InstallMethod};
 
 const WINDOWS_LINUX_BACKEND_REASON: &str = "Native Windows binaries are not published upstream; upstream publishes Linux/macOS assets only. Use WSL or Docker to run the Linux binary";
@@ -93,28 +94,28 @@ impl Registry {
                 IndexerEntry {
                     indexer_name: "scip-java".into(),
                     language: "java".into(),
-                    github_repo: "sourcegraph/scip-java".into(),
+                    github_repo: scip_java::REPOSITORY.into(),
                     binary_name: "scip-java".into(),
-                    version: "v0.12.3".into(),
+                    version: scip_java::VERSION.into(),
                     default_args: vec!["index".into()],
                     output_file: "index.scip".into(),
                     install_method: InstallMethod::GitHubLauncher {
-                        unix_asset: "scip-java-{version}".into(),
-                        windows_asset: "scip-java-{version}.bat".into(),
+                        unix_asset: "scip-java".into(),
+                        windows_asset: "scip-java.bat".into(),
                     },
                     backend_capabilities: BackendCapabilities::wsl_optional(),
                 },
                 IndexerEntry {
                     indexer_name: "scip-java".into(),
                     language: "scala".into(),
-                    github_repo: "sourcegraph/scip-java".into(),
+                    github_repo: scip_java::REPOSITORY.into(),
                     binary_name: "scip-java".into(),
-                    version: "v0.12.3".into(),
+                    version: scip_java::VERSION.into(),
                     default_args: vec!["index".into()],
                     output_file: "index.scip".into(),
                     install_method: InstallMethod::GitHubLauncher {
-                        unix_asset: "scip-java-{version}".into(),
-                        windows_asset: "scip-java-{version}.bat".into(),
+                        unix_asset: "scip-java".into(),
+                        windows_asset: "scip-java.bat".into(),
                     },
                     backend_capabilities: BackendCapabilities::wsl_optional(),
                 },

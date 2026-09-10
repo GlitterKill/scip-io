@@ -5,6 +5,7 @@ use anyhow::{Context, Result, bail};
 use futures_util::StreamExt;
 use serde::Deserialize;
 
+use crate::indexer::scip_java;
 use crate::indexer::version::normalize_version;
 use crate::indexer::{IndexerEntry, InstallMethod, install_dir, npm_package_dir};
 use crate::process::hidden_tokio_command;
@@ -440,6 +441,9 @@ async fn latest_npm_package_version(package: &str) -> Result<String> {
 }
 
 pub async fn resolve_latest_compatible_version(entry: &IndexerEntry) -> Result<String> {
+    if scip_java::applies(entry) {
+        return Ok(scip_java::VERSION.to_owned());
+    }
     match &entry.install_method {
         InstallMethod::Npm { package } => latest_npm_package_version(package).await,
         InstallMethod::DotnetTool { .. } => Ok(normalize_version(
@@ -475,6 +479,9 @@ pub async fn resolve_latest_compatible_version_for_platform(
     entry: &IndexerEntry,
     platform: IndexerAssetPlatform,
 ) -> Result<String> {
+    if scip_java::applies(entry) {
+        return Ok(scip_java::VERSION.to_owned());
+    }
     match &entry.install_method {
         InstallMethod::Npm { package } if platform == IndexerAssetPlatform::Host => {
             latest_npm_package_version(package).await
@@ -522,7 +529,7 @@ pub async fn resolve_latest_compatible_version_for_platform(
 // ---------------------------------------------------------------------------
 
 /// Download a URL to a local file, reporting progress events.
-async fn download_to_file(
+pub(super) async fn download_to_file(
     url: &str,
     dest: &Path,
     indexer_name: &str,
@@ -676,7 +683,7 @@ fn extract_zip(
 
 /// Set executable permission on unix.
 #[cfg(unix)]
-fn set_executable(path: &Path) -> Result<()> {
+pub(super) fn set_executable(path: &Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
     let mut perms = std::fs::metadata(path)?.permissions();
     perms.set_mode(0o755);
@@ -685,7 +692,7 @@ fn set_executable(path: &Path) -> Result<()> {
 }
 
 #[cfg(not(unix))]
-fn set_executable(_path: &Path) -> Result<()> {
+pub(super) fn set_executable(_path: &Path) -> Result<()> {
     Ok(())
 }
 
@@ -729,6 +736,15 @@ pub async fn download_github_binary_for_platform(
     dest_dir: &Path,
     progress: &dyn ProgressHandler,
 ) -> Result<PathBuf> {
+    if scip_java::applies(entry) {
+        scip_java::require_version(version)?;
+        return scip_java::install_in(
+            dest_dir,
+            platform == IndexerAssetPlatform::Host && cfg!(windows),
+            progress,
+        )
+        .await;
+    }
     let asset_pattern = match &entry.install_method {
         InstallMethod::GitHubBinary { asset_pattern } => asset_pattern,
         InstallMethod::GitHubLauncher {
@@ -1165,6 +1181,10 @@ pub async fn install_indexer(
     entry: &IndexerEntry,
     progress: &dyn ProgressHandler,
 ) -> Result<PathBuf> {
+    if scip_java::applies(entry) {
+        scip_java::require_version(&entry.version)?;
+        return scip_java::install_in(&install_dir(), cfg!(windows), progress).await;
+    }
     match &entry.install_method {
         InstallMethod::GitHubBinary { asset_pattern } => {
             install_github_binary(entry, asset_pattern, progress).await

@@ -48,7 +48,10 @@ pub async fn run(args: CleanArgs) -> Result<()> {
         }
 
         let action_entry = REGISTRY.action_entry_for(entry).unwrap_or(entry);
-        if let Some(path) = action_entry.installed_path() {
+        if let Some(path) = action_entry
+            .installed_path()
+            .or_else(|| action_entry.managed_install_path())
+        {
             if !action_entry.is_managed_installed() {
                 if args.lang.is_some() {
                     println!(

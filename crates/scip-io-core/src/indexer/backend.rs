@@ -501,7 +501,7 @@ async fn prepare_linux_backend_binary(entry: &IndexerEntry) -> Result<PathBuf> {
     let version = entry.version.clone();
     let binary_dir = linux_backend_binary_dir(entry, &version, platform);
     let binary = binary_dir.join(&entry.binary_name);
-    if binary.exists() {
+    if binary.exists() && !super::scip_java::applies(entry) {
         return Ok(binary);
     }
 

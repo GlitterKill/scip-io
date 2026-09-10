@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-09-09
+
+## [0.2.1] - 2026-09-09
+
+### Fixed
+
+- Default Java, Kotlin, and Scala installation selects the pinned
+  `scip-java-v0.12.3-scip-io.1` path-serialization backport instead of reusing
+  stock scip-java from an unversioned cache or PATH. Native and Linux backend
+  installs verify SHA-256 hashes and publish a complete versioned cache while
+  preserving old launchers. This release does not include the later Kotlin
+  compiler compatibility patches.
+
 ## [0.2.0] - 2026-09-09
 
 ### Added
@@ -325,7 +338,8 @@ Initial release.
 - **One-line install scripts** for the CLI on Linux/macOS (`install.sh`) and
   Windows (`install.ps1`).
 
-[Unreleased]: https://github.com/GlitterKill/scip-io/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/GlitterKill/scip-io/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/GlitterKill/scip-io/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/GlitterKill/scip-io/compare/v0.1.9...v0.2.0
 [0.1.9]: https://github.com/GlitterKill/scip-io/compare/v0.1.8...v0.1.9
 [0.1.8]: https://github.com/GlitterKill/scip-io/compare/v0.1.7...v0.1.8

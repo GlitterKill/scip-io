@@ -52,21 +52,26 @@ SCIP-IO currently orchestrates **11 languages** across **9 different indexers**:
 | Python       | `scip-python`     | npm                   | `*.py`, `*.pyw`, `pyproject.toml`, `setup.py`, `setup.cfg`, `requirements.txt`, `Pipfile` | Ready |
 | Rust         | `rust-analyzer`   | GitHub release (gz/zip) | `*.rs`, `Cargo.toml`, `rust-project.json` | `Cargo.toml` or `rust-project.json` preferred |
 | Go           | `scip-go`         | GitHub release (tar.gz) | `*.go`, `go.mod`                    | Ready |
-| Java         | `scip-java`       | Coursier launcher     | `*.java`, `pom.xml`, `build.gradle`   | Ready |
-| Scala        | `scip-java`       | Coursier launcher     | `*.scala`, `*.sbt`, `build.sbt`       | Ready |
-| Kotlin       | via `scip-java`   | compiler plugin       | `*.kt`, `*.kts`, `build.gradle.kts`, `settings.gradle.kts` | Ready |
+| Java         | `scip-java`       | managed launcher      | `*.java`, `pom.xml`, `build.gradle`   | Ready |
+| Scala        | `scip-java`       | managed launcher      | `*.scala`, `*.sbt`, `build.sbt`       | Ready |
+| Kotlin       | via `scip-java`   | managed launcher      | `*.kt`, `*.kts`, `build.gradle.kts`, `settings.gradle.kts` | Ready |
 | C#           | `scip-dotnet`     | `dotnet tool`         | `*.cs`, `*.csproj`, `*.sln`, `*.vbproj` | Ready |
 | Ruby         | `scip-ruby`       | GitHub release / WSL / Docker | `*.rb`, `Gemfile`             | Native Windows unsupported upstream; WSL/Docker backend on Windows |
 | C / C++      | `scip-clang`      | GitHub release / WSL / Docker | `*.c`, `*.h`, `*.cc`, `*.hh`, `*.cpp`, `*.hpp`, `*.cxx`, `*.hxx`, `*.S`, `Makefile*`, `Kbuild*`, `Kconfig*`, `CMakeLists.txt`, `compile_commands.json` | `compile_commands.json` required; native Windows unsupported upstream |
 
-SCIP-IO will also pick up any of these binaries already on your system `PATH` before downloading a fresh copy.
+SCIP-IO will also pick up supported indexers already on your system `PATH` before
+downloading a fresh copy. The managed `scip-java` repair is an exception.
 
-**Windows Gradle compatibility:** stock `scip-java` 0.12.3 writes unescaped
-Windows paths into its initialization script and bundles a Kotlin 2.1 plugin.
-The [upstream patches and verification](docs/windows-scip-java-gradle.md) fix
-path serialization and add Kotlin 2.3.21 compatibility. Both Java and Kotlin
-generation pass on pinned Moshi with the patched builds; these changes are
-local and unpublished. Detection readiness alone does not guarantee successful SCIP generation.
+**Managed `scip-java` repair:** SCIP-IO 0.2.1 downloads the
+pinned `scip-java-v0.12.3-scip-io.1` payload automatically for Java, Scala, and
+Kotlin. It fixes only the Windows Gradle path-serialization defect in upstream
+0.12.3. The default uses a separate versioned cache and verifies the downloaded
+files before use; it does not reuse an older cache entry or a `scip-java` on
+`PATH`. An explicit CLI `binary` configuration still takes precedence. This repair
+is not included in the v0.2.0 binaries and does not include the later
+Kotlin compatibility, range, or Gradle-script work. See the
+[distribution guide](docs/scip-java-distribution.md) and the
+[historical investigation](docs/windows-scip-java-gradle.md).
 
 When you opt in with `--include-additional-configs` or the GUI's Extra configs
 option, SCIP-IO also discovers secondary config files for indexers that accept
@@ -172,9 +177,20 @@ C/C++ file.
 
 SCIP-IO supports several install methods because no two SCIP indexers ship the same way:
 
+The managed `scip-java` repair is intentionally outside this general
+lookup: it installs only the pinned, hash-verified release payload. An explicit
+CLI `binary` configuration is still honored before that managed install.
+
 ```mermaid
 flowchart TD
-    Need[Need indexer X] --> OnPath{Already on<br/>system PATH?}
+    Need[Need indexer X] --> Java{Managed scip-java<br/>repair?}
+    Java -- Yes --> Override{Configured CLI binary?}
+    Override -- Yes --> Config[Use configured binary]
+    Override -- No --> RepairCached{Verified pinned<br/>cache?}
+    RepairCached -- Yes --> RepairUse[Use managed repair]
+    RepairCached -- No --> RepairDownload[Download and verify<br/>pinned payload]
+    RepairDownload --> RepairUse
+    Java -- No --> OnPath{Already on<br/>system PATH?}
     OnPath -- Yes --> Use[Use existing binary]
     OnPath -- No --> Cached{In local<br/>cache dir?}
     Cached -- Yes --> Use
@@ -198,6 +214,8 @@ flowchart TD
     DL7 --> Use
 
     style Use fill:#0a0e1b,stroke:#00ffcc,color:#00ffcc
+    style RepairUse fill:#0a0e1b,stroke:#00ffcc,color:#00ffcc
+    style Config fill:#0a0e1b,stroke:#00ffcc,color:#00ffcc
     style Fail fill:#0a0e1b,stroke:#ff3366,color:#ff3366
 ```
 

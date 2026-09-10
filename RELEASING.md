@@ -26,6 +26,11 @@ once the CLI surface is considered stable.
 
 ## Release checklist
 
+The scip-java backport has a separate artifact release. Follow
+[its distribution guide](docs/scip-java-distribution.md) and verify the public
+payload hashes before publishing an application release that selects it.
+The application release workflow must not be used for the `scip-java-*` tag.
+
 ### 1. Verify green main
 
 ```sh

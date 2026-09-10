@@ -1,17 +1,36 @@
 # Windows scip-java Gradle investigation
 
+## Managed distribution in SCIP-IO 0.2.1
+
+SCIP-IO 0.2.1 automatically installs the path-serialization
+repair as `scip-java-v0.12.3-scip-io.1` from
+[`GlitterKill/scip-io`](https://github.com/GlitterKill/scip-io). SCIP-IO v0.2.0 binaries still use their existing
+`scip-java` behavior.
+
+The managed payload is portable: non-Windows platforms install
+`bin/scip-java-v0.12.3-scip-io.1/scip-java`, while Windows also installs
+`bin/scip-java-v0.12.3-scip-io.1/scip-java.bat`. SCIP-IO downloads the same
+pinned payload for native platforms and WSL, verifies the payload SHA-256
+`76b02676b1fceea4627faca0c236213c98595f425af9052f1b0cfb04d2b4d0e2`, and on
+Windows verifies the launcher SHA-256
+`843319e0a3c57e588a0dd25edd2fee4621ec9cd152741d3128a5f5366264a593`. It checks
+those hashes both after download and whenever it reuses the managed cache.
+
+For the default command, SCIP-IO does not fall back to an older unmanaged cache
+entry or a `scip-java` found on `PATH`. An explicit CLI configured `binary` still
+overrides the managed repair. The release contains only the original Windows
+path-serialization repair. It does not distribute the later Kotlin
+compatibility, source-range, or Gradle-script patches, and this release
+does not establish a new full-project benchmark result. See the
+[scip-java distribution guide](scip-java-distribution.md) for installation
+behavior.
+
+## Historical investigation and verification
+
 The later [Gradle Kotlin DSL coverage follow-up](patches/README.md#gradle-kotlin-dsl-follow-up)
 adds compiler-backed build/settings scripts, source-range repairs, and typed script
-locals. The counts below describe the earlier compatibility verification.
-
-
-**Original compatibility verification: Java and Kotlin generation succeed with the upstream patches.** Each
-output contains 218 documents and 79,704 occurrences, with valid source ranges
-and cross-file definition/reference links. The patches and tested binaries are
-local and unpublished remotely. The latest verification resolves a distinct
-snapshot from a disposable Maven repository and uses an explicit launcher path;
-it does not substitute cached jars or installed launchers. The sections below
-retain the original evidence, followed by the versioned integration results.
+locals. The historical results below retain their original verification context;
+they do not describe the managed path-only payload.
 
 ## Reproduction
 
