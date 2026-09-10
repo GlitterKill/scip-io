@@ -7,17 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added
+## [0.2.2] - 2026-09-10
 
-- The current checkout pins `scip-java-v0.12.3-scip-io.2` for its next
-  separately versioned managed distribution. The rebuilt 0.12.3 payload
-  combines the Windows Gradle path repair with the Kotlin 2.3.21 compatibility,
-  SemanticDB source-range, and Gradle Kotlin DSL patches. It embeds the pinned
-  tested `semanticdb-kotlinc` JAR, so the plugin does not need an unpublished
-  Maven snapshot or `JAVA_TOOL_OPTIONS` at index time. The immutable `.1`
-  path-only release remains available for released SCIP-IO 0.2.1 binaries.
-  Application binaries are released separately. This does not establish a
-  full benchmark result.
+### Fixed
+
+- Normal Java, Kotlin, and Scala installations now select the published
+  `scip-java-v0.12.3-scip-io.2` distribution automatically. It includes the
+  Windows path repair, Kotlin 2.3.21 compiler compatibility, SemanticDB
+  source-range fixes, and Gradle Kotlin DSL indexing.
+- The compiler plugin is bundled in the CLI and Gradle plugin, so indexing
+  no longer requires the unpublished local Maven snapshot or a
+  `JAVA_TOOL_OPTIONS` override. Ordinary project dependencies resolve normally.
+- The new package retains checksum verification and a separate versioned cache.
+  Existing `.1` installations remain untouched. Compatibility is verified with
+  Moshi on Windows, project Kotlin 2.3.21, and Gradle 9.5.1; other compiler
+  combinations require separate qualification.
 
 ## [0.2.1] - 2026-09-09
 
@@ -348,7 +352,8 @@ Initial release.
 - **One-line install scripts** for the CLI on Linux/macOS (`install.sh`) and
   Windows (`install.ps1`).
 
-[Unreleased]: https://github.com/GlitterKill/scip-io/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/GlitterKill/scip-io/compare/v0.2.2...HEAD
+[0.2.2]: https://github.com/GlitterKill/scip-io/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/GlitterKill/scip-io/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/GlitterKill/scip-io/compare/v0.1.9...v0.2.0
 [0.1.9]: https://github.com/GlitterKill/scip-io/compare/v0.1.8...v0.1.9

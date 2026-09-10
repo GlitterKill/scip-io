@@ -357,7 +357,7 @@ artifacts remain available for Kotlin 2.1.20.
 The versioned local verification above uses a disposable Maven repository to
 let the rebuilt scip-java pack resolve the unpublished `scripts4` plugin. That
 is a build-time dependency for the local reproduction, not a requirement for
-the current checkout's managed distribution.
+SCIP-IO 0.2.2's managed distribution.
 
 `scip-java-v0.12.3-scip-io.2` packages the rebuilt v0.12.3 pack with the exact
 tested `semanticdb-kotlinc:0.5.1-kotlin-2.3.21-scripts4-SNAPSHOT` JAR. Its
@@ -366,9 +366,9 @@ The installed payload resolves that embedded JAR directly, so users do not need
 an unpublished Maven repository or `JAVA_TOOL_OPTIONS` for the plugin at index
 time. The indexed project can still resolve its own Gradle dependencies.
 
-The `.2` package retains the original `scip-java` and `scip-java.bat` installer
-names, but it has a new versioned cache directory and release tag. It is staged
-by `scripts/stage-scip-java-compat.py`; its payload SHA-256 is
+SCIP-IO 0.2.2 automatically installs the published `.2` package. It retains
+the original `scip-java` and `scip-java.bat` installer names, but it has a new
+versioned cache directory and release tag. Its payload SHA-256 is
 `6a348ada3570002344305e3cf20bc61c94e88a2f6220c298ef81b3980ab1f662`, while the
 batch-launcher SHA-256 stays
 `843319e0a3c57e588a0dd25edd2fee4621ec9cd152741d3128a5f5366264a593`. The

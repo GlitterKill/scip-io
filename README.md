@@ -73,11 +73,11 @@ Kotlin compatibility, range, or Gradle-script work. See the
 [distribution guide](docs/scip-java-distribution.md) and the
 [historical investigation](docs/windows-scip-java-gradle.md).
 
-**Kotlin compatibility distribution:** The current checkout selects
-`scip-java-v0.12.3-scip-io.2` for its next release. It rebuilds 0.12.3 with the
-path repair plus the tested Kotlin 2.3.21, source-range, and Gradle Kotlin DSL
-patches. Its payload embeds the exact tested SemanticDB Kotlin plugin JAR, so
-the plugin does not need the unpublished `scripts4` Maven snapshot or
+**Kotlin compatibility distribution:** SCIP-IO 0.2.2 automatically downloads
+the published `scip-java-v0.12.3-scip-io.2` payload. It rebuilds 0.12.3 with
+the path repair plus the tested Kotlin 2.3.21, source-range, and Gradle Kotlin
+DSL patches. Its payload embeds the exact tested SemanticDB Kotlin plugin JAR,
+so the plugin does not need the unpublished `scripts4` Maven snapshot or
 `JAVA_TOOL_OPTIONS` at index time. Gradle can still resolve the indexed
 project's normal dependencies from its configured repositories. The immutable
 `.1` release remains the default for released SCIP-IO 0.2.1 binaries.

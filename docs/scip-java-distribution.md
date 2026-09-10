@@ -29,12 +29,12 @@ comparison. See [the investigation](windows-scip-java-gradle.md).
 
 ## Kotlin compatibility distribution
 
-The current checkout pins `scip-java-v0.12.3-scip-io.2` for its next separately
-versioned distribution. It rebuilds the upstream v0.12.3 pack with the Windows
-path repair, Kotlin 2.3.21 compiler compatibility, SemanticDB source-range
-repair, and Gradle Kotlin DSL script-indexing patches. It retains the same
-installer asset names, `scip-java` and `scip-java.bat`, but uses its own
-versioned directory and tag.
+SCIP-IO 0.2.2 automatically installs the published
+`scip-java-v0.12.3-scip-io.2` distribution. It rebuilds the upstream v0.12.3
+pack with the Windows path repair, Kotlin 2.3.21 compiler compatibility,
+SemanticDB source-range repair, and Gradle Kotlin DSL script-indexing patches.
+It retains the same installer asset names, `scip-java` and `scip-java.bat`, but
+uses its own versioned directory and tag.
 
 | Asset | SHA-256 |
 | --- | --- |
@@ -56,20 +56,19 @@ serve released SCIP-IO 0.2.1 binaries.
 
 ## Installation and migration
 
-Released SCIP-IO 0.2.1 binaries select `.1`. The current checkout selects `.2`
-once its separately published assets are available. Native installation and
-Linux backend downloads share the selected payload and pin. Version resolution
-does not follow the application's latest GitHub release. Explicit configured
-CLI indexer binaries continue to bypass automatic installation.
+Released SCIP-IO 0.2.1 binaries select `.1`; SCIP-IO 0.2.2 selects the
+published `.2` payload. Native installation and Linux backend downloads share
+the selected payload and pin. Version resolution does not follow the
+application's latest GitHub release. Explicit configured CLI indexer binaries
+continue to bypass automatic installation.
 
-Files live under `<managed-bin>/scip-java-v0.12.3-scip-io.1/` for released
-0.2.1, or `<managed-bin>/scip-java-v0.12.3-scip-io.2/` for the current
-checkout. The old unversioned cache and system PATH cannot satisfy either pin.
-They remain untouched. Windows requires both the companion payload and batch
-launcher. Downloads are staged together, checked against the compiled-in
-hashes, then published with a directory rename. Failed downloads do not publish
-a partial installation. Subsequent native installations verify the cached bytes
-before execution.
+Files live under `<managed-bin>/scip-java-v0.12.3-scip-io.1/` for 0.2.1 or
+`<managed-bin>/scip-java-v0.12.3-scip-io.2/` for 0.2.2. The old unversioned
+cache and system PATH cannot satisfy either pin. They remain untouched. Windows
+requires both the companion payload and batch launcher. Downloads are staged
+together, checked against the compiled-in hashes, then published with a
+directory rename. Failed downloads do not publish a partial installation.
+Subsequent native installations verify the cached bytes before execution.
 
 A checksum mismatch is an error, never a fallback to the old launcher. If a
 versioned cache was manually changed or truncated, restore the exact release
@@ -168,8 +167,7 @@ logs are under
 
 This validation does not establish a completed benchmark.
 
-When `.2` is approved for publication, publish its staged files under
-`scip-java-v0.12.3-scip-io.2`. Do not use the application release workflow for
-this tag. Download the public assets and verify their hashes before releasing
-the consuming SCIP-IO version. Do not replace an existing tag's payload with
-different bytes; use a new distribution version and update the pins instead.
+The published `.2` assets use the separate
+`scip-java-v0.12.3-scip-io.2` tag. Do not use the application release workflow
+for this tag. Do not replace an existing tag's payload with different bytes;
+use a new distribution version and update the pins instead.
