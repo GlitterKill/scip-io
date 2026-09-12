@@ -209,6 +209,27 @@ mod tests {
     }
 
     #[test]
+    fn resolves_python_stub_manifest_without_dropping_files() {
+        let dir = TempDir::new().unwrap();
+        let paths = ["ops.py", "_typed_ops.pyi", "UPPER.PYI"];
+        for path in paths {
+            fs::write(dir.path().join(path), "").unwrap();
+        }
+        let manifest = dir.path().join("files.txt");
+        fs::write(&manifest, paths.join("\n")).unwrap();
+        let inputs = read_explicit_file_list(&manifest).unwrap();
+        let selection = resolve_explicit_file_selection(dir.path(), &inputs).unwrap();
+
+        assert_eq!(selection.project_relative_files(dir.path(), &[]), inputs);
+        assert!(
+            selection
+                .files()
+                .iter()
+                .all(|file| file.language_kind == LanguageKind::Python)
+        );
+    }
+
+    #[test]
     fn rejects_files_outside_repo_root() {
         let dir = TempDir::new().unwrap();
         let root = dir.path().join("repo");

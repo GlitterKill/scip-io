@@ -1025,6 +1025,9 @@ fn apply_npm_compatibility_repairs(
     package: &str,
 ) -> Result<()> {
     if entry.indexer_name == "scip-python" {
+        if repair_scip_python_explicit_targets_and_members(prefix_dir, package)? {
+            tracing::info!("repaired explicit Python targets and member symbol identities");
+        }
         if repair_scip_python_wildcard_symbol_cache(prefix_dir, package)? {
             tracing::info!(
                 indexer = %entry.indexer_name,
@@ -1053,6 +1056,51 @@ fn apply_npm_compatibility_repairs(
     }
 
     Ok(())
+}
+
+fn repair_scip_python_explicit_targets_and_members(
+    prefix_dir: &Path,
+    package: &str,
+) -> Result<bool> {
+    let bundle = npm_package_dir(prefix_dir, package).join("dist/scip-python.js");
+    let mut source = match std::fs::read_to_string(&bundle) {
+        Ok(source) => source,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(err) => return Err(err).with_context(|| format!("Cannot read {}", bundle.display())),
+    };
+    let repairs = [
+        // Explicit file shards must bypass default dot-directory exclusions.
+        // Directory targets and ordinary scans retain configured exclusions.
+        (
+            "e.targetOnly=l.resolve(e.targetOnly);const t=new Set;",
+            r#"e.targetOnly=l.resolve(e.targetOnly);if(/\.(py|pyi|pyw)$/i.test(e.targetOnly)&&require("fs").existsSync(e.targetOnly)&&require("fs").statSync(e.targetOnly).isFile())this.projectFiles.add(e.targetOnly);const t=new Set;"#,
+        ),
+        // A module-level annotation already owns the term name. Skip that
+        // wrapper when selecting its owner to avoid `value.value.` identities.
+        (
+            "p.makeTerm(this.getScipSymbol(t||e),i.value)}case 54:",
+            "p.makeTerm(this.getScipSymbol(t||(54===e.nodeType&&e.valueExpression===i?e.parent:e)),i.value)}case 54:",
+        ),
+        // Slot declarations live on string nodes; walking to their parent
+        // otherwise produces the class symbol instead of its named field.
+        (
+            "if(!t.node)return this.emitDeclarationWithoutNode(e,t);const n=this.rawGetLsifSymbol(t.node);",
+            r#"if(!t.node)return this.emitDeclarationWithoutNode(e,t);if(1===t.type&&t.isDefinedBySlots&&48===t.node.nodeType){const n=y.getEnclosingClass(t.node);if(n){const s=p.makeTerm(this.getScipSymbol(n),t.node.strings.map((e=>e.value)).join(""));return this.rawSetLsifSymbol(t.node,s,s.isLocal()),this.pushNewOccurrence(e,s),!0}}const n=this.rawGetLsifSymbol(t.node);"#,
+        ),
+    ];
+    let mut changed = false;
+    for (broken, fixed) in repairs {
+        if source.contains(broken) {
+            source = source.replace(broken, fixed);
+            changed = true;
+        }
+    }
+    if !changed {
+        return Ok(false);
+    }
+    std::fs::write(&bundle, source)
+        .with_context(|| format!("Cannot write {}", bundle.display()))?;
+    Ok(true)
 }
 
 fn repair_scip_python_wildcard_symbol_cache(prefix_dir: &Path, package: &str) -> Result<bool> {
@@ -1281,6 +1329,8 @@ pub async fn install_indexer(
 
 #[cfg(test)]
 mod tests {
+    // Real-emitter checks repair the same caller-provided disposable npm prefix.
+    static PYTHON_EMITTER_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     use super::*;
     use crate::indexer::backend::BackendCapabilities;
     use std::io::Write;
@@ -1829,9 +1879,91 @@ mod tests {
     /// Uses a disposable npm prefix because this exercises the real bundle repair.
     #[test]
     #[ignore = "requires Node, Python and SCIP_IO_TEST_PYTHON_NPM_PREFIX with scip-python 0.6.6"]
+    fn repaired_python_emits_explicit_file_and_member_identities() -> Result<()> {
+        use protobuf::Message;
+
+        let _guard = PYTHON_EMITTER_TEST_LOCK.lock().unwrap();
+        let prefix = PathBuf::from(std::env::var("SCIP_IO_TEST_PYTHON_NPM_PREFIX")?);
+        let entry = crate::indexer::registry::REGISTRY
+            .all()
+            .iter()
+            .find(|entry| entry.indexer_name == "scip-python")
+            .unwrap();
+        apply_npm_compatibility_repairs(entry, &prefix, "@sourcegraph/scip-python")?;
+        let dir = tempfile::tempdir()?;
+        std::fs::create_dir_all(dir.path().join(".github/workflows"))?;
+        std::fs::write(
+            dir.path().join(".github/workflows/tool.py"),
+            "def hidden(): pass\nhidden()\nvalue: int = 1\nprint(value)\nclass Adapter:\n    __slots__ = ('array', 'indexer_cls')\n    def read(self, key):\n        return self.array[self.indexer_cls(key)]\nclass Child(Adapter):\n    def read(self, key):\n        return self.indexer_cls(key)\n",
+        )?;
+        std::fs::write(dir.path().join("environment.json"), "[]")?;
+        let output = hidden_tokio_command(which::which("node")?)
+            .as_std_mut()
+            .arg(npm_package_dir(&prefix, "@sourcegraph/scip-python").join("index.js"))
+            .args([
+                "index",
+                "--target-only",
+                ".github/workflows/tool.py",
+                "--project-name",
+                "hidden-repro",
+                "--project-version",
+                "1.0",
+                "--environment",
+                "environment.json",
+                "--output",
+                "index.scip",
+            ])
+            .current_dir(dir.path())
+            .output()?;
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let index =
+            scip::types::Index::parse_from_bytes(&std::fs::read(dir.path().join("index.scip"))?)?;
+        assert_eq!(
+            index.documents.len(),
+            1,
+            "explicit hidden target was excluded"
+        );
+        assert!(
+            index.documents[0]
+                .occurrences
+                .iter()
+                .any(|occ| occ.range.first() == Some(&1) && occ.symbol.ends_with("hidden()."))
+        );
+        for (line, start, suffix) in [
+            (3, 6, "/value."),
+            (7, 20, "Adapter#array."),
+            (7, 31, "Adapter#indexer_cls."),
+            (10, 20, "Adapter#indexer_cls."),
+        ] {
+            let occurrence = index.documents[0]
+                .occurrences
+                .iter()
+                .find(|occ| occ.range.first() == Some(&line) && occ.range.get(1) == Some(&start))
+                .unwrap();
+            assert!(
+                occurrence.symbol.ends_with(suffix),
+                "expected {suffix}, got {}",
+                occurrence.symbol
+            );
+        }
+        assert!(!repair_scip_python_explicit_targets_and_members(
+            &prefix,
+            "@sourcegraph/scip-python"
+        )?);
+        Ok(())
+    }
+
+    /// Uses a disposable npm prefix because this exercises the real bundle repair.
+    #[test]
+    #[ignore = "requires Node, Python and SCIP_IO_TEST_PYTHON_NPM_PREFIX with scip-python 0.6.6"]
     fn repaired_python_emits_distinct_wildcard_targets() -> Result<()> {
         use protobuf::Message;
 
+        let _guard = PYTHON_EMITTER_TEST_LOCK.lock().unwrap();
         let prefix = PathBuf::from(std::env::var("SCIP_IO_TEST_PYTHON_NPM_PREFIX")?);
         let entry = crate::indexer::registry::REGISTRY
             .all()

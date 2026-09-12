@@ -49,7 +49,7 @@ SCIP-IO currently orchestrates **11 languages** across **9 different indexers**:
 |--------------|-------------------|-----------------------|---------------------------------------|-------------------|
 | TypeScript   | `scip-typescript` | npm                   | `*.ts`, `*.tsx`, `tsconfig.json`, `tsconfig.*.json` | Ready |
 | JavaScript   | `scip-typescript` | npm                   | `*.js`, `*.jsx`, `*.mjs`, `*.cjs`, `package.json` | Ready |
-| Python       | `scip-python`     | npm                   | `*.py`, `*.pyw`, `pyproject.toml`, `setup.py`, `setup.cfg`, `requirements.txt`, `Pipfile` | Ready |
+| Python       | `scip-python`     | npm                   | `*.py`, `*.pyi`, `*.pyw`, `pyproject.toml`, `setup.py`, `setup.cfg`, `requirements.txt`, `Pipfile` | Ready |
 | Rust         | `rust-analyzer`   | GitHub release (gz/zip) | `*.rs`, `Cargo.toml`, `rust-project.json` | `Cargo.toml` or `rust-project.json` preferred |
 | Go           | `scip-go`         | GitHub release (tar.gz) | `*.go`, `go.mod`                    | Ready |
 | Java         | `scip-java`       | managed launcher      | `*.java`, `pom.xml`, `build.gradle`   | Ready |
@@ -250,15 +250,19 @@ It also repairs the 0.6.6 emitter's wildcard-import symbol cache: functions
 re-exported through `from module import *` retain their own targets instead of
 pointing to the first function resolved from that import. Both fresh and existing
 managed installs receive the repair; custom indexer binaries remain caller-managed.
+Managed 0.6.6 installs also honor explicit Python file targets under hidden
+directories and emit distinct slot attributes and module-level annotated variables.
+Python `.pyi` stubs are accepted in explicit file manifests and detected as Python.
 On Windows, it additionally repairs the upstream `path.sep` regex crash before
 running the indexer.
 
 To check the Python emitter against a real npm package, install
 `@sourcegraph/scip-python@0.6.6` into a disposable npm prefix, set
 `SCIP_IO_TEST_PYTHON_NPM_PREFIX` to its absolute path, and run
-`cargo test -p scip-io-core repaired_python_emits_distinct_wildcard_targets -- --ignored`.
+`cargo test -p scip-io-core repaired_python_ -- --ignored`.
 This check requires Node.js and Python, repairs that disposable package, and
-verifies callable targets in raw SCIP output for re-exports, aliases and repeated calls.
+verifies raw SCIP identities for re-exports, aliases, repeated calls, inherited
+slots, annotated variables, and an explicit file under a hidden directory.
 
 ### Windows Linux Backends
 

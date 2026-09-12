@@ -194,7 +194,7 @@ impl LanguageKind {
         match self {
             Self::TypeScript => matches!(extension.as_deref(), Some("ts" | "tsx")),
             Self::JavaScript => matches!(extension.as_deref(), Some("js" | "jsx" | "mjs" | "cjs")),
-            Self::Python => matches!(extension.as_deref(), Some("py" | "pyw")),
+            Self::Python => matches!(extension.as_deref(), Some("py" | "pyi" | "pyw")),
             Self::Rust => matches!(extension.as_deref(), Some("rs")),
             Self::Go => matches!(extension.as_deref(), Some("go")),
             Self::Java => matches!(extension.as_deref(), Some("java")),

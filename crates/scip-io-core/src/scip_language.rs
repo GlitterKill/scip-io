@@ -69,7 +69,7 @@ pub fn infer_language_from_document_path(relative_path: &str) -> Option<&'static
     match extension.as_str() {
         "ts" | "tsx" | "mts" | "cts" => Some("typescript"),
         "js" | "jsx" | "mjs" | "cjs" => Some("javascript"),
-        "py" | "pyw" => Some("python"),
+        "py" | "pyi" | "pyw" => Some("python"),
         "rs" => Some("rust"),
         "go" => Some("go"),
         "java" => Some("java"),
@@ -724,6 +724,13 @@ mod tests {
     use super::*;
     use scip::types::{Document, Occurrence, SymbolInformation};
     use tempfile::NamedTempFile;
+
+    #[test]
+    fn infers_python_stub_language() {
+        for path in ["xarray/core/_typed_ops.pyi", "pkg/UPPER.PYI"] {
+            assert_eq!(infer_language_from_document_path(path), Some("python"));
+        }
+    }
 
     #[test]
     fn infers_languages_from_common_extensions() {
