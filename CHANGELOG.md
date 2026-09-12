@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.3] - 2026-09-11
+
+### Fixed
+
+- Repair the `scip-python` 0.6.6 emitter's wildcard-import symbol cache.
+  Functions re-exported through `from module import *` now retain their own
+  targets instead of pointing to the first function resolved from the import.
+  Both fresh and existing managed npm installations receive the repair;
+  custom indexer binaries remain caller-managed.
+- Add regression coverage for existing-install repair and idempotence, plus
+  a real-emitter check for re-exports, aliases, and repeated calls. All five
+  reported Seaborn target mismatches are corrected in fresh raw SCIP output.
+
 ## [0.2.2] - 2026-09-10
 
 ### Fixed

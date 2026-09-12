@@ -246,8 +246,19 @@ tools separately, and offers per-indexer or bulk updates for managed installs
 when a newer compatible version is available.
 SCIP-IO also repairs managed `scip-python` npm installs affected by the
 embedded Pyright wildcard-import assertion that can fail large Python indexes.
+It also repairs the 0.6.6 emitter's wildcard-import symbol cache: functions
+re-exported through `from module import *` retain their own targets instead of
+pointing to the first function resolved from that import. Both fresh and existing
+managed installs receive the repair; custom indexer binaries remain caller-managed.
 On Windows, it additionally repairs the upstream `path.sep` regex crash before
 running the indexer.
+
+To check the Python emitter against a real npm package, install
+`@sourcegraph/scip-python@0.6.6` into a disposable npm prefix, set
+`SCIP_IO_TEST_PYTHON_NPM_PREFIX` to its absolute path, and run
+`cargo test -p scip-io-core repaired_python_emits_distinct_wildcard_targets -- --ignored`.
+This check requires Node.js and Python, repairs that disposable package, and
+verifies callable targets in raw SCIP output for re-exports, aliases and repeated calls.
 
 ### Windows Linux Backends
 

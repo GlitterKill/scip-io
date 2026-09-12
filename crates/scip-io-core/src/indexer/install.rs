@@ -1025,6 +1025,12 @@ fn apply_npm_compatibility_repairs(
     package: &str,
 ) -> Result<()> {
     if entry.indexer_name == "scip-python" {
+        if repair_scip_python_wildcard_symbol_cache(prefix_dir, package)? {
+            tracing::info!(
+                indexer = %entry.indexer_name,
+                "repaired wildcard import symbol caching in Python SCIP emitter"
+            );
+        }
         let wildcard_import_repaired =
             repair_scip_python_pyright_wildcard_import_assert(prefix_dir, package)?;
         if wildcard_import_repaired {
@@ -1047,6 +1053,30 @@ fn apply_npm_compatibility_repairs(
     }
 
     Ok(())
+}
+
+fn repair_scip_python_wildcard_symbol_cache(prefix_dir: &Path, package: &str) -> Result<bool> {
+    let bundle = npm_package_dir(prefix_dir, package)
+        .join("dist")
+        .join("scip-python.js");
+    let source = match std::fs::read_to_string(&bundle) {
+        Ok(source) => source,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(err) => return Err(err).with_context(|| format!("Cannot read {}", bundle.display())),
+    };
+    let broken = "rawSetLsifSymbol(e,t,i){i?this.documentSymbols.set(e.id,t):this.globalSymbols.set(e.id,t)}";
+    let fixed = "rawSetLsifSymbol(e,t,i){if(e.isWildcardImport)return;i?this.documentSymbols.set(e.id,t):this.globalSymbols.set(e.id,t)}";
+    if !source.contains(broken) {
+        return Ok(false);
+    }
+
+    // All names from `from module import *` share one declaration node. Caching
+    // by that node's id makes later names point to the first resolved symbol.
+    // Skip these cache writes so Pyright resolves each name independently;
+    // ordinary declarations retain their existing cache and emitted identities.
+    std::fs::write(&bundle, source.replace(broken, fixed))
+        .with_context(|| format!("Cannot write {}", bundle.display()))?;
+    Ok(true)
 }
 
 fn repair_scip_python_pyright_wildcard_import_assert(
@@ -1745,7 +1775,7 @@ mod tests {
         std::fs::create_dir_all(bundle.parent().unwrap()).unwrap();
         std::fs::write(
             &bundle,
-            r#"const o={sep:"\\"};const a=new RegExp(o.sep,"g");"#,
+            r#"const o={sep:"\\"};const a=new RegExp(o.sep,"g");rawSetLsifSymbol(e,t,i){i?this.documentSymbols.set(e.id,t):this.globalSymbols.set(e.id,t)}"#,
         )
         .unwrap();
         let pyright_bundle = super::super::npm_package_dir(&prefix_dir, "@sourcegraph/scip-python")
@@ -1773,8 +1803,10 @@ mod tests {
         repair_existing_indexer_from(&entry, &install_root).unwrap();
 
         let contents = std::fs::read_to_string(&bundle).unwrap();
-        // Existing npm installs are only patched on Windows, where the
-        // scip-python bundle builds an invalid regex from `path.sep`.
+        // Wildcard declarations represent multiple imported symbols, so they
+        // must not populate the emitter's node-id cache on any platform.
+        assert!(contents.contains("rawSetLsifSymbol(e,t,i){if(e.isWildcardImport)return;"));
+        // The path separator repair is Windows-specific.
         if cfg!(windows) {
             assert!(
                 contents.contains(r#"new RegExp(o.sep.replace(/[.*+?^${}()|[\]\\]/g,"\\$&"),"g")"#)
@@ -1788,5 +1820,97 @@ mod tests {
             r#"const i=(0,r.getImportInfo)(t.node.module);(0,s.assert)(t.node.isWildcardImport);"#
         ));
         assert!(!pyright_contents.contains(r#"void 0!==i&&i.isImportFound"#));
+        assert!(
+            !repair_scip_python_wildcard_symbol_cache(&prefix_dir, "@sourcegraph/scip-python")
+                .unwrap()
+        );
+    }
+
+    /// Uses a disposable npm prefix because this exercises the real bundle repair.
+    #[test]
+    #[ignore = "requires Node, Python and SCIP_IO_TEST_PYTHON_NPM_PREFIX with scip-python 0.6.6"]
+    fn repaired_python_emits_distinct_wildcard_targets() -> Result<()> {
+        use protobuf::Message;
+
+        let prefix = PathBuf::from(std::env::var("SCIP_IO_TEST_PYTHON_NPM_PREFIX")?);
+        let entry = crate::indexer::registry::REGISTRY
+            .all()
+            .iter()
+            .find(|entry| entry.indexer_name == "scip-python")
+            .unwrap();
+        apply_npm_compatibility_repairs(entry, &prefix, "@sourcegraph/scip-python")?;
+
+        let dir = tempfile::tempdir()?;
+        std::fs::create_dir(dir.path().join("example"))?;
+        std::fs::write(
+            dir.path().join("example/functions.py"),
+            "def first(): pass\ndef second(): pass\ndef third(): pass\n",
+        )?;
+        std::fs::write(
+            dir.path().join("example/__init__.py"),
+            "from .functions import *\n",
+        )?;
+        // Repeated calls, re-exports, explicit aliases and local wildcard imports
+        // must all retain the declaration's identity, regardless of visit order.
+        std::fs::write(
+            dir.path().join("consumer.py"),
+            "import example as e\ne.first()\ne.second()\ne.third()\ne.second()\nfrom example import second as alias\nalias()\nfrom example.functions import *\nthird()\nfirst()\n",
+        )?;
+        std::fs::write(dir.path().join("environment.json"), "[]")?;
+        let output = hidden_tokio_command(which::which("node")?)
+            .as_std_mut()
+            .arg(npm_package_dir(&prefix, "@sourcegraph/scip-python").join("index.js"))
+            .args([
+                "index",
+                ".",
+                "--project-name",
+                "wildcard-repro",
+                "--project-version",
+                "1.0",
+                "--environment",
+                "environment.json",
+                "--output",
+                "index.scip",
+            ])
+            .current_dir(dir.path())
+            .output()?;
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let index =
+            scip::types::Index::parse_from_bytes(&std::fs::read(dir.path().join("index.scip"))?)?;
+        let doc = index
+            .documents
+            .iter()
+            .find(|doc| doc.relative_path == "consumer.py")
+            .unwrap();
+        for (line, name) in [
+            (1, "first"),
+            (2, "second"),
+            (3, "third"),
+            (4, "second"),
+            (6, "second"),
+            (8, "third"),
+            (9, "first"),
+        ] {
+            let targets: Vec<_> = doc
+                .occurrences
+                .iter()
+                .filter(|occ| occ.range.first() == Some(&line) && occ.symbol.ends_with("()."))
+                .map(|occ| occ.symbol.as_str())
+                .collect();
+            assert_eq!(
+                targets,
+                [format!(
+                    "scip-python python wildcard-repro 1.0 `example.functions`/{name}()."
+                )],
+                "line {}",
+                line + 1
+            );
+        }
+        Ok(())
     }
 }
