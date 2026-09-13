@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.5] - 2026-09-13
+
+### Fixed
+
+- Preserve documentation and inheritance metadata for forward-referenced Python classes.
+- Emit metadata for nonlocal annotations, nested/starred destructuring, loop targets,
+  with aliases, exception aliases, assignment expressions, and pattern captures in
+  managed `scip-python` 0.6.6. Generic binding repair retains emitted identities and
+  ranges, including when hover documentation is unavailable.
+- Keep ignored `_` destructuring and loop targets free of orphan metadata.
+  Assignment-target repair intentionally corrects builtin-shadowing targets such as
+  `for int in [1]` to the bound variable while retaining source ranges.
+- Apply repairs to fresh and existing managed installs. Add raw-emitter regression
+  checks for unique metadata, unchanged generic occurrences, missing documentation,
+  builtin shadowing, and the separately unresolved invalid starred fixture.
+  Qualification gates remain unchanged.
+
 ## [0.2.4] - 2026-09-12
 
 ### Fixed
