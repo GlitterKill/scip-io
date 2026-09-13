@@ -252,6 +252,20 @@ pointing to the first function resolved from that import. Both fresh and existin
 managed installs receive the repair; custom indexer binaries remain caller-managed.
 Managed 0.6.6 installs also honor explicit Python file targets under hidden
 directories and emit distinct slot attributes and module-level annotated variables.
+They preserve class documentation and inheritance metadata when a same-file
+forward reference resolves the class before its declaration is visited.
+They also emit metadata for nonlocal annotated bindings, nested or starred
+destructuring, loop targets, `with` aliases, exception aliases, assignment
+expressions, and pattern captures. Generic binding metadata retains the emitter's
+resolved identities and source ranges, even when hover documentation is unavailable.
+Assignment-target repair also corrects builtin-shadowing identities: for example,
+`for int in [1]` and its reads resolve to the bound variable instead of builtin
+`int`, retaining their source ranges. Destructuring and loop targets named `_`
+remain ignored, matching the emitter's name visitor. Local identifiers,
+attribute targets, and subscript targets keep their existing behavior.
+The invalid standalone starred assignment (`*FIRST = [1, 2, 3]`) remains a separate
+parser-recovery case with unresolved metadata; this repair does not change
+qualification gates or make that fixture complete.
 Python `.pyi` stubs are accepted in explicit file manifests and detected as Python.
 On Windows, it additionally repairs the upstream `path.sep` regex crash before
 running the indexer.
@@ -262,7 +276,10 @@ To check the Python emitter against a real npm package, install
 `cargo test -p scip-io-core repaired_python_ -- --ignored`.
 This check requires Node.js and Python, repairs that disposable package, and
 verifies raw SCIP identities for re-exports, aliases, repeated calls, inherited
-slots, annotated variables, and an explicit file under a hidden directory.
+slots, annotated variables, an explicit file under a hidden directory, and
+metadata for a forward-referenced class. Binding coverage compares raw occurrences
+before and after repair, checks metadata uniqueness and missing-documentation
+behavior, and retains the invalid starred fixture as an unresolved control.
 
 ### Windows Linux Backends
 

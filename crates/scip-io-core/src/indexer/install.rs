@@ -1087,6 +1087,38 @@ fn repair_scip_python_explicit_targets_and_members(
             "if(!t.node)return this.emitDeclarationWithoutNode(e,t);const n=this.rawGetLsifSymbol(t.node);",
             r#"if(!t.node)return this.emitDeclarationWithoutNode(e,t);if(1===t.type&&t.isDefinedBySlots&&48===t.node.nodeType){const n=y.getEnclosingClass(t.node);if(n){const s=p.makeTerm(this.getScipSymbol(n),t.node.strings.map((e=>e.value)).join(""));return this.rawSetLsifSymbol(t.node,s,s.isLocal()),this.pushNewOccurrence(e,s),!0}}const n=this.rawGetLsifSymbol(t.node);"#,
         ),
+        // A same-file forward reference caches a class before its declaration.
+        // Let its first definition emit the existing documentation/relationships;
+        // cached references and definitions with metadata retain the fast path.
+        (
+            "const n=this.rawGetLsifSymbol(t.node);if(n){",
+            "const n=this.rawGetLsifSymbol(t.node);if(n&&!(10===t.node.nodeType&&t.node.id===s.id&&!this.document.symbols.some(e=>e.symbol===n.value))){",
+        ),
+        // Annotated and destructured bindings bypass the simple Name visitor.
+        // Follow binding containers only, resolve the first declaration, and reuse
+        // the emitter's metadata helper; attributes/subscripts are not bindings.
+        (
+            r#"visitTypeAnnotation(e){if(y.getEnclosingClass(e,!0)){"#,
+            r#"visitTypeAnnotation(e){if(38===e.valueExpression.nodeType&&!y.getEnclosingClass(e,!0))return this.emitAssignmentTarget(e.valueExpression),!0;if(y.getEnclosingClass(e,!0)){"#,
+        ),
+        (
+            r#"visitAssignment(e){if(38==e.leftExpression.nodeType){"#,
+            r#"visitFor(e){return this.emitAssignmentTarget(e.targetExpression),!0}emitAssignmentTarget(e){if(52===e.nodeType||31===e.nodeType){for(const t of 52===e.nodeType?e.expressions:e.entries)this.emitAssignmentTarget(t)}else if(56===e.nodeType)this.emitAssignmentTarget(e.expression);else if(38===e.nodeType){if(y.getEnclosingSuite(e)&&(y.getEnclosingFunction(e)||y.getEnclosingLambda(e)))return;const t=(this.evaluator.getDeclarationsForNameNode(e)||[])[0];if(t&&t.node&&t.node.id===e.id){const i=this.getScipSymbol(e);i.isLocal()||this.document.symbols.some(e=>e.symbol===i.value)||this.emitSymbolInformationOnce(e,i)}}}visitAssignment(e){if(52===e.leftExpression.nodeType||31===e.leftExpression.nodeType)this.emitAssignmentTarget(e.leftExpression);if(38==e.leftExpression.nodeType){"#,
+        ),
+        // Upgrade existing repaired bundles too: visitName deliberately ignores `_`.
+        (
+            "else if(38===e.nodeType){if(y.getEnclosingSuite(e)",
+            "else if(38===e.nodeType){if(\"_\"===e.value)return;if(y.getEnclosingSuite(e)",
+        ),
+        // Generic Name declarations emit occurrences on both cached and uncached
+        // paths. Add metadata afterwards using that exact identity. Restrict this
+        // to valid binding forms; standalone starred-assignment recovery is not
+        // a supported binding. Locals and member/index targets remain untouched.
+        // Hover/docstrings are optional: a proven definition still owns metadata.
+        (
+            "return this.emitDeclaration(e,i)}rawGetLsifSymbol(e){",
+            r#"const s=this.emitDeclaration(e,i);return this.emitBindingMetadata(e,i),s}emitBindingMetadata(e,t){if(1!==t.type||!t.node||t.node.id!==e.id)return;let i=e;for(;i.parent&&[31,52,56].includes(i.parent.nodeType);)i=i.parent;const s=i.parent;if(!s||![4,25,59,66,69,72].includes(s.nodeType))return;const n=this.rawGetLsifSymbol(e);if(!n||n.isLocal()||this.document.symbols.some(e=>e.symbol===n.value))return;this.emitSymbolInformationOnce(e,n);this.document.symbols.some(e=>e.symbol===n.value)||this.document.symbols.push(new h.scip.SymbolInformation({symbol:n.value}))}rawGetLsifSymbol(e){"#,
+        ),
     ];
     let mut changed = false;
     for (broken, fixed) in repairs {
@@ -1825,7 +1857,7 @@ mod tests {
         std::fs::create_dir_all(bundle.parent().unwrap()).unwrap();
         std::fs::write(
             &bundle,
-            r#"const o={sep:"\\"};const a=new RegExp(o.sep,"g");rawSetLsifSymbol(e,t,i){i?this.documentSymbols.set(e.id,t):this.globalSymbols.set(e.id,t)}"#,
+            r#"const o={sep:"\\"};const a=new RegExp(o.sep,"g");rawSetLsifSymbol(e,t,i){i?this.documentSymbols.set(e.id,t):this.globalSymbols.set(e.id,t)}return this.emitDeclaration(e,i)}rawGetLsifSymbol(e){"#,
         )
         .unwrap();
         let pyright_bundle = super::super::npm_package_dir(&prefix_dir, "@sourcegraph/scip-python")
@@ -1856,6 +1888,14 @@ mod tests {
         // Wildcard declarations represent multiple imported symbols, so they
         // must not populate the emitter's node-id cache on any platform.
         assert!(contents.contains("rawSetLsifSymbol(e,t,i){if(e.isWildcardImport)return;"));
+        assert!(contents.contains("this.emitBindingMetadata(e,i),s}"));
+        assert!(
+            !repair_scip_python_explicit_targets_and_members(
+                &prefix_dir,
+                "@sourcegraph/scip-python"
+            )
+            .unwrap()
+        );
         // The path separator repair is Windows-specific.
         if cfg!(windows) {
             assert!(
@@ -1876,6 +1916,269 @@ mod tests {
         );
     }
 
+    /// Compare raw occurrences before/after repair; emitter success alone is insufficient.
+    #[test]
+    #[ignore = "requires Node, Python and SCIP_IO_TEST_PYTHON_NPM_PREFIX with scip-python 0.6.6"]
+    fn repaired_python_emits_binding_metadata() -> Result<()> {
+        use protobuf::Message;
+
+        let _guard = PYTHON_EMITTER_TEST_LOCK.lock().unwrap();
+        let prefix = PathBuf::from(std::env::var("SCIP_IO_TEST_PYTHON_NPM_PREFIX")?);
+        let bundle =
+            npm_package_dir(&prefix, "@sourcegraph/scip-python").join("dist/scip-python.js");
+        let entry = crate::indexer::registry::REGISTRY
+            .all()
+            .iter()
+            .find(|entry| entry.indexer_name == "scip-python")
+            .unwrap();
+        apply_npm_compatibility_repairs(entry, &prefix, "@sourcegraph/scip-python")?;
+        let source = std::fs::read_to_string(&bundle)?;
+        let dir = tempfile::tempdir()?;
+        let fixture = r#"from contextlib import nullcontext
+ordinary = 1
+with nullcontext(1) as context_value:
+    print(context_value)
+with nullcontext((1, 2)) as (with_first, with_second):
+    print(with_first, with_second)
+try:
+    raise ValueError()
+except ValueError as exception_value:
+    print(exception_value)
+if (walrus_value := 1):
+    print(walrus_value)
+match [1, 2]:
+    case [first_value, *remaining_values]:
+        print(first_value, remaining_values)
+match {}:
+    case {"key": mapping_value, **mapping_rest}:
+        print(mapping_value, mapping_rest)
+match 1:
+    case int() as as_value:
+        print(as_value)
+match (1,):
+    case tuple(class_value):
+        print(class_value)
+def forward():
+    return cached_value
+with nullcontext(1) as cached_value:
+    print(cached_value)
+class Scope:
+    with nullcontext(1) as class_context:
+        print(class_context)
+def locals_only():
+    with nullcontext(1) as local_context:
+        print(local_context)
+    try:
+        pass
+    except ValueError as local_exception:
+        print(local_exception)
+    if (local_walrus := 1):
+        print(local_walrus)
+    match []:
+        case [local_capture]:
+            print(local_capture)
+async def async_locals():
+    async with unknown_context() as local_async:
+        print(local_async)
+obj = unknown_object()
+with nullcontext(1) as obj.attribute:
+    pass
+with nullcontext(1) as obj[0]:
+    pass
+"#;
+        std::fs::write(dir.path().join("bindings.py"), fixture)?;
+        // Keep parser recovery separate from valid binding coverage.
+        std::fs::write(dir.path().join("invalid.py"), "*FIRST = [1, 2, 3]\n")?;
+        std::fs::write(dir.path().join("environment.json"), "[]")?;
+        std::fs::write(
+            dir.path().join("pyrightconfig.json"),
+            r#"{"pythonVersion":"3.10"}"#,
+        )?;
+        let run = || -> Result<scip::types::Index> {
+            let output = hidden_tokio_command(which::which("node")?)
+                .as_std_mut()
+                .arg(npm_package_dir(&prefix, "@sourcegraph/scip-python").join("index.js"))
+                .args([
+                    "index",
+                    ".",
+                    "--project-name",
+                    "bindings-repro",
+                    "--project-version",
+                    "1.0",
+                    "--environment",
+                    "environment.json",
+                    "--output",
+                    "index.scip",
+                ])
+                .current_dir(dir.path())
+                .output()?;
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            Ok(scip::types::Index::parse_from_bytes(&std::fs::read(
+                dir.path().join("index.scip"),
+            )?)?)
+        };
+        // Disable only this repair in a disposable package to retain all earlier repairs.
+        std::fs::write(
+            &bundle,
+            source.replace("this.emitBindingMetadata(e,i),", ""),
+        )?;
+        let before_result = run();
+        std::fs::write(&bundle, source)?;
+        let before = before_result?;
+        repair_scip_python_explicit_targets_and_members(&prefix, "@sourcegraph/scip-python")?;
+        let after = run()?;
+        assert_eq!(before.external_symbols, after.external_symbols);
+        assert_eq!(before.documents.len(), after.documents.len());
+        for old in &before.documents {
+            let new = after
+                .documents
+                .iter()
+                .find(|doc| doc.relative_path == old.relative_path)
+                .unwrap();
+            assert_eq!(
+                old.occurrences, new.occurrences,
+                "occurrences changed in {}",
+                old.relative_path
+            );
+            for symbol in &old.symbols {
+                assert!(
+                    new.symbols.contains(symbol),
+                    "existing metadata changed: {}",
+                    symbol.symbol
+                );
+            }
+        }
+        let doc = after
+            .documents
+            .iter()
+            .find(|doc| doc.relative_path == "bindings.py")
+            .unwrap();
+        for name in [
+            "context_value",
+            "with_first",
+            "with_second",
+            "exception_value",
+            "walrus_value",
+            "first_value",
+            "remaining_values",
+            "mapping_value",
+            "mapping_rest",
+            "as_value",
+            "class_value",
+            "cached_value",
+            "class_context",
+        ] {
+            let suffix = format!("{name}.");
+            let definitions: Vec<_> = doc
+                .occurrences
+                .iter()
+                .filter(|occ| occ.symbol.ends_with(&suffix) && occ.symbol_roles & 1 != 0)
+                .collect();
+            assert_eq!(definitions.len(), 1, "definition for {name}");
+            let symbol = &definitions[0].symbol;
+            assert!(!symbol.starts_with("local "));
+            assert_eq!(
+                doc.symbols
+                    .iter()
+                    .filter(|info| &info.symbol == symbol)
+                    .count(),
+                1,
+                "missing or duplicate metadata for {name}"
+            );
+            assert!(
+                doc.occurrences
+                    .iter()
+                    .any(|occ| &occ.symbol == symbol && occ.symbol_roles & 1 == 0),
+                "reference for {name}"
+            );
+        }
+        let old = before
+            .documents
+            .iter()
+            .find(|doc| doc.relative_path == "bindings.py")
+            .unwrap();
+        assert_eq!(doc.symbols.len() - old.symbols.len(), 13);
+        assert!(
+            doc.occurrences
+                .iter()
+                .filter(|occ| occ.symbol.starts_with("local ") && occ.symbol_roles & 1 != 0)
+                .count()
+                >= 5,
+            "local binding controls were not emitted"
+        );
+        for info in doc
+            .symbols
+            .iter()
+            .filter(|info| !old.symbols.contains(info))
+        {
+            assert!(!info.symbol.starts_with("local "), "new local metadata");
+            assert!(
+                !info.symbol.ends_with("attribute."),
+                "new attribute metadata"
+            );
+        }
+        let invalid = after
+            .documents
+            .iter()
+            .find(|doc| doc.relative_path == "invalid.py")
+            .unwrap();
+        let definition = invalid
+            .occurrences
+            .iter()
+            .find(|occ| occ.symbol.ends_with("FIRST.") && occ.symbol_roles & 1 != 0)
+            .unwrap();
+        assert!(
+            !invalid
+                .symbols
+                .iter()
+                .chain(&after.external_symbols)
+                .any(|info| info.symbol == definition.symbol),
+            "invalid recovery fixture must remain unresolved"
+        );
+        assert!(!repair_scip_python_explicit_targets_and_members(
+            &prefix,
+            "@sourcegraph/scip-python"
+        )?);
+        // The upstream helper marks an identity seen even when it finds no docs.
+        // Simulate that outcome at this call site and verify actual raw records.
+        let repaired = std::fs::read_to_string(&bundle)?;
+        std::fs::write(
+            &bundle,
+            repaired.replace(
+                "this.emitSymbolInformationOnce(e,n);this.document.symbols.some",
+                "this.symbolInformationForNode.add(n.value);this.document.symbols.some",
+            ),
+        )?;
+        let undocumented_result = run();
+        std::fs::write(&bundle, repaired)?;
+        let undocumented = undocumented_result?;
+        let fallback = undocumented
+            .documents
+            .iter()
+            .find(|doc| doc.relative_path == "bindings.py")
+            .unwrap();
+        assert_eq!(doc.occurrences, fallback.occurrences);
+        assert_eq!(doc.symbols.len(), fallback.symbols.len());
+        for info in doc
+            .symbols
+            .iter()
+            .filter(|info| !old.symbols.contains(info))
+        {
+            let records: Vec<_> = fallback
+                .symbols
+                .iter()
+                .filter(|other| other.symbol == info.symbol)
+                .collect();
+            assert_eq!(records.len(), 1);
+            assert!(records[0].documentation.is_empty());
+        }
+        Ok(())
+    }
+
     /// Uses a disposable npm prefix because this exercises the real bundle repair.
     #[test]
     #[ignore = "requires Node, Python and SCIP_IO_TEST_PYTHON_NPM_PREFIX with scip-python 0.6.6"]
@@ -1894,7 +2197,7 @@ mod tests {
         std::fs::create_dir_all(dir.path().join(".github/workflows"))?;
         std::fs::write(
             dir.path().join(".github/workflows/tool.py"),
-            "def hidden(): pass\nhidden()\nvalue: int = 1\nprint(value)\nclass Adapter:\n    __slots__ = ('array', 'indexer_cls')\n    def read(self, key):\n        return self.array[self.indexer_cls(key)]\nclass Child(Adapter):\n    def read(self, key):\n        return self.indexer_cls(key)\n",
+            "def hidden(): pass\nhidden()\nvalue: int = 1\nprint(value)\nclass Adapter:\n    __slots__ = ('array', 'indexer_cls')\n    def read(self, key):\n        return self.array[self.indexer_cls(key)]\nclass Child(Adapter):\n    def read(self, key):\n        return self.indexer_cls(key)\ndef make_dataset(obj):\n    return Dataset(obj)\nclass Dataset(Adapter):\n    \"Dataset documentation.\"\n    pass\nDataset(None)\nPOLICY_OVERRIDE: int = 1\nFILE_CACHE: dict\nREF_COUNTS: dict = {}\nPOLICY_OVERRIDE = 2\nfirst, (second, *rest) = (1, (2, 3, 4))\n[first, third] = (5, 6)\nAdapter.array = 1\nREF_COUNTS[0] = 1\nprint(POLICY_OVERRIDE, FILE_CACHE, REF_COUNTS, first, second, rest, third)\nPOLICY_OVERRIDE: int = 3\nfor ax in [1]:\n    print(ax)\nfor obj, (cls, *docref) in [(1, (2, 3))]:\n    print(obj, cls, docref)\nelse:\n    print(obj)\ndef local_bindings():\n    local_annotation: int = 1\n    local_first, local_second = (1, 2)\n    for local_loop in [1]:\n        print(local_loop)\n    return local_annotation, local_first, local_second\n_, ignored_peer = (1, 2)\nfor _ in [1]:\n    pass\nfor int in [1]:\n    print(int)\n",
         )?;
         std::fs::write(dir.path().join("environment.json"), "[]")?;
         let output = hidden_tokio_command(which::which("node")?)
@@ -1950,6 +2253,148 @@ mod tests {
                 occurrence.symbol
             );
         }
+        // Match visitName's ignored `_` behavior instead of creating orphan info.
+        assert!(
+            !index.documents[0]
+                .symbols
+                .iter()
+                .any(|info| info.symbol.ends_with("/_."))
+        );
+        assert!(
+            !index.documents[0]
+                .occurrences
+                .iter()
+                .any(|occ| occ.symbol.ends_with("/_."))
+        );
+        // Binding a builtin name intentionally corrects its upstream builtin target.
+        // Definition and read retain their source ranges and share the variable ID.
+        let shadow = index.documents[0]
+            .symbols
+            .iter()
+            .filter(|info| info.symbol.ends_with("/int."))
+            .collect::<Vec<_>>();
+        assert_eq!(shadow.len(), 1);
+        for (range, definition) in [(vec![42, 4, 7], true), (vec![43, 10, 13], false)] {
+            let occ = index.documents[0]
+                .occurrences
+                .iter()
+                .find(|occ| occ.range == range)
+                .unwrap();
+            assert_eq!(occ.symbol, shadow[0].symbol);
+            assert_eq!(occ.symbol_roles & 1 != 0, definition);
+        }
+        // Annotation and destructuring definitions must own one metadata record.
+        for name in [
+            "POLICY_OVERRIDE",
+            "FILE_CACHE",
+            "REF_COUNTS",
+            "first",
+            "second",
+            "rest",
+            "third",
+        ] {
+            let suffix = format!("/{name}.");
+            let records: Vec<_> = index.documents[0]
+                .symbols
+                .iter()
+                .filter(|symbol| symbol.symbol.ends_with(&suffix))
+                .collect();
+            assert_eq!(records.len(), 1, "missing or duplicate metadata for {name}");
+            assert!(
+                index.documents[0]
+                    .occurrences
+                    .iter()
+                    .any(|occ| occ.symbol == records[0].symbol
+                        && occ.symbol_roles & 1 == 0
+                        && occ.range.first() == Some(&25)),
+                "missing reference for {name}"
+            );
+            assert!(
+                !records[0].documentation.is_empty(),
+                "missing documentation for {name}"
+            );
+            assert!(
+                index.documents[0]
+                    .occurrences
+                    .iter()
+                    .any(|occ| occ.symbol == records[0].symbol && occ.symbol_roles & 1 != 0)
+            );
+        }
+        assert!(
+            !index.documents[0]
+                .symbols
+                .iter()
+                .any(|symbol| symbol.symbol.ends_with("/array.")
+                    || symbol.symbol.ends_with("/REF_COUNTS.REF_COUNTS."))
+        );
+        for name in ["ax", "obj", "cls", "docref"] {
+            let suffix = format!("/{name}.");
+            let records: Vec<_> = index.documents[0]
+                .symbols
+                .iter()
+                .filter(|symbol| symbol.symbol.ends_with(&suffix))
+                .collect();
+            assert_eq!(
+                records.len(),
+                1,
+                "missing or duplicate loop metadata for {name}"
+            );
+            for role in [0, 1] {
+                assert!(
+                    index.documents[0]
+                        .occurrences
+                        .iter()
+                        .any(|occ| occ.symbol == records[0].symbol && occ.symbol_roles & 1 == role)
+                );
+            }
+        }
+        // New coverage is for globally addressable definitions only; the original
+        // simple assignment visitor retains its existing local behavior.
+        for line in [34, 35, 36] {
+            for occ in index.documents[0]
+                .occurrences
+                .iter()
+                .filter(|occ| occ.range.first() == Some(&line) && occ.symbol.starts_with("local "))
+            {
+                assert!(
+                    !index.documents[0]
+                        .symbols
+                        .iter()
+                        .any(|symbol| symbol.symbol == occ.symbol),
+                    "new local metadata at line {line}"
+                );
+            }
+        }
+        // The earlier factory reference must not suppress class metadata.
+        let dataset: Vec<_> = index.documents[0]
+            .symbols
+            .iter()
+            .filter(|symbol| symbol.symbol.ends_with("/Dataset#"))
+            .collect();
+        assert_eq!(
+            dataset.len(),
+            1,
+            "forward-referenced class metadata missing or duplicated"
+        );
+        assert!(
+            dataset[0]
+                .documentation
+                .iter()
+                .any(|doc| doc.contains("Dataset documentation."))
+        );
+        assert!(
+            dataset[0].relationships.iter().any(
+                |relation| relation.symbol.ends_with("/Adapter#") && relation.is_implementation
+            )
+        );
+        assert!(
+            index.documents[0]
+                .occurrences
+                .iter()
+                .any(|occ| occ.symbol == dataset[0].symbol
+                    && occ.symbol_roles & 1 != 0
+                    && !occ.enclosing_range.is_empty())
+        );
         assert!(!repair_scip_python_explicit_targets_and_members(
             &prefix,
             "@sourcegraph/scip-python"
