@@ -263,6 +263,9 @@ Assignment-target repair also corrects builtin-shadowing identities: for example
 `int`, retaining their source ranges. Destructuring and loop targets named `_`
 remain ignored, matching the emitter's name visitor. Local identifiers,
 attribute targets, and subscript targets keep their existing behavior.
+Proven nonlocal member declarations receive metadata in their defining document,
+including when a cross-file reference caches the member identity first. Ordinary
+attribute reads and unrelated writes do not gain definition occurrences.
 The invalid standalone starred assignment (`*FIRST = [1, 2, 3]`) remains a separate
 parser-recovery case with unresolved metadata; this repair does not change
 qualification gates or make that fixture complete.

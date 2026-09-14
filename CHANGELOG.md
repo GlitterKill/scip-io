@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Emit Python member metadata in its defining document when cross-file references
+  cache the identity first. Preserve raw occurrences and existing metadata, and
+  cover both file orders, same-file reads, locals, and unrelated attribute writes.
+
 ## [0.2.5] - 2026-09-13
 
 ### Fixed

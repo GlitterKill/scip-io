@@ -1119,6 +1119,14 @@ fn repair_scip_python_explicit_targets_and_members(
             "return this.emitDeclaration(e,i)}rawGetLsifSymbol(e){",
             r#"const s=this.emitDeclaration(e,i);return this.emitBindingMetadata(e,i),s}emitBindingMetadata(e,t){if(1!==t.type||!t.node||t.node.id!==e.id)return;let i=e;for(;i.parent&&[31,52,56].includes(i.parent.nodeType);)i=i.parent;const s=i.parent;if(!s||![4,25,59,66,69,72].includes(s.nodeType))return;const n=this.rawGetLsifSymbol(e);if(!n||n.isLocal()||this.document.symbols.some(e=>e.symbol===n.value))return;this.emitSymbolInformationOnce(e,n);this.document.symbols.some(e=>e.symbol===n.value)||this.document.symbols.push(new h.scip.SymbolInformation({symbol:n.value}))}rawGetLsifSymbol(e){"#,
         ),
+        // Member definitions also use visitName. Pyright's declaration flag and
+        // the existing node-identity check exclude ordinary reads/attribute writes.
+        // Emit into the current owner document even if another visitor cached the
+        // identity first; each document has its own metadata deduplication set.
+        (
+            "if(!s||![4,25,59,66,69,72].includes(s.nodeType))return;",
+            "if(!s||!([4,25,59,66,69,72].includes(s.nodeType)||(35===s.nodeType&&t.isDefinedByMemberAccess&&s.memberName===e)))return;",
+        ),
     ];
     let mut changed = false;
     for (broken, fixed) in repairs {
@@ -1914,6 +1922,214 @@ mod tests {
             !repair_scip_python_wildcard_symbol_cache(&prefix_dir, "@sourcegraph/scip-python")
                 .unwrap()
         );
+    }
+
+    /// Member metadata must be present in its defining document, regardless of file order.
+    #[test]
+    #[ignore = "requires Node, Python and SCIP_IO_TEST_PYTHON_NPM_PREFIX with scip-python 0.6.6"]
+    fn repaired_python_emits_member_metadata_in_owner() -> Result<()> {
+        use protobuf::Message;
+
+        let _guard = PYTHON_EMITTER_TEST_LOCK.lock().unwrap();
+        let prefix = PathBuf::from(std::env::var("SCIP_IO_TEST_PYTHON_NPM_PREFIX")?);
+        let entry = crate::indexer::registry::REGISTRY
+            .all()
+            .iter()
+            .find(|entry| entry.indexer_name == "scip-python")
+            .unwrap();
+        apply_npm_compatibility_repairs(entry, &prefix, "@sourcegraph/scip-python")?;
+        let bundle =
+            npm_package_dir(&prefix, "@sourcegraph/scip-python").join("dist/scip-python.js");
+        let repaired = std::fs::read_to_string(&bundle)?;
+        for (owner, consumer) in [("a_owner", "z_consumer"), ("z_owner", "a_consumer")] {
+            let dir = tempfile::tempdir()?;
+            std::fs::write(
+                dir.path().join(format!("{owner}.py")),
+                r#"class Response:
+    def earlier(self):
+        return self.cached
+    def __init__(self):
+        self.value = 1
+        "Value documentation."
+        self.cached = 2
+        self.read_here = 3
+        local_value = 4
+        unknown.attribute = 5
+    def read(self):
+        return self.read_here
+"#,
+            )?;
+            std::fs::write(
+                dir.path().join(format!("{consumer}.py")),
+                format!(
+                    "from {owner} import Response\nr = Response()\nprint(r.value, r.cached, r.read_here)\nr.value = 9\nunknown.attribute = 10\n"
+                ),
+            )?;
+            std::fs::write(dir.path().join("environment.json"), "[]")?;
+            // Explicit include order exercises both traversal orders; assert it below.
+            std::fs::write(
+                dir.path().join("pyrightconfig.json"),
+                format!(
+                    "{{\"include\":[\"a_{}.py\",\"z_{}.py\"]}}",
+                    if owner.starts_with('a') {
+                        "owner"
+                    } else {
+                        "consumer"
+                    },
+                    if owner.starts_with('z') {
+                        "owner"
+                    } else {
+                        "consumer"
+                    }
+                ),
+            )?;
+            let run = || -> Result<scip::types::Index> {
+                let output = hidden_tokio_command(which::which("node")?)
+                    .as_std_mut()
+                    .arg(npm_package_dir(&prefix, "@sourcegraph/scip-python").join("index.js"))
+                    .args([
+                        "index",
+                        ".",
+                        "--project-name",
+                        "member-repro",
+                        "--project-version",
+                        "1",
+                        "--environment",
+                        "environment.json",
+                        "--output",
+                        "index.scip",
+                    ])
+                    .current_dir(dir.path())
+                    .output()?;
+                anyhow::ensure!(
+                    output.status.success(),
+                    "{}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                Ok(scip::types::Index::parse_from_bytes(&std::fs::read(
+                    dir.path().join("index.scip"),
+                )?)?)
+            };
+            std::fs::write(
+                &bundle,
+                repaired.replace(
+                    "35===s.nodeType&&t.isDefinedByMemberAccess&&s.memberName===e",
+                    "false",
+                ),
+            )?;
+            let before_result = run();
+            std::fs::write(&bundle, &repaired)?;
+            let before = before_result?;
+            let after = run()?;
+            if owner.starts_with('z') {
+                let old_owner = before
+                    .documents
+                    .iter()
+                    .find(|doc| doc.relative_path == format!("{owner}.py"))
+                    .unwrap();
+                assert!(
+                    !old_owner
+                        .symbols
+                        .iter()
+                        .any(|info| info.symbol.ends_with("/Response#value.")),
+                    "baseline must reproduce missing owner metadata"
+                );
+                assert!(
+                    before
+                        .documents
+                        .iter()
+                        .filter(|doc| doc.relative_path != old_owner.relative_path)
+                        .any(|doc| doc
+                            .symbols
+                            .iter()
+                            .any(|info| info.symbol.ends_with("/Response#value."))),
+                    "baseline must retain metadata in the reference document"
+                );
+            }
+            assert_eq!(after.documents.len(), 2);
+            assert!(
+                after.documents[0].relative_path.starts_with("a_"),
+                "unexpected file order"
+            );
+            assert_eq!(before.external_symbols, after.external_symbols);
+            for old in &before.documents {
+                let new = after
+                    .documents
+                    .iter()
+                    .find(|doc| doc.relative_path == old.relative_path)
+                    .unwrap();
+                assert_eq!(
+                    old.occurrences, new.occurrences,
+                    "occurrences changed in {}",
+                    old.relative_path
+                );
+                for info in &old.symbols {
+                    assert!(
+                        new.symbols.contains(info),
+                        "existing metadata changed for {}",
+                        info.symbol
+                    );
+                }
+                if old.relative_path == format!("{consumer}.py") {
+                    assert_eq!(old.symbols, new.symbols, "new consumer metadata");
+                }
+            }
+            let doc = after
+                .documents
+                .iter()
+                .find(|doc| doc.relative_path == format!("{owner}.py"))
+                .unwrap();
+            for field in ["value", "cached", "read_here"] {
+                let suffix = format!("/Response#{field}.");
+                let definitions: Vec<_> = doc
+                    .occurrences
+                    .iter()
+                    .filter(|occ| occ.symbol.ends_with(&suffix) && occ.symbol_roles & 1 != 0)
+                    .collect();
+                assert_eq!(definitions.len(), 1, "definition for {field}");
+                let records: Vec<_> = doc
+                    .symbols
+                    .iter()
+                    .filter(|info| info.symbol == definitions[0].symbol)
+                    .collect();
+                assert_eq!(
+                    records.len(),
+                    1,
+                    "missing or duplicate owner metadata for {field} ({owner})"
+                );
+                assert!(
+                    !records[0].documentation.is_empty(),
+                    "missing documentation for {field}"
+                );
+            }
+            let old = before
+                .documents
+                .iter()
+                .find(|old| old.relative_path == doc.relative_path)
+                .unwrap();
+            for info in doc
+                .symbols
+                .iter()
+                .filter(|info| !old.symbols.contains(info))
+            {
+                assert!(
+                    [
+                        "/Response#value.",
+                        "/Response#cached.",
+                        "/Response#read_here."
+                    ]
+                    .iter()
+                    .any(|suffix| info.symbol.ends_with(suffix)),
+                    "unexpected new metadata: {}",
+                    info.symbol
+                );
+            }
+        }
+        assert!(!repair_scip_python_explicit_targets_and_members(
+            &prefix,
+            "@sourcegraph/scip-python"
+        )?);
+        Ok(())
     }
 
     /// Compare raw occurrences before/after repair; emitter success alone is insufficient.
